@@ -313,7 +313,7 @@ static String wifiPage(ModuleConfig& cfg) {
   h += "' placeholder='site wifi password'>";
   h += "<button type='submit'>Save &amp; Connect</button>";
   h += "</form>";
-  h += R"(
+  h += R"JS(
 <script>
 function doScan(){
   let btn=document.getElementById('scanBtn');
@@ -325,16 +325,17 @@ function doScan(){
     let nets = d.networks || [];
     if(nets.length===0){ box.innerHTML='<p class="small">No networks found. Try again.</p>'; return; }
     let s = '<div class="card">';
-    nets.forEach(n=>{
+    nets.forEach(function(n, idx){
       let bars = n.rssi>-60?'####':n.rssi>-70?'###.':n.rssi>-80?'##..':'#...';
       let lock = n.secure ? '&#128274;' : '';
       s += '<div class="row" style="justify-content:space-between;padding:4px 0;border-bottom:1px solid #334;cursor:pointer" '+
-           'onclick="pickNet(\''+n.ssid.replace(/'/g,"\\'")+'\')">'+
+           'data-ssid="'+idx+'" onclick="pickNet(scanNets['+idx+'])">'+
            '<span>'+lock+' '+n.ssid+'</span><span class="small">'+bars+' '+n.rssi+'dBm</span></div>';
     });
     s += '</div>';
+    window.scanNets = nets.map(function(n){ return n.ssid; });
     box.innerHTML = s;
-  }).catch(()=>{
+  }).catch(function(){
     btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks';
     box.innerHTML='<p class="small">Scan failed. Try again.</p>';
   });
@@ -344,7 +345,7 @@ function pickNet(ssid){
   document.getElementById('wifiPass').value = '';
   document.getElementById('wifiPass').focus();
 }
-</script>)";
+</script>)JS";
   h += "<p class='small'>Saving reboots the unit and attempts to join this network. "
        "If it can't connect within about a minute, it automatically falls back to "
        "this setup AP so you can try again — no need to reflash or recompile anything.</p>";
