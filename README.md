@@ -70,7 +70,9 @@ Board: **ESP32 Arduino core** (espressif32) — install via Boards Manager.
    none is found/connectable, it creates a setup AP:
    **RigModule-XXXXXX** / password: `modulesetup`
 3. Connect to it, browse to **http://192.168.4.1/wifi** and set your network
-   (only needed for non-standard networks).
+   (only needed for non-standard networks). Tap **🔍 Scan for Networks** to
+   list nearby SSIDs with signal strength — tap one to fill it in, then just
+   type the password.
 4. Go to **⚙ Config** to set a friendly Module Name, Pi host (blank = mDNS
    auto-discovery), and X-Rig-Token (must match Pi's `rig_token`).
 5. Go to **📐 Channels** to configure each of the 8 analog channels you're
@@ -124,6 +126,7 @@ extra processing.
 |--------|------|--------------|
 | GET | `/api/status` | Full JSON status (same as Pi payload + system info) |
 | GET | `/api/channel-raw` | Raw Modbus values + mA for all 8 channels |
+| GET | `/api/wifi/scan` | Scan nearby WiFi networks (SSID, RSSI, secure) for the /wifi page |
 | POST | `/api/config` | Save config fields (form or JSON) |
 | POST | `/api/cal/zero?ch=N` | Capture zero cal for channel N |
 | POST | `/api/cal/max?ch=N` | Capture max cal for channel N |

@@ -446,7 +446,10 @@ static bool tryAutoConnectRigNetwork() {
 // "modulesetup", serves the /wifi config page at 192.168.4.1.
 // =============================================================================
 void startSetupAP() {
-  WiFi.mode(WIFI_AP);
+  // AP_STA (not plain AP) so the /wifi page can still scan for networks
+  // while the setup AP is broadcasting — STA stays idle/unconnected,
+  // it's just enough for WiFi.scanNetworks() to work.
+  WiFi.mode(WIFI_AP_STA);
   uint8_t mac[6];
   esp_efuse_mac_get_default(mac);
   char suffix[7];

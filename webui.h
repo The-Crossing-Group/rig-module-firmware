@@ -301,15 +301,50 @@ static String wifiPage(ModuleConfig& cfg) {
     h += "<div class='card'>Connected to: <b>" + cfg.wifiSSID + "</b><br>";
     h += "IP: " + WiFi.localIP().toString() + "  RSSI: " + String(WiFi.RSSI()) + " dBm</div>";
   }
+  h += "<div class='row' style='margin-bottom:10px'>";
+  h += "<button type='button' onclick='doScan()' id='scanBtn'>&#128269; Scan for Networks</button></div>";
+  h += "<div id='scanResults'></div>";
   h += "<form method='POST' action='/api/wifi'>";
-  h += "<label>Network Name (SSID)</label><input name='wifiSSID' value='";
+  h += "<label>Network Name (SSID)</label><input name='wifiSSID' id='wifiSSID' value='";
   h += cfg.wifiSSID;
   h += "' placeholder='site wifi network name' required>";
-  h += "<label>Password</label><input name='wifiPass' type='password' value='";
+  h += "<label>Password</label><input name='wifiPass' id='wifiPass' type='password' value='";
   h += cfg.wifiPass;
   h += "' placeholder='site wifi password'>";
   h += "<button type='submit'>Save &amp; Connect</button>";
   h += "</form>";
+  h += R"(
+<script>
+function doScan(){
+  let btn=document.getElementById('scanBtn');
+  let box=document.getElementById('scanResults');
+  btn.disabled=true; btn.textContent='Scanning...';
+  box.innerHTML='<p class="small">Scanning (a few seconds)...</p>';
+  fetch('/api/wifi/scan').then(r=>r.json()).then(d=>{
+    btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks';
+    let nets = d.networks || [];
+    if(nets.length===0){ box.innerHTML='<p class="small">No networks found. Try again.</p>'; return; }
+    let s = '<div class="card">';
+    nets.forEach(n=>{
+      let bars = n.rssi>-60?'####':n.rssi>-70?'###.':n.rssi>-80?'##..':'#...';
+      let lock = n.secure ? '&#128274;' : '';
+      s += '<div class="row" style="justify-content:space-between;padding:4px 0;border-bottom:1px solid #334;cursor:pointer" '+
+           'onclick="pickNet(\''+n.ssid.replace(/'/g,"\\'")+'\')">'+
+           '<span>'+lock+' '+n.ssid+'</span><span class="small">'+bars+' '+n.rssi+'dBm</span></div>';
+    });
+    s += '</div>';
+    box.innerHTML = s;
+  }).catch(()=>{
+    btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks';
+    box.innerHTML='<p class="small">Scan failed. Try again.</p>';
+  });
+}
+function pickNet(ssid){
+  document.getElementById('wifiSSID').value = ssid;
+  document.getElementById('wifiPass').value = '';
+  document.getElementById('wifiPass').focus();
+}
+</script>)";
   h += "<p class='small'>Saving reboots the unit and attempts to join this network. "
        "If it can't connect within about a minute, it automatically falls back to "
        "this setup AP so you can try again — no need to reflash or recompile anything.</p>";
@@ -402,6 +437,62 @@ static void handleConfig() {
     _srv->sendHeader("Location", "/");
     _srv->send(302, "text/plain", "");
   }
+}
+
+// Scans for nearby WiFi networks and returns them for the /wifi page's
+// "Scan for Networks" button. Works whether we're currently sitting in
+// the setup AP (WIFI_AP_STA — STA radio idle but scannable) or already
+// connected to a site network (WIFI_STA) — a passive scan while
+// WL_CONNECTED does not drop the existing link (only scanning while
+// mid-connect, i.e. between WiFi.begin() and WL_CONNECTED, would).
+static void handleWifiScan() {
+  int found = WiFi.scanNetworks();
+  DynamicJsonDocument doc(2048);
+  JsonArray arr = doc.createNestedArray("networks");
+  if (found > 0) {
+    // De-dupe by SSID (mesh/multi-AP networks show once per radio), keep strongest
+    const int MAXN = 32;
+    String seenSsid[MAXN];
+    int seenRssi[MAXN];
+    bool seenSecure[MAXN];
+    int nSeen = 0;
+    for (int i = 0; i < found; i++) {
+      String ssid = WiFi.SSID(i);
+      if (ssid.isEmpty()) continue;
+      int rssi = WiFi.RSSI(i);
+      bool secure = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+      int existing = -1;
+      for (int j = 0; j < nSeen; j++) if (seenSsid[j] == ssid) { existing = j; break; }
+      if (existing >= 0) {
+        if (rssi > seenRssi[existing]) seenRssi[existing] = rssi;
+      } else if (nSeen < MAXN) {
+        seenSsid[nSeen] = ssid;
+        seenRssi[nSeen] = rssi;
+        seenSecure[nSeen] = secure;
+        nSeen++;
+      }
+    }
+    // sort strongest first
+    for (int i = 1; i < nSeen; i++) {
+      String kS = seenSsid[i]; int kR = seenRssi[i]; bool kSec = seenSecure[i];
+      int j = i - 1;
+      while (j >= 0 && seenRssi[j] < kR) {
+        seenSsid[j+1] = seenSsid[j]; seenRssi[j+1] = seenRssi[j]; seenSecure[j+1] = seenSecure[j];
+        j--;
+      }
+      seenSsid[j+1] = kS; seenRssi[j+1] = kR; seenSecure[j+1] = kSec;
+    }
+    for (int i = 0; i < nSeen; i++) {
+      JsonObject o = arr.createNestedObject();
+      o["ssid"]   = seenSsid[i];
+      o["rssi"]   = seenRssi[i];
+      o["secure"] = seenSecure[i];
+    }
+  }
+  WiFi.scanDelete();
+  String out;
+  serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
 }
 
 // Dedicated WiFi setup handler (from /wifi page). Always reboots on save
@@ -503,6 +594,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   // GET APIs
   srv.on("/api/status",      HTTP_GET,  handleApiStatus);
   srv.on("/api/channel-raw", HTTP_GET,  handleChannelRaw);
+  srv.on("/api/wifi/scan",   HTTP_GET,  handleWifiScan);
   srv.on("/api/ota",         HTTP_GET,  handleOTA);
 
   // POST APIs
