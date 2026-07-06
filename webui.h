@@ -28,7 +28,7 @@ extern SemaphoreHandle_t stateMutex;
 extern NTPClient ntpClient;
 extern bool apModeActive;
 extern String apSSID;
-// FW_VERSION is a #define in rig_module.ino — no extern needed
+// FW_VERSION is a #define in rig-module-firmware.ino — no extern needed
 
 // Globals set in setupWebRoutes, used by handlers
 static WebServer*    _srv    = nullptr;

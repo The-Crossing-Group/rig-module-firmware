@@ -28,7 +28,7 @@ without recompiling.
 
 | File | Purpose |
 |------|---------|
-| `rig_module.ino` | Main sketch — WiFi, Pi posting, buffer, OTA |
+| `rig-module-firmware.ino` | Main sketch — WiFi, Pi posting, buffer, OTA |
 | `config.h` | Config structs, NVS load/save |
 | `modbus.h` | Manual Modbus RTU over HardwareSerial (RS485) |
 | `scaling.h` | Raw → mA → engineering value per channel (generic, no kind-specific rounding) |

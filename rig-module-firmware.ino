@@ -1,5 +1,5 @@
 // =============================================================================
-// rig_module.ino — Generic Rig Module Firmware
+// rig-module-firmware.ino — Generic Rig Module Firmware
 // LilyGo T-CAN485 / XY-32 CAN+RS485 (ESP32)
 // Reads Waveshare Modbus RTU Analog Input 8CH (B) via RS485
 // Reports RAW ENGINEERING VALUES per channel — no tank/mud-specific logic.
