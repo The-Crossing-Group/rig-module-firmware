@@ -67,7 +67,7 @@ static const char NAV[] PROGMEM = R"(
 </style>
 <div class='nav'>
   <a href='/'>&#9881; Config</a>
-  <a href='/calibration'>&#128208; Channels</a>
+  <a href='/channels'>&#128208; Channels</a>
   <a href='/live'>&#128202; Live</a>
   <a href='/system'>&#128295; System</a>
   <a href='/wifi'>&#128246; WiFi</a>
@@ -416,7 +416,7 @@ static void handleConfig() {
   applyParam("wifiSSID", [&](String v){ if(v!=_cfg->wifiSSID){_cfg->wifiSSID=v;wifiChanged=true;} });
   applyParam("wifiPass", [](String v){ _cfg->wifiPass = v; });
 
-  // Each of the 8 channel cards on /cal is its OWN <form>, POSTed
+  // Each of the 8 channel cards on /channels is its OWN <form>, POSTed
   // independently — only ONE channel's fields are ever present in a given
   // request (identified by the hidden "ch" field each form carries). This
   // used to set ch[i].enabled = hasArg(chNen) unconditionally for ALL 8
@@ -449,7 +449,11 @@ static void handleConfig() {
     delay(1000);
     ESP.restart();
   } else {
-    _srv->sendHeader("Location", "/");
+    // Redirect back to whichever page the form actually came from, not
+    // always the index — the "ch" hidden field means this save was one of
+    // the per-channel forms on /channels, so send the user back there
+    // instead of bouncing them to / every time.
+    _srv->sendHeader("Location", which >= 0 ? "/channels" : "/");
     _srv->send(302, "text/plain", "");
   }
 }
@@ -601,7 +605,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
 
   // Pages
   srv.on("/",            HTTP_GET,  [](){ _srv->send(200,"text/html",cfgPage(*_cfg)); });
-  srv.on("/calibration", HTTP_GET,  [](){ _srv->send(200,"text/html",calPage(*_cfg)); });
+  srv.on("/channels",    HTTP_GET,  [](){ _srv->send(200,"text/html",calPage(*_cfg)); });
   srv.on("/live",        HTTP_GET,  [](){ _srv->send(200,"text/html",livePage()); });
   srv.on("/system",      HTTP_GET,  [](){ _srv->send(200,"text/html",sysPage(*_cfg)); });
   srv.on("/wifi",        HTTP_GET,  [](){ _srv->send(200,"text/html",wifiPage(*_cfg)); });
