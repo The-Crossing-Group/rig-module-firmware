@@ -368,11 +368,16 @@ static bool tryAutoConnectRigNetwork() {
     return false;
   }
 
-  // Collect rigXXX candidates, sorted strongest-RSSI-first
+  // Collect rigXXX candidates, sorted strongest-RSSI-first.
+  // Skip 5GHz entries (channel > 14) — this ESP32 is 2.4GHz-only, so if a
+  // rig router broadcasts the same SSID on both bands, trying the 5GHz
+  // entry would just waste ~15s failing before falling through.
   int candidates[32];
   int nCandidates = 0;
   for (int i = 0; i < found && nCandidates < 32; i++) {
-    if (isRigSSID(WiFi.SSID(i))) candidates[nCandidates++] = i;
+    if (isRigSSID(WiFi.SSID(i)) && WiFi.channel(i) >= 1 && WiFi.channel(i) <= 14) {
+      candidates[nCandidates++] = i;
+    }
   }
   // simple insertion sort by RSSI descending
   for (int i = 1; i < nCandidates; i++) {
@@ -502,11 +507,21 @@ void connectWifi() {
   } else {
     Serial.printf("[WiFi] Scan found %d network(s):\n", found);
     bool targetFound = false;
+    int targetAuth = -1;
+    int bestRssi = -1000;
     for (int i = 0; i < found; i++) {
       bool isTarget = (WiFi.SSID(i) == cfg.wifiSSID);
-      if (isTarget) {
+      // This ESP32 (T-CAN485 / WROOM-32) is 2.4GHz-only — channels 1-14.
+      // If an AP/mesh broadcasts the same SSID on both 2.4GHz and 5GHz,
+      // the scan returns both as separate entries. Only ever pin to a
+      // 2.4GHz entry, and if there are several (mesh nodes / repeaters),
+      // pick the strongest signal — not just whichever appears last.
+      bool is24GHz = (WiFi.channel(i) >= 1 && WiFi.channel(i) <= 14);
+      if (isTarget && is24GHz && WiFi.RSSI(i) > bestRssi) {
         targetFound = true;
+        bestRssi = WiFi.RSSI(i);
         targetChannel = WiFi.channel(i);
+        targetAuth = WiFi.encryptionType(i);
         memcpy(targetBSSID, WiFi.BSSID(i), 6);
       }
       Serial.printf("[WiFi]   %2d: %-32s  RSSI: %4d dBm  Ch: %2d  Auth: %d  BSSID: %02X:%02X:%02X:%02X:%02X:%02X  %s\n",
@@ -517,13 +532,13 @@ void connectWifi() {
         WiFi.encryptionType(i),
         WiFi.BSSID(i)[0], WiFi.BSSID(i)[1], WiFi.BSSID(i)[2],
         WiFi.BSSID(i)[3], WiFi.BSSID(i)[4], WiFi.BSSID(i)[5],
-        isTarget ? "<-- TARGET" : "");
+        (isTarget && is24GHz) ? "<-- TARGET (2.4GHz)" : (isTarget ? "<-- target (5GHz, unusable on this chip)" : ""));
     }
     if (!targetFound) {
-      Serial.printf("[WiFi] WARNING: \"%s\" not found in scan!\n", cfg.wifiSSID.c_str());
+      Serial.printf("[WiFi] WARNING: \"%s\" not found in scan (or only seen on 5GHz, which this chip can't use)!\n", cfg.wifiSSID.c_str());
     } else {
-      Serial.printf("[WiFi] Target on channel %d, auth type %d (3=WPA2, 4=WPA/WPA2, 8=WPA3)\n",
-        targetChannel, WiFi.encryptionType(0));
+      Serial.printf("[WiFi] Target on channel %d, RSSI %d dBm, auth type %d (3=WPA2, 4=WPA/WPA2, 8=WPA3)\n",
+        targetChannel, bestRssi, targetAuth);
     }
   }
   WiFi.scanDelete();
@@ -545,11 +560,17 @@ void connectWifi() {
     WiFi.mode(WIFI_STA);
     delay(200);
 
-    // Connect — pass BSSID+channel if we found the target in the scan
-    if (targetChannel > 0) {
+    // Connect — pass BSSID+channel if we found the target in the scan.
+    // Safety net: on the last attempt, drop the hint entirely and let the
+    // driver do its own scan/join. Covers cases where our hint was stale
+    // (AP roamed/rebooted between our scan and now) or otherwise bad —
+    // without this, a wrong hint fails identically on every retry.
+    bool useHint = (targetChannel > 0) && (attempt < MAX_ATTEMPTS);
+    if (useHint) {
       Serial.printf("[WiFi]   Using BSSID hint, channel %d\n", targetChannel);
       WiFi.begin(cfg.wifiSSID.c_str(), cfg.wifiPass.c_str(), targetChannel, targetBSSID);
     } else {
+      if (targetChannel > 0) Serial.println("[WiFi]   Last attempt — dropping BSSID/channel hint, letting driver scan+join");
       WiFi.begin(cfg.wifiSSID.c_str(), cfg.wifiPass.c_str());
     }
 
