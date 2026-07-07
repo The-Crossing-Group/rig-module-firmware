@@ -98,6 +98,19 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<label>Module Name</label><input name='moduleName' value='";
   h += cfg.moduleName;
   h += "' placeholder='e.g. Mud Pump Skid, Water Tank 2'>";
+  h += "<label>Module Type</label><input name='moduleType' list='moduleTypeOpts' value='";
+  h += cfg.moduleType;
+  h += "' placeholder='e.g. tank, pump, pressure, drill'>";
+  h += "<datalist id='moduleTypeOpts'>"
+       "<option value='generic'>"
+       "<option value='tank'>"
+       "<option value='pump'>"
+       "<option value='pressure'>"
+       "<option value='drill'>"
+       "</datalist>";
+  h += "<div class='small'>Shown on the rig dashboard's module card. \"tank\" and \"pump\" get their "
+       "own dedicated layout (fill bar / SPM gauge); anything else — including free text like "
+       "\"drill\" — just shows as a plain labeled tile view. Type anything, or pick a suggestion.</div>";
   h += "<label>Description</label><input name='description' value='";
   h += cfg.description;
   h += "'>";
@@ -427,6 +440,7 @@ static void handleConfig() {
   };
 
   applyParam("moduleName",     [](String v){ _cfg->moduleName    = v; });
+  applyParam("moduleType",     [](String v){ _cfg->moduleType    = v.isEmpty() ? "generic" : v; });
   applyParam("description",    [](String v){ _cfg->description   = v; });
   applyParam("modbusSlaveId",  [](String v){ _cfg->modbusSlaveId = v.toInt(); });
   bool baudChanged = false;

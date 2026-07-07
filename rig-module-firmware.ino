@@ -825,7 +825,7 @@ String buildPayload(bool bufferedFlag) {
   DynamicJsonDocument doc(4096);
 
   doc["moduleId"] = cfg.moduleId;   // primary key the Pi uses
-  doc["type"]     = "generic";      // required by Pi's upsert_module(); no tank/mud-specific typing
+  doc["type"]     = cfg.moduleType.isEmpty() ? "generic" : cfg.moduleType;  // configurable on /config
   doc["name"]     = cfg.moduleName.isEmpty() ? cfg.moduleId : cfg.moduleName;  // rig-modules.html card title
   doc["moduleName"] = cfg.moduleName;
   // Report our IP so rig-modules.html can deep-link to the config page

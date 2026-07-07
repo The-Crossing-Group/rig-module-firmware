@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.1.0"
+#define FW_VERSION "rig-module-1.1.1"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -43,6 +43,12 @@ struct ChannelConfig {
 struct ModuleConfig {
   String moduleId       = "";    // built from MAC: MODULE-ABC123
   String moduleName     = "";
+  String moduleType     = "generic";  // free text — sent as payload "type"; rig-modules.html
+                                       // special-cases "tank"/"pump" for richer rendering,
+                                       // anything else (e.g. "pressure", "drill") just shows
+                                       // as a plain badge + generic tile view. Configurable so
+                                       // a module isn't stuck reporting as "generic" once it's
+                                       // deployed on an actual drill.
   String description    = "";
   int    modbusSlaveId  = 1;
   long   modbusBaud     = 9600;  // Waveshare 8AI (B) default; SDSIN clone default is 4800
@@ -78,6 +84,7 @@ void buildModuleId(ModuleConfig& cfg) {
 // Load all config from NVS
 void loadConfig(Preferences& p, ModuleConfig& c) {
   c.moduleName    = p.getString("modName", "");
+  c.moduleType    = p.getString("modType", "generic");
   c.description   = p.getString("desc", "");
   c.modbusSlaveId = p.getInt("mbSlave", 1);
   c.modbusBaud    = p.getLong("mbBaud", 9600);
@@ -108,6 +115,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
 void saveConfig(Preferences& p, ModuleConfig& c) {
   p.begin("rigmod", false);
   p.putString("modName", c.moduleName);
+  p.putString("modType", c.moduleType);
   p.putString("desc", c.description);
   p.putInt("mbSlave", c.modbusSlaveId);
   p.putLong("mbBaud", c.modbusBaud);
