@@ -416,9 +416,23 @@ static void handleConfig() {
   applyParam("wifiSSID", [&](String v){ if(v!=_cfg->wifiSSID){_cfg->wifiSSID=v;wifiChanged=true;} });
   applyParam("wifiPass", [](String v){ _cfg->wifiPass = v; });
 
+  // Each of the 8 channel cards on /cal is its OWN <form>, POSTed
+  // independently — only ONE channel's fields are ever present in a given
+  // request (identified by the hidden "ch" field each form carries). This
+  // used to set ch[i].enabled = hasArg(chNen) unconditionally for ALL 8
+  // channels on every single save, which silently disabled every OTHER
+  // channel because their "chNen" checkbox field is simply absent from
+  // whichever one form was actually submitted (hasArg() correctly returns
+  // false for fields not in this POST at all — same reason "only one
+  // channel enabled at a time" was the visible symptom). Only touch the
+  // channel whose form was actually submitted; the other 7 fields already
+  // used applyParam's hasArg-gate correctly and were never the problem.
+  int which = _srv->hasArg("ch") ? _srv->arg("ch").toInt() : -1;
   for (int i = 0; i < 8; i++) {
     String pre = "ch" + String(i);
-    _cfg->ch[i].enabled = _srv->hasArg((pre+"en").c_str());
+    if (i == which) {
+      _cfg->ch[i].enabled = _srv->hasArg((pre+"en").c_str());
+    }
     applyParam((pre+"nm").c_str(),   [i](String v){ _cfg->ch[i].name  = v; });
     applyParam((pre+"kd").c_str(),   [i](String v){ _cfg->ch[i].kind  = v; });
     applyParam((pre+"ut").c_str(),   [i](String v){ _cfg->ch[i].unit  = v; });
