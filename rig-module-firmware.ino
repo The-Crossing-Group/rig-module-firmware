@@ -328,6 +328,33 @@ void loop() {
 }
 
 // =============================================================================
+// Wait for the STA interface to actually come up after WiFi.mode(WIFI_STA).
+// On ESP32 Arduino core 3.x, rapidly cycling WIFI_OFF -> WIFI_STA (as our
+// retry loop does) can leave WiFi.status() stuck reporting WL_STOPPED (254)
+// even though the mode call itself returned success — the STA_START event
+// that clears WL_STOPPED doesn't always fire before we start polling. If we
+// call WiFi.begin() while still stuck at WL_STOPPED, the connection attempt
+// never gets anywhere and status stays 254 for the whole attempt, which
+// looks identical to a bad password but has nothing to do with it. Give the
+// driver a moment and re-issue the mode call once if it's still stuck.
+// =============================================================================
+static bool ensureStaStarted() {
+  for (int retry = 0; retry < 3; retry++) {
+    WiFi.mode(WIFI_STA);
+    unsigned long start = millis();
+    while (WiFi.status() == WL_STOPPED && (millis() - start) < 2000) {
+      delay(50);
+    }
+    if (WiFi.status() != WL_STOPPED) return true;
+    Serial.printf("[WiFi]   STA still WL_STOPPED after mode(WIFI_STA), retry %d...\n", retry + 1);
+    WiFi.mode(WIFI_OFF);
+    delay(300);
+  }
+  Serial.println("[WiFi]   WARNING: STA stuck at WL_STOPPED after 3 retries — proceeding anyway");
+  return false;
+}
+
+// =============================================================================
 // RIG NETWORK AUTO-DISCOVERY
 // Site routers are always named "rigXXX" (e.g. rig132) with a fixed
 // password. If no WiFi is saved yet, scan for any SSID matching that
@@ -357,7 +384,7 @@ static bool tryAutoConnectRigNetwork() {
   Serial.println("[WiFi] ----------------------------------------");
   Serial.println("[WiFi] No saved network — scanning for rigXXX networks...");
 
-  WiFi.mode(WIFI_STA);
+  ensureStaStarted();
   WiFi.disconnect(true);
   delay(100);
 
@@ -415,7 +442,7 @@ static bool tryAutoConnectRigNetwork() {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     delay(300);
-    WiFi.mode(WIFI_STA);
+    ensureStaStarted();
     delay(200);
     WiFi.begin(ssid.c_str(), RIG_WIFI_PASS, channel, bssid);
 
@@ -493,7 +520,7 @@ void connectWifi() {
   Serial.println("[WiFi] ----------------------------------------");
   Serial.printf("[WiFi] Target SSID: %s\n", cfg.wifiSSID.c_str());
 
-  WiFi.mode(WIFI_STA);
+  ensureStaStarted();
   WiFi.disconnect(true);
   delay(100);
 
@@ -553,11 +580,16 @@ void connectWifi() {
   for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     Serial.printf("[WiFi] Attempt %d/%d — connecting to \"%s\"...\n", attempt, MAX_ATTEMPTS, cfg.wifiSSID.c_str());
 
-    // Full reset before each attempt
+    // Full reset before each attempt. ensureStaStarted() actively confirms
+    // the STA netif actually comes back up (leaves WL_STOPPED) before we
+    // touch WiFi.begin() — on ESP32 core 3.x, cycling OFF->STA repeatedly
+    // like this can otherwise leave status() wedged at WL_STOPPED (254)
+    // for the whole attempt, which looks exactly like a connect failure
+    // but has nothing to do with SSID/password.
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     delay(500);
-    WiFi.mode(WIFI_STA);
+    ensureStaStarted();
     delay(200);
 
     // Connect — pass BSSID+channel if we found the target in the scan.
