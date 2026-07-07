@@ -32,6 +32,7 @@
 #include <NTPClient.h>
 #include <time.h>
 #include <driver/rmt.h>
+#include <esp_log.h>
 #include "config.h"
 #include "modbus.h"
 #include "scaling.h"
@@ -69,8 +70,11 @@ static void ws2812Init() {
   cfg_rmt.tx_config.carrier_en           = false;
   cfg_rmt.tx_config.idle_output_en       = true;
   cfg_rmt.tx_config.idle_level           = RMT_IDLE_LEVEL_LOW;
-  rmt_config(&cfg_rmt);
-  rmt_driver_install(RMT_CHANNEL, 0, 0);
+  esp_err_t e1 = rmt_config(&cfg_rmt);
+  esp_err_t e2 = rmt_driver_install(RMT_CHANNEL, 0, 0);
+  if (e1 != ESP_OK || e2 != ESP_OK) {
+    Serial.printf("[BOOT] WARNING: RMT init failed - rmt_config=0x%x rmt_driver_install=0x%x\n", e1, e2);
+  }
 }
 
 // Send one GRB pixel (WS2812 order is G, R, B)
@@ -190,6 +194,20 @@ String apSSID = "";
 void setup() {
   Serial.begin(115200);
   delay(500); // let serial settle
+
+  // NOTE on getting the real WiFi driver error (not just our own status
+  // polling): the ESP32 Arduino core's internal log_e()/log_w() calls
+  // (e.g. in esp_wifi_init/esp_wifi_start/WiFi.mode()) are gated by
+  // CORE_DEBUG_LEVEL, which is a *compile-time* Arduino IDE build setting
+  // (Tools > Core Debug Level), not something a runtime esp_log_level_set()
+  // call can change — at the default "None" level those log calls compile
+  // down to no-ops entirely, so they're silent no matter what we do here
+  // at runtime. If STA still gets stuck at WL_STOPPED after this build,
+  // set Tools > Core Debug Level to "Verbose" (or at least "Info") in the
+  // Arduino IDE, reflash, and the real esp_wifi_init/esp_wifi_start error
+  // will show up in the serial log automatically.
+  Serial.setDebugOutput(true);
+
   Serial.println("\n\n========================================");
   Serial.println("[BOOT] Rig Module " FW_VERSION);
   Serial.println("[BOOT] Starting up...");
@@ -340,7 +358,9 @@ void loop() {
 // =============================================================================
 static bool ensureStaStarted() {
   for (int retry = 0; retry < 3; retry++) {
-    WiFi.mode(WIFI_STA);
+    bool modeOk = WiFi.mode(WIFI_STA);
+    Serial.printf("[WiFi]   WiFi.mode(WIFI_STA) returned %s, getMode()=%d, freeHeap=%d\n",
+      modeOk ? "true" : "FALSE", (int)WiFi.getMode(), ESP.getFreeHeap());
     unsigned long start = millis();
     while (WiFi.status() == WL_STOPPED && (millis() - start) < 2000) {
       delay(50);
@@ -351,6 +371,10 @@ static bool ensureStaStarted() {
     delay(300);
   }
   Serial.println("[WiFi]   WARNING: STA stuck at WL_STOPPED after 3 retries — proceeding anyway");
+  Serial.println("[WiFi]   NOTE: if no esp_wifi_init/esp_wifi_start error appeared above,");
+  Serial.println("[WiFi]   set Arduino IDE Tools > Core Debug Level to \"Verbose\" (or at");
+  Serial.println("[WiFi]   least \"Error\") and reflash — the real driver error is being");
+  Serial.println("[WiFi]   suppressed by the default \"None\" log level.");
   return false;
 }
 
