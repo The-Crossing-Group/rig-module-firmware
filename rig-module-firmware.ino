@@ -33,6 +33,7 @@
 #include <time.h>
 #include <driver/rmt.h>
 #include <esp_log.h>
+#include <nvs_flash.h>
 #include "config.h"
 #include "modbus.h"
 #include "scaling.h"
@@ -195,17 +196,25 @@ void setup() {
   Serial.begin(115200);
   delay(500); // let serial settle
 
-  // NOTE on getting the real WiFi driver error (not just our own status
-  // polling): the ESP32 Arduino core's internal log_e()/log_w() calls
-  // (e.g. in esp_wifi_init/esp_wifi_start/WiFi.mode()) are gated by
-  // CORE_DEBUG_LEVEL, which is a *compile-time* Arduino IDE build setting
-  // (Tools > Core Debug Level), not something a runtime esp_log_level_set()
-  // call can change — at the default "None" level those log calls compile
-  // down to no-ops entirely, so they're silent no matter what we do here
-  // at runtime. If STA still gets stuck at WL_STOPPED after this build,
-  // set Tools > Core Debug Level to "Verbose" (or at least "Info") in the
-  // Arduino IDE, reflash, and the real esp_wifi_init/esp_wifi_start error
-  // will show up in the serial log automatically.
+  // Two separate logging systems are in play here, and we need both live:
+  //  1) Arduino-core wrapper code (e.g. WiFiGenericClass::mode() in
+  //     WiFiGeneric.cpp) uses log_e()/log_w(), gated at COMPILE TIME by
+  //     the Arduino IDE's Tools > Core Debug Level setting. At "None"
+  //     (the default) those calls compile down to no-ops — no runtime
+  //     call can bring them back. If mode()/scan() failures still show
+  //     no Arduino-side error after this build, Core Debug Level needs
+  //     to be raised (Verbose/Info) in the IDE and reflashed.
+  //  2) The actual precompiled ESP-IDF driver internals (esp_wifi_init,
+  //     esp_wifi_start, phy_init, etc) log through IDF's own tag-based
+  //     esp_log system, which IS controllable at runtime via
+  //     esp_log_level_set() — this is the one that will actually show
+  //     *why* esp_wifi_init/esp_wifi_start fails, so we set it here.
+  esp_log_level_set("wifi", ESP_LOG_VERBOSE);
+  esp_log_level_set("wifi_init", ESP_LOG_VERBOSE);
+  esp_log_level_set("phy_init", ESP_LOG_VERBOSE);
+  esp_log_level_set("phy", ESP_LOG_VERBOSE);
+  esp_log_level_set("system_api", ESP_LOG_VERBOSE);
+  esp_log_level_set("nvs", ESP_LOG_VERBOSE);
   Serial.setDebugOutput(true);
 
   Serial.println("\n\n========================================");
@@ -356,6 +365,7 @@ void loop() {
 // looks identical to a bad password but has nothing to do with it. Give the
 // driver a moment and re-issue the mode call once if it's still stuck.
 // =============================================================================
+static bool _nvsEraseAttempted = false;
 static bool ensureStaStarted() {
   for (int retry = 0; retry < 3; retry++) {
     bool modeOk = WiFi.mode(WIFI_STA);
@@ -370,11 +380,43 @@ static bool ensureStaStarted() {
     WiFi.mode(WIFI_OFF);
     delay(300);
   }
-  Serial.println("[WiFi]   WARNING: STA stuck at WL_STOPPED after 3 retries — proceeding anyway");
-  Serial.println("[WiFi]   NOTE: if no esp_wifi_init/esp_wifi_start error appeared above,");
-  Serial.println("[WiFi]   set Arduino IDE Tools > Core Debug Level to \"Verbose\" (or at");
-  Serial.println("[WiFi]   least \"Error\") and reflash — the real driver error is being");
-  Serial.println("[WiFi]   suppressed by the default \"None\" log level.");
+  Serial.println("[WiFi]   WARNING: STA stuck at WL_STOPPED after 3 retries.");
+
+  // Self-heal attempt: WiFi.mode() failing outright from the very first
+  // boot call (not just racing an event) with scanNetworks() returning -2
+  // is the classic fingerprint of a corrupted WiFi calibration/config blob
+  // in the NVS partition — very common right after flashing new firmware
+  // onto a board that ran something else before. Erase and reinit NVS
+  // once, then retry the whole mode sequence before giving up.
+  //
+  // IMPORTANT: nvs_flash_erase() wipes the ENTIRE default NVS partition,
+  // not just the WiFi driver's internal blob — that's the same partition
+  // our own "rigmod" Preferences namespace (saved SSID/pass/channel config)
+  // lives in. cfg is just an in-memory struct at this point (already
+  // loaded in setup() before connectWifi() ran), so it's untouched by the
+  // erase — we immediately re-save it via saveConfig() so the module's
+  // saved WiFi credentials and channel config survive into the freshly
+  // wiped partition instead of being silently lost on next reboot.
+  if (!_nvsEraseAttempted) {
+    _nvsEraseAttempted = true;
+    Serial.println("[WiFi]   Attempting NVS erase + reinit as a self-heal (WiFi calibration");
+    Serial.println("[WiFi]   data may be corrupted) — this only happens once per boot...");
+    esp_err_t erase_err = nvs_flash_erase();
+    esp_err_t init_err = nvs_flash_init();
+    Serial.printf("[WiFi]   nvs_flash_erase=0x%x nvs_flash_init=0x%x\n", erase_err, init_err);
+    Serial.println("[WiFi]   Restoring saved module config into freshly-erased NVS...");
+    prefs.begin("rigmod", false);
+    saveConfig(prefs, cfg);
+    prefs.end();
+    WiFi.mode(WIFI_OFF);
+    delay(300);
+    return ensureStaStarted(); // one recursive retry pass after the erase
+  }
+
+  Serial.println("[WiFi]   Still stuck after NVS erase — proceeding anyway.");
+  Serial.println("[WiFi]   NOTE: if no esp_wifi_init/esp_wifi_start/phy error appeared above,");
+  Serial.println("[WiFi]   set Arduino IDE Tools > Core Debug Level to \"Verbose\" and reflash —");
+  Serial.println("[WiFi]   the Arduino-side wrapper error is compiled out at the default level.");
   return false;
 }
 
