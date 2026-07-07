@@ -217,6 +217,19 @@ void setup() {
   esp_log_level_set("nvs", ESP_LOG_VERBOSE);
   Serial.setDebugOutput(true);
 
+  // Disable WiFi's own flash-persistent config storage as the very first
+  // thing we do, before ANY WiFi.mode()/begin()/softAP() call anywhere in
+  // this sketch (startSetupAP, tryAutoConnectRigNetwork, connectWifi all
+  // call WiFi.mode() before this used to run — it was previously set much
+  // later, inside connectWifi(), which left every earlier WiFi.mode() call
+  // in every boot path free to read/write the WiFi driver's own NVS blob
+  // by default). We keep our own SSID/pass in the "rigmod" Preferences
+  // namespace already, so we don't need the WiFi driver's separate
+  // persistent storage — turning it off everywhere removes a whole class
+  // of "WiFi calibration data got corrupted in flash" failure mode, which
+  // is our leading theory for the WL_STOPPED/scan=-2 wedge in the field.
+  WiFi.persistent(false);
+
   Serial.println("\n\n========================================");
   Serial.println("[BOOT] Rig Module " FW_VERSION);
   Serial.println("[BOOT] Starting up...");
@@ -640,7 +653,7 @@ void connectWifi() {
   Serial.println("[WiFi] Attempting connection...");
 
   WiFi.setAutoReconnect(false); // we handle retries manually
-  WiFi.persistent(false);
+  WiFi.persistent(false); // also set once at the very top of setup() now — harmless to repeat here
 
   const int MAX_ATTEMPTS = 5;
   for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
