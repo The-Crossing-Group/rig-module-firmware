@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.0.7"
+#define FW_VERSION "rig-module-1.0.8"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -24,7 +24,10 @@
 // interpretation (tank fill %, mud weight, etc.) happens elsewhere
 // (rig UI / Pi side), configured against these raw channel values.
 struct ChannelConfig {
-  bool   enabled  = false;
+  // Plug-and-play: every channel reports by default. Nothing to configure
+  // to see all 8 — uncheck a channel on /channels only if you want to
+  // hide one that's genuinely not wired up (e.g. to declutter the rig UI).
+  bool   enabled  = true;
   String name     = "";
   String kind     = "";        // fully free-text: "level","pressure","temp","flow","rpm",... anything
   String unit     = "";
@@ -84,7 +87,9 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
 
   for (int i = 0; i < 8; i++) {
     String pre = "ch" + String(i);
-    c.ch[i].enabled = p.getBool((pre + "en").c_str(), false);
+    // Default true (plug-and-play) for channels never explicitly saved —
+    // matches ChannelConfig's struct default above.
+    c.ch[i].enabled = p.getBool((pre + "en").c_str(), true);
     c.ch[i].name    = p.getString((pre + "nm").c_str(), "Ch " + String(i+1));
     c.ch[i].kind    = p.getString((pre + "kd").c_str(), "");
     c.ch[i].unit    = p.getString((pre + "ut").c_str(), "");
