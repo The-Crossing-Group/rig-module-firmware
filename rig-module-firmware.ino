@@ -276,9 +276,12 @@ void setup() {
   delay(10);                       // let the chip come up
 
   // Init RS485 / Modbus
-  Serial.printf("[BOOT] RS485 pins: RX=%d TX=%d DE=%d SE=%d 5V_EN=%d\n",
-    RS485_RXD, RS485_TXD, RS485_DE, RS485_SE, PIN_5V_EN);
-  modbusInit(RS485_RXD, RS485_TXD, RS485_DE);
+  // Baud is configurable from the webUI (/config, "RS485 Baud Rate") since
+  // different analog-to-Modbus boards ship with different factory defaults
+  // (Waveshare 8AI (B) = 9600bps, SDSIN SN-3002 clone = 4800bps).
+  Serial.printf("[BOOT] RS485 pins: RX=%d TX=%d DE=%d SE=%d 5V_EN=%d baud=%ld\n",
+    RS485_RXD, RS485_TXD, RS485_DE, RS485_SE, PIN_5V_EN, cfg.modbusBaud);
+  modbusInit(RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
 
   // Connect WiFi (LED slow-blinks blue during this)
   connectWifi();

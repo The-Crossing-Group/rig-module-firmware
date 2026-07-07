@@ -105,6 +105,28 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<label>Modbus Slave ID</label><input name='modbusSlaveId' type='number' min='1' max='247' value='";
   h += String(cfg.modbusSlaveId);
   h += "'>";
+  h += "<label>RS485 Baud Rate</label><select name='modbusBaud'>";
+  {
+    // value, label — labeled by which board ships with it as factory default,
+    // so it's obvious which to pick when swapping analog-to-Modbus boards
+    // without needing to remember datasheet defaults.
+    struct { long val; const char* label; } bauds[] = {
+      { 1200,   "1200" },
+      { 2400,   "2400" },
+      { 4800,   "4800 (SDSIN)" },
+      { 9600,   "9600 (Waveshare)" },
+      { 19200,  "19200" },
+      { 38400,  "38400" },
+      { 57600,  "57600" },
+      { 115200, "115200" },
+    };
+    for (auto& b : bauds) {
+      h += "<option value='" + String(b.val) + "'";
+      if (cfg.modbusBaud == b.val) h += " selected";
+      h += ">" + String(b.label) + "</option>";
+    }
+  }
+  h += "</select>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='";
   h += String(cfg.pollIntervalS);
   h += "'>";
@@ -407,6 +429,8 @@ static void handleConfig() {
   applyParam("moduleName",     [](String v){ _cfg->moduleName    = v; });
   applyParam("description",    [](String v){ _cfg->description   = v; });
   applyParam("modbusSlaveId",  [](String v){ _cfg->modbusSlaveId = v.toInt(); });
+  bool baudChanged = false;
+  applyParam("modbusBaud",     [&](String v){ long nb = v.toInt(); if (nb != _cfg->modbusBaud) { _cfg->modbusBaud = nb; baudChanged = true; } });
   applyParam("pollIntervalS",  [](String v){ _cfg->pollIntervalS = constrain(v.toInt(),1,30); });
   applyParam("piHost",         [](String v){ _cfg->piHost        = v; });
   applyParam("rigToken",       [](String v){ _cfg->rigToken      = v; });
@@ -446,6 +470,13 @@ static void handleConfig() {
 
   if (wifiChanged) {
     _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to connect to new WiFi...</p>");
+    delay(1000);
+    ESP.restart();
+  } else if (baudChanged) {
+    // Serial2 (RS485) is only configured once at boot via modbusInit() —
+    // reboot so the poll task picks up the new baud cleanly instead of
+    // trying to reinit HardwareSerial out from under a running task.
+    _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to apply new RS485 baud rate...</p>");
     delay(1000);
     ESP.restart();
   } else {

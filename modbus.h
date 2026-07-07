@@ -24,14 +24,17 @@ static uint16_t modbusCRC(const uint8_t* buf, int len) {
 }
 
 // Init RS485
-void modbusInit(int rxPin, int txPin, int dePin) {
+// baud: configurable from the webUI (/config, "RS485 Baud Rate") — different
+// analog-to-Modbus boards ship with different factory defaults (Waveshare
+// 8AI (B) = 9600bps, SDSIN SN-3002 clone = 4800bps), so this is NOT hardcoded.
+void modbusInit(int rxPin, int txPin, int dePin, uint32_t baud) {
   _RS485_DE_PIN = dePin;
   pinMode(dePin, OUTPUT);
   digitalWrite(dePin, LOW); // receive mode by default
 
   _mbSerial = &Serial2;
-  _mbSerial->begin(9600, SERIAL_8N1, rxPin, txPin);
-  Serial.printf("[Modbus] Init on Serial2 RX=%d TX=%d DE=%d\n", rxPin, txPin, dePin);
+  _mbSerial->begin(baud, SERIAL_8N1, rxPin, txPin);
+  Serial.printf("[Modbus] Init on Serial2 RX=%d TX=%d DE=%d baud=%u\n", rxPin, txPin, dePin, baud);
 }
 
 // Send bytes, toggle DE high during TX

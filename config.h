@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.0.9"
+#define FW_VERSION "rig-module-1.1.0"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -45,6 +45,7 @@ struct ModuleConfig {
   String moduleName     = "";
   String description    = "";
   int    modbusSlaveId  = 1;
+  long   modbusBaud     = 9600;  // Waveshare 8AI (B) default; SDSIN clone default is 4800
   int    pollIntervalS  = 3;
   String piHost         = "";
   String rigToken       = "";
@@ -79,6 +80,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.moduleName    = p.getString("modName", "");
   c.description   = p.getString("desc", "");
   c.modbusSlaveId = p.getInt("mbSlave", 1);
+  c.modbusBaud    = p.getLong("mbBaud", 9600);
   c.pollIntervalS = p.getInt("pollInt", 3);
   c.piHost        = p.getString("piHost", "");
   c.rigToken      = p.getString("rigToken", "");
@@ -108,6 +110,7 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   p.putString("modName", c.moduleName);
   p.putString("desc", c.description);
   p.putInt("mbSlave", c.modbusSlaveId);
+  p.putLong("mbBaud", c.modbusBaud);
   p.putInt("pollInt", c.pollIntervalS);
   p.putString("piHost", c.piHost);
   p.putString("rigToken", c.rigToken);
