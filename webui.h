@@ -445,7 +445,7 @@ static void handleConfig() {
   saveConfig(*_prefs, *_cfg);
 
   if (wifiChanged) {
-    _srv->send(200, "text/html", "<p>Saved. Rebooting to connect to new WiFi...</p>");
+    _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to connect to new WiFi...</p>");
     delay(1000);
     ESP.restart();
   } else {
@@ -519,14 +519,14 @@ static void handleWifiScan() {
 // is what lets a unit move between site networks with zero recompiling.
 static void handleWifiSave() {
   if (!_srv->hasArg("wifiSSID") || _srv->arg("wifiSSID").isEmpty()) {
-    _srv->send(400, "text/html", "<p>SSID is required. <a href='/wifi'>Go back</a></p>");
+    _srv->send(400, "text/html; charset=utf-8", "<p>SSID is required. <a href='/wifi'>Go back</a></p>");
     return;
   }
   _cfg->wifiSSID = _srv->arg("wifiSSID");
   _cfg->wifiPass = _srv->hasArg("wifiPass") ? _srv->arg("wifiPass") : "";
   saveConfig(*_prefs, *_cfg);
 
-  _srv->send(200, "text/html",
+  _srv->send(200, "text/html; charset=utf-8",
     "<p>Saved. Rebooting and attempting to join \"" + _cfg->wifiSSID + "\"...<br>"
     "If it can't connect, this unit will fall back to its setup AP automatically.</p>");
   delay(1000);
@@ -604,11 +604,27 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   _mtx      = mtx;
 
   // Pages
-  srv.on("/",            HTTP_GET,  [](){ _srv->send(200,"text/html",cfgPage(*_cfg)); });
-  srv.on("/channels",    HTTP_GET,  [](){ _srv->send(200,"text/html",calPage(*_cfg)); });
-  srv.on("/live",        HTTP_GET,  [](){ _srv->send(200,"text/html",livePage()); });
-  srv.on("/system",      HTTP_GET,  [](){ _srv->send(200,"text/html",sysPage(*_cfg)); });
-  srv.on("/wifi",        HTTP_GET,  [](){ _srv->send(200,"text/html",wifiPage(*_cfg)); });
+  // charset=utf-8 explicitly, because the pages contain UTF-8 multi-byte
+  // characters (em dashes, degree/section symbols) in string literals, and
+  // without a charset browsers fall back to guessing (usually Latin-1),
+  // which renders those bytes as garbled "â€”" mojibake instead of "—".
+  //
+  // Also send Cache-Control: no-store. The WebServer library sends no
+  // cache headers of its own, and these pages are built fresh from live
+  // config on every request (cheap on an ESP32 with no other traffic) —
+  // there's no reason for a browser to ever cache them, and doing so
+  // is exactly how a stale nav bar (e.g. an old "/calibration" link)
+  // can keep showing up in a browser even after reflashing newer
+  // firmware that changed the route.
+  auto noCacheHtml = [](int code, const String& body){
+    _srv->sendHeader("Cache-Control", "no-store");
+    _srv->send(code, "text/html; charset=utf-8", body);
+  };
+  srv.on("/",            HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, cfgPage(*_cfg)); });
+  srv.on("/channels",    HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, calPage(*_cfg)); });
+  srv.on("/live",        HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, livePage()); });
+  srv.on("/system",      HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, sysPage(*_cfg)); });
+  srv.on("/wifi",        HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, wifiPage(*_cfg)); });
 
   // GET APIs
   srv.on("/api/status",      HTTP_GET,  handleApiStatus);
