@@ -170,3 +170,55 @@ bool modbusWriteMultiple(uint8_t slaveId, uint16_t startAddr, uint8_t count, uin
 bool modbusReadAll(uint8_t slaveId, uint16_t* raw8) {
   return modbusReadInputRegs(slaveId, 0x0000, 8, raw8);
 }
+
+// =============================================================================
+// BAUD RATE AUTO-DETECTION
+//
+// Instead of guessing, actually probe the bus: try each standard baud rate
+// in turn, sending a real FC04 read at each and checking for a CRC-valid,
+// correctly-addressed response. Whichever baud gets a real answer from the
+// board is the right one. Order is most-likely-first based on the boards we
+// support (Waveshare 8AI (B) = 9600, SDSIN SN-3002 clone = 4800), covering
+// the full standard Modbus RTU range so any board just works.
+//
+// Reuses the already-open Serial2 (no re-init/pin changes) via
+// updateBaudRate() — safe to call any time after modbusInit(). Restores the
+// original baud if nothing answers, so a failed scan never leaves the bus
+// worse off than before.
+// =============================================================================
+static const uint32_t MODBUS_AUTODETECT_BAUDS[] = {
+  9600, 4800, 19200, 2400, 38400, 1200, 57600, 115200
+};
+static const int MODBUS_AUTODETECT_BAUDS_COUNT =
+  sizeof(MODBUS_AUTODETECT_BAUDS) / sizeof(MODBUS_AUTODETECT_BAUDS[0]);
+
+long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud) {
+  if (!_mbSerial) return -1;
+  Serial.println("[Modbus] ---- Auto-detecting baud rate ----");
+  for (int i = 0; i < MODBUS_AUTODETECT_BAUDS_COUNT; i++) {
+    uint32_t tryBaud = MODBUS_AUTODETECT_BAUDS[i];
+    Serial.printf("[Modbus]   Trying %u baud...\n", tryBaud);
+    _mbSerial->flush();
+    _mbSerial->updateBaudRate(tryBaud);
+    delay(20); // let the UART settle at the new rate before probing
+
+    // Read just 1 register — enough to confirm a real Modbus device is
+    // answering, cheaper/faster than a full 8-register probe per baud.
+    uint16_t regs[1];
+    bool ok = false;
+    // A couple of quick attempts per baud — occasionally the first probe
+    // right after a rate change gets missed by the board.
+    for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+      ok = modbusReadInputRegs(slaveId, 0x0000, 1, regs);
+    }
+    if (ok) {
+      Serial.printf("[Modbus] Auto-detect SUCCESS at %u baud (reg0=%u)\n", tryBaud, regs[0]);
+      return (long)tryBaud;
+    }
+  }
+  Serial.println("[Modbus] Auto-detect found nothing at any baud — restoring original");
+  _mbSerial->flush();
+  _mbSerial->updateBaudRate(originalBaud);
+  delay(20);
+  return -1;
+}

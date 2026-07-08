@@ -25,6 +25,8 @@ extern bool lastPostOk;
 extern uint16_t rawModbus[8];
 extern ChannelReading readings[8];
 extern SemaphoreHandle_t stateMutex;
+extern SemaphoreHandle_t modbusBusMutex;
+long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud); // modbus.h
 extern NTPClient ntpClient;
 extern bool apModeActive;
 extern String apSSID;
@@ -140,6 +142,20 @@ static String cfgPage(ModuleConfig& cfg) {
     }
   }
   h += "</select>";
+  h += "<button type='button' id='autoBaudBtn' onclick='autoDetectBaud()'>&#128269; Auto-Detect Baud Rate</button>"
+       "<div class='small' id='autoBaudStatus' style='margin:6px 0 10px'>Probes the connected board at every "
+       "standard rate and picks whichever gets a real response — no need to know the board's factory default.</div>"
+       "<script>"
+       "function autoDetectBaud(){"
+       "var btn=document.getElementById('autoBaudBtn');var st=document.getElementById('autoBaudStatus');"
+       "btn.disabled=true;btn.textContent='Probing bus...';st.textContent='Trying each baud rate against the wired board — a few seconds...';"
+       "fetch('/api/modbus/autodetect',{method:'POST'}).then(r=>r.json()).then(d=>{"
+       "btn.disabled=false;btn.textContent='\\u{1F50D} Auto-Detect Baud Rate';"
+       "if(d.detected){st.textContent='Found it: '+d.baud+' baud. Saved \\u2014 reloading...';setTimeout(()=>location.reload(),1200);}"
+       "else{st.textContent='No response at any standard baud. Check wiring/DE pin/board power, then try again.';}"
+       "}).catch(e=>{btn.disabled=false;btn.textContent='\\u{1F50D} Auto-Detect Baud Rate';st.textContent='Request failed: '+e;});"
+       "}"
+       "</script>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='";
   h += String(cfg.pollIntervalS);
   h += "'>";
@@ -589,6 +605,33 @@ static void handleWifiForget() {
   ESP.restart();
 }
 
+// Probes the bus at every standard baud rate to find the one the connected
+// board actually speaks, and saves+reboots on success so the poll task
+// picks it up cleanly (Serial2 is only fully reconfigured at boot).
+// Holds modbusBusMutex for the whole scan so the running poll task can't
+// interleave a read attempt on top of us mid-probe.
+static void handleModbusAutoDetect() {
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    _srv->send(503, "application/json", "{\"ok\":false,\"error\":\"bus busy, try again\"}");
+    return;
+  }
+  long found = modbusAutoDetectBaud(_cfg->modbusSlaveId, (uint32_t)_cfg->modbusBaud);
+  xSemaphoreGive(modbusBusMutex);
+
+  if (found > 0) {
+    _cfg->modbusBaud = found;
+    saveConfig(*_prefs, *_cfg);
+    String r = "{\"ok\":true,\"detected\":true,\"baud\":";
+    r += String(found);
+    r += "}";
+    _srv->send(200, "application/json", r);
+    delay(500);
+    ESP.restart(); // same as a manual baud change — Serial2 needs a clean re-init
+  } else {
+    _srv->send(200, "application/json", "{\"ok\":true,\"detected\":false}");
+  }
+}
+
 static void handleCalZero() {
   int ch = _srv->hasArg("ch") ? _srv->arg("ch").toInt() : -1;
   if (ch < 0 || ch > 7) { _srv->send(400,"application/json","{\"ok\":false}"); return; }
@@ -683,6 +726,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/wifi/forget",   HTTP_POST, handleWifiForget);
   srv.on("/api/cal/zero",      HTTP_POST, handleCalZero);
   srv.on("/api/cal/max",       HTTP_POST, handleCalMax);
+  srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);
 
   srv.on("/api/buffer/flush", HTTP_POST, [](){
     flushNow = true;

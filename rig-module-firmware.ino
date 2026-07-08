@@ -168,6 +168,12 @@ NTPClient ntpClient(ntpUDP, "pool.ntp.org", 0, 3600000); // sync every hour
 
 // Shared state (protected by mutex)
 SemaphoreHandle_t stateMutex;
+// Guards the RS485/Serial2 bus itself — the poll task (core 1) is
+// continuously calling modbusReadAll() in a tight loop, so any other code
+// path that also talks to Serial2 directly (e.g. baud auto-detect from the
+// web handler, which runs on core 0) MUST hold this first, or the two will
+// interleave bytes on the wire and corrupt both requests.
+SemaphoreHandle_t modbusBusMutex;
 ModuleConfig cfg;
 ChannelReading readings[8];  // latest scaled readings
 uint16_t rawModbus[8] = {0}; // latest raw register values from 8AI
@@ -267,6 +273,7 @@ void setup() {
 
   // Mutex for shared state
   stateMutex = xSemaphoreCreateMutex();
+  modbusBusMutex = xSemaphoreCreateMutex();
 
   // Enable 5V booster and RS485 chip (required on T-CAN485)
   pinMode(PIN_5V_EN, OUTPUT);
@@ -756,18 +763,55 @@ void resolvePi() {
 // MODBUS POLL TASK (core 1)
 // =============================================================================
 void pollTask(void* param) {
-  // Write mode 3 (4-20mA) to all enabled channels on boot
   Serial.println("[Poll] Task started, waiting 2s before Modbus init...");
   delay(2000); // let WiFi settle
+
+  // Plug-and-play baud check: if the configured/default baud gets no
+  // response at all, don't just sit there silently failing forever —
+  // auto-scan every standard rate once at boot and adopt whichever one
+  // actually gets an answer from the board. Covers swapping in a
+  // different analog-to-Modbus board (e.g. Waveshare <-> SDSIN) without
+  // anyone needing to know or set its factory-default baud rate first.
+  {
+    uint16_t probe[1];
+    bool bootOk = false;
+    if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      bootOk = modbusReadInputRegs(cfg.modbusSlaveId, 0x0000, 1, probe);
+      if (!bootOk) {
+        Serial.printf("[Poll] No response at configured baud (%ld) — auto-scanning...\n", cfg.modbusBaud);
+        long found = modbusAutoDetectBaud(cfg.modbusSlaveId, (uint32_t)cfg.modbusBaud);
+        if (found > 0 && found != cfg.modbusBaud) {
+          Serial.printf("[Poll] Adopting auto-detected baud %ld (was %ld)\n", found, cfg.modbusBaud);
+          cfg.modbusBaud = found;
+          prefs.begin("rigmod", false);
+          saveConfig(prefs, cfg);
+          prefs.end();
+          // modbusAutoDetectBaud() already left Serial2 running at the
+          // winning rate — no reboot needed, we can just carry on.
+        } else if (found <= 0) {
+          Serial.println("[Poll] Boot auto-scan found nothing either — check wiring/board power.");
+        }
+      }
+      xSemaphoreGive(modbusBusMutex);
+    }
+  }
+
+  // Write mode 3 (4-20mA) to all enabled channels on boot
   writeChannelModes();
   modbusInitDone = true;
   Serial.println("[Poll] Modbus init complete, entering poll loop");
 
   int pollCount = 0;
   for (;;) {
-    // Read all 8 input registers
+    // Read all 8 input registers. Hold modbusBusMutex for the actual
+    // wire transaction so a concurrent baud auto-detect request (web
+    // handler, core 0) can't interleave bytes with us on Serial2.
     uint16_t raw[8] = {0};
-    bool ok = modbusReadAll(cfg.modbusSlaveId, raw);
+    bool ok = false;
+    if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      ok = modbusReadAll(cfg.modbusSlaveId, raw);
+      xSemaphoreGive(modbusBusMutex);
+    }
     pollCount++;
 
     if (ok) {

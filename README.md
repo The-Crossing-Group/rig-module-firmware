@@ -89,6 +89,23 @@ of what it's measuring.
 
 ---
 
+## RS485 Baud Rate — Auto-Detect
+
+No need to know or set the connected board's factory-default baud rate:
+
+- **On boot**, if the configured baud gets no response at all, the firmware
+  automatically probes every standard rate (9600, 4800, 19200, 2400, 38400,
+  1200, 57600, 115200) and adopts whichever one actually gets an answer.
+- **Anytime**, hit **🔍 Auto-Detect Baud Rate** on the **⚙ Config** page to
+  re-run the same probe on demand (useful after physically swapping to a
+  different board without power-cycling).
+
+Detection works by sending a real Modbus read at each rate and checking for
+a CRC-valid response — not a guess. If nothing answers at any rate, check
+wiring/DE pin/board power before assuming the baud is the problem.
+
+---
+
 ## Waveshare 8AI (B) — Important
 
 The (B) version **defaults to voltage mode**. The firmware writes **mode 3

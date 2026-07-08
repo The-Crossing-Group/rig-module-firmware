@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.1.2"
+#define FW_VERSION "rig-module-1.2.0"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
