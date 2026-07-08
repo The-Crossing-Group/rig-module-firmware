@@ -55,3 +55,51 @@ void scaleChannel(int ch, uint16_t raw, ModuleConfig& cfg, ChannelReading& out) 
   out.hasValue = true;
   out.status   = "ok";
 }
+
+// =============================================================================
+// TANK VOLUME (optional derived value, spec-tank-modules.md §4b)
+//
+// One linear map per module: volZeroLevel (eng units, e.g. m) -> volume 0,
+// volMaxLevel -> volume = capacity. Clamped so volume never goes negative or
+// over capacity, but the underlying channel status (open/over/stale) still
+// wins — a fault on the level channel means the volume is unknown too, not
+// a bogus number.
+//
+// Disabled (out.hasValue=false) unless capacity > 0 and volMaxLevel >
+// volZeroLevel — i.e. it only turns on once someone actually configures it
+// on /config, so a plain level module never suddenly grows a volume field.
+// =============================================================================
+struct VolumeReading {
+  bool   hasValue = false;
+  float  value    = 0.0f;   // in cfg.capacityUnit
+  String status   = "disabled";
+};
+
+void computeTankVolume(ModuleConfig& cfg, ChannelReading* readings, VolumeReading& out) {
+  out.hasValue = false;
+  out.value    = 0.0f;
+  out.status   = "disabled";
+
+  if (cfg.capacity <= 0.0f) return; // feature not configured
+  if (cfg.volMaxLevel <= cfg.volZeroLevel) return; // needs a real range
+
+  int ch = cfg.volumeLevelCh;
+  if (ch < 0 || ch > 7) return;
+  ChannelReading& lvl = readings[ch];
+
+  // Level channel itself faulted (open/over) or hasn't produced a value yet
+  // -> volume is unknown, not zero. Mirrors the tank spec's fault handling.
+  if (!lvl.valid || !lvl.hasValue) {
+    out.status = (lvl.valid ? lvl.status : "stale");
+    return;
+  }
+
+  float frac = (lvl.value - cfg.volZeroLevel) / (cfg.volMaxLevel - cfg.volZeroLevel);
+  if (frac < 0.0f) frac = 0.0f; // below empty reference -> report empty, not negative
+  if (frac > 1.0f) frac = 1.0f; // above full reference -> cap at capacity, don't overshoot
+
+  float vol = cfg.capacity * frac;
+  out.value    = round(vol * 100.0f) / 100.0f;
+  out.hasValue = true;
+  out.status   = "ok";
+}

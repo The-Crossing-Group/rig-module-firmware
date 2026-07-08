@@ -880,6 +880,12 @@ String buildPayload(bool bufferedFlag) {
   doc["uptimeS"]  = (unsigned long)(millis() / 1000UL);
   doc["rssi"]     = WiFi.RSSI();
   doc["buffered"] = bufferedFlag;
+  // Tank capacity (only when volume is configured) — rig-modules.js reads
+  // this top-level field to compute the fill-bar %, same shape as the
+  // original tank spec (capacity as a plain number in the module's unit).
+  if (cfg.capacity > 0.0f) {
+    doc["capacity"] = cfg.capacity;
+  }
 
   // Timestamp
   if (ntpClient.isTimeSet() && ntpClient.getEpochTime() > 1000000000UL) {
@@ -914,6 +920,24 @@ String buildPayload(bool bufferedFlag) {
         c["value"] = nullptr;
       }
       c["status"] = r.status;
+    }
+
+    // Tank volume (optional derived value) — only emitted once configured
+    // on /config (capacity > 0). Computed from whichever channel's SCALED
+    // reading is currently in `readings[]`, so it reflects the same cal/
+    // fault state the channel itself is reporting.
+    VolumeReading vol;
+    computeTankVolume(cfg, readings, vol);
+    if (cfg.capacity > 0.0f) {
+      JsonObject derived = doc.createNestedObject("derived");
+      JsonObject volObj = derived.createNestedObject("volume");
+      if (vol.hasValue) {
+        volObj["value"] = vol.value;
+      } else {
+        volObj["value"] = nullptr;
+      }
+      volObj["unit"]   = cfg.capacityUnit;
+      volObj["status"] = vol.status;
     }
 
     xSemaphoreGive(stateMutex);

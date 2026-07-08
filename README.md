@@ -89,6 +89,40 @@ of what it's measuring.
 
 ---
 
+## Tank Volume (optional derived value)
+
+Turn a level channel into a computed volume — matches `spec-tank-modules.md`
+§4b's linear level→volume map, computed on the module itself and sent up as
+`derived.volume` (plus top-level `capacity`) in the payload:
+
+```
+frac   = (level - volZeroLevel) / (volMaxLevel - volZeroLevel)   # clamped 0..1
+volume = capacity * frac
+```
+
+Set on **⚙ Config → Tank Volume**:
+- **Level Channel** — which of the 8 channels is feeding the level reading
+  (its already-scaled engineering value, e.g. meters — set that channel's
+  Eng Min/Max or zero/max cal on **📐 Channels** first).
+- **Capacity** — the tank's full volume. Leave at `0` to leave the feature
+  off entirely (no `derived.volume` in the payload at all).
+- **Capacity Unit** — `m³` or `gal`.
+- **Level @ Empty / Level @ Full** — the level channel's engineering reading
+  at 0% and 100% full (not necessarily 0 and capacity's numeric value — this
+  lets a sensor mounted partway up the tank, or one that doesn't reach true
+  empty, still map correctly).
+
+If the level channel is faulted (`open`/`over`) or hasn't reported yet,
+`derived.volume.status` reflects that instead of showing a fabricated number.
+Volume is clamped to `[0, capacity]` — a level reading below "Empty" or above
+"Full" reports 0% / 100% rather than a negative or over-capacity number.
+
+The rig UI (`rig-modules.html`) already expects this exact shape
+(`derived.volume` + top-level `capacity`) for the tank fill-bar card — no
+Pi/UI changes needed, this firmware update alone lights it up.
+
+---
+
 ## RS485 Baud Rate — Auto-Detect
 
 No need to know or set the connected board's factory-default baud rate:

@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.2.0"
+#define FW_VERSION "rig-module-1.3.0"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -62,6 +62,17 @@ struct ModuleConfig {
   String wifiSSID       = "";
   String wifiPass       = "";
 
+  // --- Tank volume (optional derived calc) ---------------------------------
+  // Linear level -> volume map, per spec-tank-modules.md §4b: pick whichever
+  // channel is feeding the level reading, then a straight-line map between
+  // "empty" and "full" levels to 0..capacity. Disabled (omitted from the
+  // payload) unless capacity > 0 and volMaxLevel > volZeroLevel.
+  int    volumeLevelCh  = 0;      // which of the 8 channels (0-7) is the level input
+  float  capacity       = 0.0f;   // nominal full-tank volume; 0 = feature disabled
+  String capacityUnit   = "m3";   // "m3" or "gal" (US gallons)
+  float  volZeroLevel   = 0.0f;   // level reading (in that channel's eng unit) = empty
+  float  volMaxLevel    = 1.0f;   // level reading = full (== capacity)
+
   ChannelConfig ch[8];
 };
 
@@ -98,6 +109,12 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.wifiSSID      = p.getString("wifiSSID", "");
   c.wifiPass      = p.getString("wifiPass", "");
 
+  c.volumeLevelCh = p.getInt("volCh", 0);
+  c.capacity      = p.getFloat("cap", 0.0f);
+  c.capacityUnit  = p.getString("capUnit", "m3");
+  c.volZeroLevel  = p.getFloat("volZLvl", 0.0f);
+  c.volMaxLevel   = p.getFloat("volMLvl", 1.0f);
+
   for (int i = 0; i < 8; i++) {
     String pre = "ch" + String(i);
     // Default true (plug-and-play) for channels never explicitly saved —
@@ -128,6 +145,12 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   p.putString("rigToken", c.rigToken);
   p.putString("wifiSSID", c.wifiSSID);
   p.putString("wifiPass", c.wifiPass);
+
+  p.putInt("volCh", c.volumeLevelCh);
+  p.putFloat("cap", c.capacity);
+  p.putString("capUnit", c.capacityUnit);
+  p.putFloat("volZLvl", c.volZeroLevel);
+  p.putFloat("volMLvl", c.volMaxLevel);
 
   for (int i = 0; i < 8; i++) {
     String pre = "ch" + String(i);
