@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.3.0"
+#define FW_VERSION "rig-module-1.3.1"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -37,6 +37,18 @@ struct ChannelConfig {
   float  engMax   = 1.0f;
   int    zeroRaw  = -1;        // -1 = not calibrated
   int    maxRaw   = -1;
+
+  // --- Tank volume (optional derived calc, spec-tank-modules.md §4b) -------
+  // Lives on the channel that's actually feeding the level reading — check
+  // "Compute Tank Volume" on that channel's card on /channels and its
+  // capacity/range fields appear right there. Linear map: level at
+  // "Empty" reading -> volume 0, level at "Full" reading -> volume =
+  // capacity. Sent up as top-level derived.volume + capacity in the payload.
+  bool   volumeEnabled = false;
+  float  capacity      = 0.0f;   // nominal full-tank volume
+  String capacityUnit  = "m3";   // "m3" or "gal" (US gallons)
+  float  volZeroLevel  = 0.0f;   // this channel's eng. reading at empty
+  float  volMaxLevel   = 1.0f;   // this channel's eng. reading at full
 };
 
 // Full module config
@@ -61,17 +73,6 @@ struct ModuleConfig {
   String rigToken       = "7804991970";
   String wifiSSID       = "";
   String wifiPass       = "";
-
-  // --- Tank volume (optional derived calc) ---------------------------------
-  // Linear level -> volume map, per spec-tank-modules.md §4b: pick whichever
-  // channel is feeding the level reading, then a straight-line map between
-  // "empty" and "full" levels to 0..capacity. Disabled (omitted from the
-  // payload) unless capacity > 0 and volMaxLevel > volZeroLevel.
-  int    volumeLevelCh  = 0;      // which of the 8 channels (0-7) is the level input
-  float  capacity       = 0.0f;   // nominal full-tank volume; 0 = feature disabled
-  String capacityUnit   = "m3";   // "m3" or "gal" (US gallons)
-  float  volZeroLevel   = 0.0f;   // level reading (in that channel's eng unit) = empty
-  float  volMaxLevel    = 1.0f;   // level reading = full (== capacity)
 
   ChannelConfig ch[8];
 };
@@ -109,12 +110,6 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.wifiSSID      = p.getString("wifiSSID", "");
   c.wifiPass      = p.getString("wifiPass", "");
 
-  c.volumeLevelCh = p.getInt("volCh", 0);
-  c.capacity      = p.getFloat("cap", 0.0f);
-  c.capacityUnit  = p.getString("capUnit", "m3");
-  c.volZeroLevel  = p.getFloat("volZLvl", 0.0f);
-  c.volMaxLevel   = p.getFloat("volMLvl", 1.0f);
-
   for (int i = 0; i < 8; i++) {
     String pre = "ch" + String(i);
     // Default true (plug-and-play) for channels never explicitly saved —
@@ -129,6 +124,12 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
     c.ch[i].engMax  = p.getFloat((pre + "eHi").c_str(), 1.0f);
     c.ch[i].zeroRaw = p.getInt((pre + "zRaw").c_str(), -1);
     c.ch[i].maxRaw  = p.getInt((pre + "mRaw").c_str(), -1);
+
+    c.ch[i].volumeEnabled = p.getBool((pre + "volEn").c_str(), false);
+    c.ch[i].capacity      = p.getFloat((pre + "cap").c_str(), 0.0f);
+    c.ch[i].capacityUnit  = p.getString((pre + "capUt").c_str(), "m3");
+    c.ch[i].volZeroLevel  = p.getFloat((pre + "vZLvl").c_str(), 0.0f);
+    c.ch[i].volMaxLevel   = p.getFloat((pre + "vMLvl").c_str(), 1.0f);
   }
 }
 
@@ -146,12 +147,6 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   p.putString("wifiSSID", c.wifiSSID);
   p.putString("wifiPass", c.wifiPass);
 
-  p.putInt("volCh", c.volumeLevelCh);
-  p.putFloat("cap", c.capacity);
-  p.putString("capUnit", c.capacityUnit);
-  p.putFloat("volZLvl", c.volZeroLevel);
-  p.putFloat("volMLvl", c.volMaxLevel);
-
   for (int i = 0; i < 8; i++) {
     String pre = "ch" + String(i);
     p.putBool((pre + "en").c_str(), c.ch[i].enabled);
@@ -164,6 +159,12 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
     p.putFloat((pre + "eHi").c_str(), c.ch[i].engMax);
     p.putInt((pre + "zRaw").c_str(), c.ch[i].zeroRaw);
     p.putInt((pre + "mRaw").c_str(), c.ch[i].maxRaw);
+
+    p.putBool((pre + "volEn").c_str(), c.ch[i].volumeEnabled);
+    p.putFloat((pre + "cap").c_str(), c.ch[i].capacity);
+    p.putString((pre + "capUt").c_str(), c.ch[i].capacityUnit);
+    p.putFloat((pre + "vZLvl").c_str(), c.ch[i].volZeroLevel);
+    p.putFloat((pre + "vMLvl").c_str(), c.ch[i].volMaxLevel);
   }
   p.end();
 }

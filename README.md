@@ -96,21 +96,24 @@ Turn a level channel into a computed volume — matches `spec-tank-modules.md`
 `derived.volume` (plus top-level `capacity`) in the payload:
 
 ```
-frac   = (level - volZeroLevel) / (volMaxLevel - volZeroLevel)   # clamped 0..1
+frac   = (level - valueAtEmpty) / (valueAtFull - valueAtEmpty)   # clamped 0..1
 volume = capacity * frac
 ```
 
-Set on **⚙ Config → Tank Volume**:
-- **Level Channel** — which of the 8 channels is feeding the level reading
-  (its already-scaled engineering value, e.g. meters — set that channel's
-  Eng Min/Max or zero/max cal on **📐 Channels** first).
+Lives **on the channel itself** — go to **📐 Channels**, find whichever
+channel is your level sensor, and check **"Compute Tank Volume from this
+channel"**. Its fields appear right there:
 - **Capacity** — the tank's full volume. Leave at `0` to leave the feature
   off entirely (no `derived.volume` in the payload at all).
 - **Capacity Unit** — `m³` or `gal`.
-- **Level @ Empty / Level @ Full** — the level channel's engineering reading
-  at 0% and 100% full (not necessarily 0 and capacity's numeric value — this
-  lets a sensor mounted partway up the tank, or one that doesn't reach true
-  empty, still map correctly).
+- **Value @ Empty / Value @ Full** — this channel's already-scaled
+  engineering reading (set its Eng Min/Max or zero/max cal above first) at
+  0% and 100% full. Doesn't have to be literally 0/capacity — lets a sensor
+  mounted partway up the tank, or one that doesn't reach true empty, still
+  map correctly.
+
+Only one channel should have this checked at a time (it's per-module, not
+per-channel — the first one found wins if more than one somehow is).
 
 If the level channel is faulted (`open`/`over`) or hasn't reported yet,
 `derived.volume.status` reflects that instead of showing a fabricated number.

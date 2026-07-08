@@ -165,37 +165,9 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<label>X-Rig-Token</label><input name='rigToken' type='password' value='";
   h += cfg.rigToken;
   h += "'>";
-  h += "<h3>Tank Volume (optional)</h3>";
-  h += "<div class='small'>Turns a level channel into a computed volume. Leave Capacity at 0 to "
-       "leave this off entirely. Uses a straight-line map: level at \"Empty\" reading = 0 volume, "
-       "level at \"Full\" reading = Capacity. Reported as <code>derived.volume</code> and shown as "
-       "the fill bar / headline number on the tank card.</div>";
-  h += "<label>Level Channel</label><select name='volumeLevelCh'>";
-  for (int i = 0; i < 8; i++) {
-    h += "<option value='" + String(i) + "'";
-    if (cfg.volumeLevelCh == i) h += " selected";
-    h += ">Channel " + String(i+1);
-    if (!cfg.ch[i].name.isEmpty()) h += " (" + cfg.ch[i].name + ")";
-    h += "</option>";
-  }
-  h += "</select>";
-  h += "<div class='row'><div><label>Capacity (0 = disabled)</label><input name='capacity' type='number' step='any' min='0' value='";
-  h += String(cfg.capacity);
-  h += "'></div><div><label>Capacity Unit</label><select name='capacityUnit'>";
-  h += "<option value='m3'";
-  if (cfg.capacityUnit == "m3") h += " selected";
-  h += ">m&#179; (cubic meters)</option>";
-  h += "<option value='gal'";
-  if (cfg.capacityUnit == "gal") h += " selected";
-  h += ">gal (US gallons)</option>";
-  h += "</select></div></div>";
-  h += "<div class='row'><div><label>Level @ Empty (eng. units)</label><input name='volZeroLevel' type='number' step='any' value='";
-  h += String(cfg.volZeroLevel);
-  h += "'></div><div><label>Level @ Full (eng. units)</label><input name='volMaxLevel' type='number' step='any' value='";
-  h += String(cfg.volMaxLevel);
-  h += "'></div></div>";
-  h += "<div class='small'>\"Level\" here means the SCALED value from the channel above (e.g. meters, "
-       "not raw mA) — whatever unit that channel's Eng Min/Max or zero/max cal on /channels produces.</div>";
+  h += "<div class='small'>Tank volume (computed from a level channel) now lives on the "
+       "<a href='/channels'>&#128208; Channels</a> page — check \"Compute Tank Volume\" on "
+       "whichever channel is your level sensor.</div>";
   h += "<h3>WiFi</h3>";
   h += "<label>SSID</label><input name='wifiSSID' value='";
   h += cfg.wifiSSID;
@@ -269,6 +241,53 @@ static String calPage(ModuleConfig& cfg) {
     h += " maxRaw=";
     h += String(cfg.ch[i].maxRaw);
     h += " (if both set, overrides the mA Min/Max map above)</div>";
+
+    // --- Tank Volume (optional, per-channel) --------------------------------
+    // Checking this treats THIS channel's scaled value as a tank level and
+    // computes a derived volume from it (spec-tank-modules.md §4b). Fields
+    // only make sense once checked, so they're hidden until then.
+    h += "<label style='margin-top:10px'><input type='checkbox' name='ch";
+    h += String(i);
+    h += "volEn' id='volEn";
+    h += String(i);
+    h += "' onchange='toggleVol(";
+    h += String(i);
+    h += ")'";
+    h += (cfg.ch[i].volumeEnabled ? " checked" : "");
+    h += "> Compute Tank Volume from this channel</label>";
+    h += "<div id='volFields";
+    h += String(i);
+    h += "' style='display:";
+    h += (cfg.ch[i].volumeEnabled ? "block" : "none");
+    h += "'>";
+    h += "<div class='small'>Straight-line map: this channel's value at \"Empty\" = 0 volume, "
+         "value at \"Full\" = Capacity. Sent as <code>derived.volume</code> + top-level "
+         "<code>capacity</code> for the rig dashboard's tank fill-bar card.</div>";
+    h += "<div class='row'><div><label>Capacity</label><input name='ch";
+    h += String(i);
+    h += "cap' type='number' step='any' min='0' value='";
+    h += String(cfg.ch[i].capacity);
+    h += "'></div><div><label>Capacity Unit</label><select name='ch";
+    h += String(i);
+    h += "capUt'>";
+    h += "<option value='m3'";
+    if (cfg.ch[i].capacityUnit == "m3") h += " selected";
+    h += ">m&#179; (cubic meters)</option>";
+    h += "<option value='gal'";
+    if (cfg.ch[i].capacityUnit == "gal") h += " selected";
+    h += ">gal (US gallons)</option>";
+    h += "</select></div></div>";
+    h += "<div class='row'><div><label>Value @ Empty</label><input name='ch";
+    h += String(i);
+    h += "vZLvl' type='number' step='any' value='";
+    h += String(cfg.ch[i].volZeroLevel);
+    h += "'></div><div><label>Value @ Full</label><input name='ch";
+    h += String(i);
+    h += "vMLvl' type='number' step='any' value='";
+    h += String(cfg.ch[i].volMaxLevel);
+    h += "'></div></div>";
+    h += "</div>";
+
     h += "<div class='row' style='margin-top:8px'>";
     h += "<button type='button' onclick='setZero(";
     h += String(i);
@@ -293,6 +312,11 @@ function fetchRaw(){
 setInterval(fetchRaw,2000); fetchRaw();
 function setZero(ch){ fetch('/api/cal/zero?ch='+ch,{method:'POST'}).then(()=>fetchRaw()); }
 function setMax(ch){  fetch('/api/cal/max?ch='+ch, {method:'POST'}).then(()=>fetchRaw()); }
+function toggleVol(ch){
+  var el=document.getElementById('volFields'+ch);
+  var cb=document.getElementById('volEn'+ch);
+  el.style.display = cb.checked ? 'block' : 'none';
+}
 </script>)";
   h += "</div>";
   return h;
@@ -504,12 +528,6 @@ static void handleConfig() {
   applyParam("piHost",         [](String v){ _cfg->piHost        = v; });
   applyParam("rigToken",       [](String v){ _cfg->rigToken      = v; });
 
-  applyParam("volumeLevelCh",  [](String v){ _cfg->volumeLevelCh = constrain(v.toInt(),0,7); });
-  applyParam("capacity",       [](String v){ _cfg->capacity      = v.toFloat(); });
-  applyParam("capacityUnit",   [](String v){ _cfg->capacityUnit  = v.isEmpty() ? "m3" : v; });
-  applyParam("volZeroLevel",   [](String v){ _cfg->volZeroLevel  = v.toFloat(); });
-  applyParam("volMaxLevel",    [](String v){ _cfg->volMaxLevel   = v.toFloat(); });
-
   bool wifiChanged = false;
   String oldSSID = _cfg->wifiSSID;
   applyParam("wifiSSID", [&](String v){ if(v!=_cfg->wifiSSID){_cfg->wifiSSID=v;wifiChanged=true;} });
@@ -530,7 +548,11 @@ static void handleConfig() {
   for (int i = 0; i < 8; i++) {
     String pre = "ch" + String(i);
     if (i == which) {
-      _cfg->ch[i].enabled = _srv->hasArg((pre+"en").c_str());
+      _cfg->ch[i].enabled       = _srv->hasArg((pre+"en").c_str());
+      // Same hasArg-gate as "enabled": a checkbox absent from the POST means
+      // unchecked, but only for the ONE channel form actually submitted —
+      // the other 7 channels' volumeEnabled must NOT be touched here.
+      _cfg->ch[i].volumeEnabled = _srv->hasArg((pre+"volEn").c_str());
     }
     applyParam((pre+"nm").c_str(),   [i](String v){ _cfg->ch[i].name  = v; });
     applyParam((pre+"kd").c_str(),   [i](String v){ _cfg->ch[i].kind  = v; });
@@ -539,6 +561,10 @@ static void handleConfig() {
     applyParam((pre+"maHi").c_str(), [i](String v){ _cfg->ch[i].maMax = v.toFloat(); });
     applyParam((pre+"eLo").c_str(),  [i](String v){ _cfg->ch[i].engMin = v.toFloat(); });
     applyParam((pre+"eHi").c_str(),  [i](String v){ _cfg->ch[i].engMax = v.toFloat(); });
+    applyParam((pre+"cap").c_str(),   [i](String v){ _cfg->ch[i].capacity     = v.toFloat(); });
+    applyParam((pre+"capUt").c_str(), [i](String v){ _cfg->ch[i].capacityUnit = v.isEmpty() ? "m3" : v; });
+    applyParam((pre+"vZLvl").c_str(), [i](String v){ _cfg->ch[i].volZeroLevel = v.toFloat(); });
+    applyParam((pre+"vMLvl").c_str(), [i](String v){ _cfg->ch[i].volMaxLevel  = v.toFloat(); });
   }
 
   saveConfig(*_prefs, *_cfg);

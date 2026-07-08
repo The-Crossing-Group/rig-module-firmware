@@ -59,32 +59,40 @@ void scaleChannel(int ch, uint16_t raw, ModuleConfig& cfg, ChannelReading& out) 
 // =============================================================================
 // TANK VOLUME (optional derived value, spec-tank-modules.md §4b)
 //
-// One linear map per module: volZeroLevel (eng units, e.g. m) -> volume 0,
-// volMaxLevel -> volume = capacity. Clamped so volume never goes negative or
-// over capacity, but the underlying channel status (open/over/stale) still
-// wins — a fault on the level channel means the volume is unknown too, not
-// a bogus number.
+// Lives on whichever channel has "Compute Tank Volume" checked on /channels
+// (ChannelConfig.volumeEnabled) — that channel IS the level input. One linear
+// map: volZeroLevel (eng units, e.g. m) -> volume 0, volMaxLevel -> volume =
+// capacity. Clamped so volume never goes negative or over capacity, but the
+// underlying channel status (open/over/stale) still wins — a fault on the
+// level channel means the volume is unknown too, not a bogus number.
 //
-// Disabled (out.hasValue=false) unless capacity > 0 and volMaxLevel >
-// volZeroLevel — i.e. it only turns on once someone actually configures it
-// on /config, so a plain level module never suddenly grows a volume field.
+// At most one channel should have volumeEnabled — if more than one somehow
+// does (e.g. old config), the first one found (lowest index) wins.
 // =============================================================================
 struct VolumeReading {
   bool   hasValue = false;
-  float  value    = 0.0f;   // in cfg.capacityUnit
+  float  value    = 0.0f;   // in the volume channel's capacityUnit
+  String unit     = "m3";
   String status   = "disabled";
 };
 
 void computeTankVolume(ModuleConfig& cfg, ChannelReading* readings, VolumeReading& out) {
   out.hasValue = false;
   out.value    = 0.0f;
+  out.unit     = "m3";
   out.status   = "disabled";
 
-  if (cfg.capacity <= 0.0f) return; // feature not configured
-  if (cfg.volMaxLevel <= cfg.volZeroLevel) return; // needs a real range
+  int ch = -1;
+  for (int i = 0; i < 8; i++) {
+    if (cfg.ch[i].volumeEnabled) { ch = i; break; }
+  }
+  if (ch < 0) return; // no channel configured for volume
 
-  int ch = cfg.volumeLevelCh;
-  if (ch < 0 || ch > 7) return;
+  ChannelConfig& c = cfg.ch[ch];
+  out.unit = c.capacityUnit;
+  if (c.capacity <= 0.0f) return;               // capacity not set yet
+  if (c.volMaxLevel <= c.volZeroLevel) return;   // needs a real range
+
   ChannelReading& lvl = readings[ch];
 
   // Level channel itself faulted (open/over) or hasn't produced a value yet
@@ -94,11 +102,11 @@ void computeTankVolume(ModuleConfig& cfg, ChannelReading* readings, VolumeReadin
     return;
   }
 
-  float frac = (lvl.value - cfg.volZeroLevel) / (cfg.volMaxLevel - cfg.volZeroLevel);
+  float frac = (lvl.value - c.volZeroLevel) / (c.volMaxLevel - c.volZeroLevel);
   if (frac < 0.0f) frac = 0.0f; // below empty reference -> report empty, not negative
   if (frac > 1.0f) frac = 1.0f; // above full reference -> cap at capacity, don't overshoot
 
-  float vol = cfg.capacity * frac;
+  float vol = c.capacity * frac;
   out.value    = round(vol * 100.0f) / 100.0f;
   out.hasValue = true;
   out.status   = "ok";

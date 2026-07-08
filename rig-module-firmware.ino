@@ -880,12 +880,6 @@ String buildPayload(bool bufferedFlag) {
   doc["uptimeS"]  = (unsigned long)(millis() / 1000UL);
   doc["rssi"]     = WiFi.RSSI();
   doc["buffered"] = bufferedFlag;
-  // Tank capacity (only when volume is configured) — rig-modules.js reads
-  // this top-level field to compute the fill-bar %, same shape as the
-  // original tank spec (capacity as a plain number in the module's unit).
-  if (cfg.capacity > 0.0f) {
-    doc["capacity"] = cfg.capacity;
-  }
 
   // Timestamp
   if (ntpClient.isTimeSet() && ntpClient.getEpochTime() > 1000000000UL) {
@@ -922,13 +916,13 @@ String buildPayload(bool bufferedFlag) {
       c["status"] = r.status;
     }
 
-    // Tank volume (optional derived value) — only emitted once configured
-    // on /config (capacity > 0). Computed from whichever channel's SCALED
-    // reading is currently in `readings[]`, so it reflects the same cal/
-    // fault state the channel itself is reporting.
+    // Tank volume (optional derived value) — only emitted once some channel
+    // has "Compute Tank Volume" checked on /channels (see computeTankVolume).
+    // Computed from that channel's SCALED reading currently in `readings[]`,
+    // so it reflects the same cal/fault state the channel itself is showing.
     VolumeReading vol;
     computeTankVolume(cfg, readings, vol);
-    if (cfg.capacity > 0.0f) {
+    if (vol.status != "disabled") {
       JsonObject derived = doc.createNestedObject("derived");
       JsonObject volObj = derived.createNestedObject("volume");
       if (vol.hasValue) {
@@ -936,8 +930,13 @@ String buildPayload(bool bufferedFlag) {
       } else {
         volObj["value"] = nullptr;
       }
-      volObj["unit"]   = cfg.capacityUnit;
+      volObj["unit"]   = vol.unit;
       volObj["status"] = vol.status;
+      // Top-level capacity — rig-modules.js reads this for the fill-bar %,
+      // same shape as the original tank spec.
+      for (int i = 0; i < 8; i++) {
+        if (cfg.ch[i].volumeEnabled) { doc["capacity"] = cfg.ch[i].capacity; break; }
+      }
     }
 
     xSemaphoreGive(stateMutex);
