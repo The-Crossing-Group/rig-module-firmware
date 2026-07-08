@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.1.1"
+#define FW_VERSION "rig-module-1.1.2"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -54,7 +54,11 @@ struct ModuleConfig {
   long   modbusBaud     = 9600;  // Waveshare 8AI (B) default; SDSIN clone default is 4800
   int    pollIntervalS  = 3;
   String piHost         = "";
-  String rigToken       = "";
+  // Plug-and-play: every rig's Pi logger uses the same shared token
+  // (matches config.json's rig_token on every deployed rig). No manual
+  // entry needed out of the box — /config still lets it be overridden
+  // per-module if a rig ever needs a different token.
+  String rigToken       = "7804991970";
   String wifiSSID       = "";
   String wifiPass       = "";
 
@@ -90,7 +94,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.modbusBaud    = p.getLong("mbBaud", 9600);
   c.pollIntervalS = p.getInt("pollInt", 3);
   c.piHost        = p.getString("piHost", "");
-  c.rigToken      = p.getString("rigToken", "");
+  c.rigToken      = p.getString("rigToken", "7804991970");
   c.wifiSSID      = p.getString("wifiSSID", "");
   c.wifiPass      = p.getString("wifiPass", "");
 

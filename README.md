@@ -73,10 +73,15 @@ Board: **ESP32 Arduino core** (espressif32) — install via Boards Manager.
    (only needed for non-standard networks). Tap **🔍 Scan for Networks** to
    list nearby SSIDs with signal strength — tap one to fill it in, then just
    type the password.
-4. Go to **⚙ Config** to set a friendly Module Name, Pi host (blank = mDNS
-   auto-discovery), and X-Rig-Token (must match Pi's `rig_token`).
+4. That's it for connectivity — the module is already talking to the Pi.
+   X-Rig-Token defaults to the standard shared rig token (`7804991970`,
+   same as every rig's `config.json`), and Pi host defaults to mDNS
+   auto-discovery (`_rig-logger._tcp.local`). Nothing to type. Go to
+   **⚙ Config** only if you want a friendly Module Name, or need to
+   override the token/host for a non-standard rig.
 5. Go to **📐 Channels** to configure each of the 8 analog channels you're
-   using.
+   using (all 8 report out of the box — only needed to rename/label them
+   or hide ones that aren't wired up).
 
 The Module ID (`MODULE-ABC123`) is fixed — derived from the MAC address, not
 editable — so every unit is uniquely and permanently identifiable regardless
