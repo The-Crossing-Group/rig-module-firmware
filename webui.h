@@ -379,8 +379,8 @@ static String calPage(ModuleConfig& cfg) {
 function fetchRaw(){
   fetch('/api/channel-raw').then(r=>r.json()).then(d=>{
     d.channels.forEach(c=>{
-      // Don't overwrite the "(not present on <board>)" label for channels
-      // beyond what the detected board actually has.
+      // Don't overwrite the not-present label for channels beyond what
+      // the detected board actually has.
       if (c.ch >= _numRealChannels) return;
       let el=document.getElementById('ma'+c.ch);
       if(el) el.textContent = c.ma.toFixed(3)+' mA (raw '+c.raw+')';
