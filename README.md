@@ -1,6 +1,6 @@
 # Rig Module Firmware
 
-**Version:** rig-module-1.5.0
+**Version:** rig-module-1.6.0
 **Board:** LilyGo T-CAN485 / XY-32 CAN+RS485 (ESP32)
 **Target:** Waveshare Modbus RTU Analog Input 8CH **(B version)** or Eletechsup AMIDJ14 (6AI-4DO-4DI) — auto-detected, see below.
 
@@ -31,6 +31,27 @@ omitted from the JSON payload sent to the Pi.
 Adding another board: add its Product ID / channel count / raw divisor to
 the `BoardProfile` table in `modbus.h` (`modbusDetectBoard()`) — that's the
 only place board-specific behavior lives.
+
+---
+
+## Multi-Tank Support (v1.6.0+)
+
+Any number of channels on the same module can independently have "Compute
+Tank Volume" checked on `/channels` — e.g. two separate tanks wired to two
+channels of the same Waveshare/Modbus board. Each one gets its own linear
+level-to-volume map (`computeChannelVolume()` in `scaling.h`).
+
+Every channel with volume enabled carries its own `volume` (`{value, unit,
+status}`) + `capacity` field right on its entry in the JSON payload's
+`channels[]` array, and the `/live` page shows a **Volume column on the
+Channels table** (instead of a single tank card) so all configured tanks
+are visible at once, not just the first one found.
+
+The old top-level `derived.volume` + `capacity` fields are still sent
+(mirroring whichever channel is the first one with volume enabled) for any
+existing consumer that only expects a single tank per module — but with
+multiple tanks configured, the per-channel `volume` field is the complete,
+authoritative source.
 
 ---
 

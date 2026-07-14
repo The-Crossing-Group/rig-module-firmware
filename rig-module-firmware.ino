@@ -887,15 +887,19 @@ void pollTask(void* param) {
                 label.c_str(), kind.c_str(), raw[ch], r.mA, r.status.c_str());
             }
           }
-          VolumeReading volDbg;
-          computeTankVolume(cfg, readings, volDbg);
-          if (volDbg.status != "disabled") {
+          // Print every channel's tank volume, not just the first one —
+          // multiple channels on the same board can each be a separate tank.
+          for (int ch = 0; ch < 8; ch++) {
+            if (!cfg.ch[ch].volumeEnabled) continue;
+            VolumeReading volDbg;
+            computeChannelVolume(ch, cfg, readings, volDbg);
+            String label = "Tank Vol Ch" + String(ch + 1);
             if (volDbg.hasValue) {
               Serial.printf("  %-20s%-10s          = %8.2f %-6s (%s)\n",
-                "Tank Volume", "[derived]", volDbg.value, volDbg.unit.c_str(), volDbg.status.c_str());
+                label.c_str(), "[derived]", volDbg.value, volDbg.unit.c_str(), volDbg.status.c_str());
             } else {
               Serial.printf("  %-20s%-10s          -- (%s)\n",
-                "Tank Volume", "[derived]", volDbg.status.c_str());
+                label.c_str(), "[derived]", volDbg.status.c_str());
             }
           }
         }
@@ -926,7 +930,11 @@ void writeChannelModes() {
 // BUILD JSON PAYLOAD
 // =============================================================================
 String buildPayload(bool bufferedFlag) {
-  DynamicJsonDocument doc(4096);
+  // Bumped from 4096 -> 6144: multiple channels can each now carry a
+  // nested "volume" object + "capacity" (multi-tank support), which no
+  // longer reliably fits in the old budget once several channels have
+  // "Compute Tank Volume" checked at once.
+  DynamicJsonDocument doc(6144);
 
   doc["moduleId"] = cfg.moduleId;   // primary key the Pi uses
   doc["type"]     = cfg.moduleType.isEmpty() ? "generic" : cfg.moduleType;  // configurable on /config
@@ -980,12 +988,33 @@ String buildPayload(bool bufferedFlag) {
         c["value"] = nullptr;
       }
       c["status"] = r.status;
+
+      // Per-channel tank volume — any number of channels can independently
+      // have "Compute Tank Volume" checked (e.g. two tanks on two channels
+      // of the same board). Each one that does gets its own "volume" +
+      // "capacity" right on its channel entry, so multi-tank modules show
+      // every tank instead of just one. See computeChannelVolume() (scaling.h).
+      if (cfg.ch[ch].volumeEnabled) {
+        VolumeReading chVol;
+        computeChannelVolume(ch, cfg, readings, chVol);
+        JsonObject volObj = c.createNestedObject("volume");
+        if (chVol.hasValue) {
+          volObj["value"] = chVol.value;
+        } else {
+          volObj["value"] = nullptr;
+        }
+        volObj["unit"]   = chVol.unit;
+        volObj["status"] = chVol.status;
+        c["capacity"] = cfg.ch[ch].capacity;
+      }
     }
 
-    // Tank volume (optional derived value) — only emitted once some channel
-    // has "Compute Tank Volume" checked on /channels (see computeTankVolume).
-    // Computed from that channel's SCALED reading currently in `readings[]`,
-    // so it reflects the same cal/fault state the channel itself is showing.
+    // Back-compat top-level derived.volume + capacity — mirrors whichever
+    // channel is the FIRST one with volumeEnabled, for any older consumer
+    // that only knows about a single tank per module. With multiple tanks
+    // configured, the complete set is in each channel's own "volume" field
+    // above (that's the multi-tank source of truth); this stays for now
+    // so nothing that reads the old shape breaks.
     VolumeReading vol;
     computeTankVolume(cfg, readings, vol);
     if (vol.status != "disabled") {

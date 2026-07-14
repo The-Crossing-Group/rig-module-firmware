@@ -408,24 +408,24 @@ static String livePage() {
 function fetchLive(){
   fetch('/api/status').then(r=>r.json()).then(d=>{
     let s = '';
-    // Tank Volume up top, big and obvious — this is the number people
-    // actually care about when bench-testing a tank module standalone
-    // (no Pi logger needed to see real gallons/m3).
-    if (d.derived && d.derived.volume && d.derived.volume.status !== 'disabled') {
-      let v = d.derived.volume;
-      let cls = v.status==='ok'?'ok':'open';
-      s += '<div class="card" style="text-align:center">';
-      s += '<div class="small" style="text-transform:uppercase;letter-spacing:.05em">Tank Volume</div>';
-      s += '<div style="font-size:42px;font-weight:bold" class="'+cls+'">'+
-           (v.value!=null?v.value:'--')+' <span style="font-size:20px">'+v.unit+'</span></div>';
-      s += '<div class="small">status: '+v.status+(d.capacity!=null?'  &middot;  capacity: '+d.capacity+' '+v.unit:'')+'</div>';
-      s += '</div>';
-    }
-    s += '<h3>Channels</h3><table><tr><th>Ch</th><th>Name</th><th>Kind</th><th>mA</th><th>Value</th><th>Status</th></tr>';
+    // Volume is a column on the Channels table below (not a single card up
+    // top) — a module can have MULTIPLE tanks, one per channel with
+    // "Compute Tank Volume" checked (see /channels), and every one of them
+    // needs to show up here, not just the first.
+    s += '<h3>Channels</h3><table><tr><th>Ch</th><th>Name</th><th>Kind</th><th>mA</th><th>Value</th><th>Volume</th><th>Status</th></tr>';
     (d.channels||[]).forEach(c=>{
       let cls = c.status==='ok'?'ok':'open';
       s += '<tr><td>'+(c.ch+1)+'</td><td>'+c.name+'</td><td>'+(c.kind||'')+'</td><td>'+(c.ma!=null?c.ma.toFixed(2):'--')+'</td>';
       s += '<td>'+(c.value!=null?c.value+' '+c.unit:'--')+'</td>';
+      if (c.volume) {
+        let v = c.volume;
+        let vcls = v.status==='ok'?'ok':'open';
+        let vtxt = (v.value!=null ? v.value : '--') + ' ' + v.unit;
+        if (c.capacity!=null) vtxt += ' <span class="small">/ '+c.capacity+' '+v.unit+'</span>';
+        s += '<td class="'+vcls+'">'+vtxt+'</td>';
+      } else {
+        s += '<td class="small">--</td>';
+      }
       s += '<td class="'+cls+'">'+c.status+'</td></tr>';
     });
     s += '</table>';
@@ -493,7 +493,7 @@ function doOTA(){
 
 // ─── API handler helpers ──────────────────────────────────────────────────────
 static void handleApiStatus() {
-  DynamicJsonDocument doc(4096);
+  DynamicJsonDocument doc(6144); // matches buildPayload()'s bumped size (multi-tank volume fields)
   String payload = buildPayload(false);
   deserializeJson(doc, payload);
   doc["system"]["uptime"]     = millis() / 1000;

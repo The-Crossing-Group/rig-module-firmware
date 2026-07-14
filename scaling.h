@@ -64,36 +64,37 @@ void scaleChannel(int ch, uint16_t raw, ModuleConfig& cfg, ChannelReading& out, 
 // =============================================================================
 // TANK VOLUME (optional derived value, spec-tank-modules.md §4b)
 //
-// Lives on whichever channel has "Compute Tank Volume" checked on /channels
-// (ChannelConfig.volumeEnabled) — that channel IS the level input. One linear
-// map: volZeroLevel (eng units, e.g. m) -> volume 0, volMaxLevel -> volume =
-// capacity. Clamped so volume never goes negative or over capacity, but the
-// underlying channel status (open/over/stale) still wins — a fault on the
-// level channel means the volume is unknown too, not a bogus number.
+// Any channel can have "Compute Tank Volume" checked on /channels
+// (ChannelConfig.volumeEnabled) — that channel IS the level input for its
+// own tank. One linear map per channel: volZeroLevel (eng units, e.g. m) ->
+// volume 0, volMaxLevel -> volume = capacity. Clamped so volume never goes
+// negative or over capacity, but the underlying channel status (open/over/
+// stale) still wins — a fault on the level channel means the volume is
+// unknown too, not a bogus number.
 //
-// At most one channel should have volumeEnabled — if more than one somehow
-// does (e.g. old config), the first one found (lowest index) wins.
+// Multiple channels can each independently have volumeEnabled — e.g. two
+// separate tanks wired to two channels on the same Waveshare/Modbus board.
+// computeChannelVolume() computes ONE specific channel's volume; call it
+// per-channel (buildPayload() does this to put a "volume" field on every
+// channel that has it enabled, and /live shows it as a table column).
 // =============================================================================
 struct VolumeReading {
   bool   hasValue = false;
-  float  value    = 0.0f;   // in the volume channel's capacityUnit
+  float  value    = 0.0f;   // in this channel's capacityUnit
   String unit     = "m3";
   String status   = "disabled";
 };
 
-void computeTankVolume(ModuleConfig& cfg, ChannelReading* readings, VolumeReading& out) {
+void computeChannelVolume(int ch, ModuleConfig& cfg, ChannelReading* readings, VolumeReading& out) {
   out.hasValue = false;
   out.value    = 0.0f;
   out.unit     = "m3";
   out.status   = "disabled";
 
-  int ch = -1;
-  for (int i = 0; i < 8; i++) {
-    if (cfg.ch[i].volumeEnabled) { ch = i; break; }
-  }
-  if (ch < 0) return; // no channel configured for volume
-
+  if (ch < 0 || ch > 7) return;
   ChannelConfig& c = cfg.ch[ch];
+  if (!c.volumeEnabled) return;
+
   out.unit = c.capacityUnit;
   if (c.capacity <= 0.0f) return;               // capacity not set yet
   if (c.volMaxLevel <= c.volZeroLevel) return;   // needs a real range
@@ -115,4 +116,25 @@ void computeTankVolume(ModuleConfig& cfg, ChannelReading* readings, VolumeReadin
   out.value    = round(vol * 100.0f) / 100.0f;
   out.hasValue = true;
   out.status   = "ok";
+}
+
+// Back-compat wrapper: finds the FIRST channel with volumeEnabled and
+// returns its volume. Still used for the single top-level derived.volume +
+// capacity fields in buildPayload() (kept for any single-tank consumer
+// that reads those instead of the per-channel table) — with multiple tanks
+// configured, only the lowest-numbered one appears here; the rest show up
+// per-channel via computeChannelVolume() (see the "channels" array/table).
+void computeTankVolume(ModuleConfig& cfg, ChannelReading* readings, VolumeReading& out) {
+  int ch = -1;
+  for (int i = 0; i < 8; i++) {
+    if (cfg.ch[i].volumeEnabled) { ch = i; break; }
+  }
+  if (ch < 0) {
+    out.hasValue = false;
+    out.value    = 0.0f;
+    out.unit     = "m3";
+    out.status   = "disabled";
+    return;
+  }
+  computeChannelVolume(ch, cfg, readings, out);
 }
