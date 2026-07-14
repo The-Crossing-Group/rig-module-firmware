@@ -179,6 +179,12 @@ ChannelReading readings[8];  // latest scaled readings
 uint16_t rawModbus[8] = {0}; // latest raw register values from 8AI
 bool modbusOk = false;
 bool modbusInitDone = false; // true after mode-3 write on boot
+// Detected once at poll-task startup (modbusDetectBoard(), modbus.h) —
+// tells us how many real channels the wired board has and what its raw
+// register units are, so the same firmware image works unmodified on
+// either a Waveshare 8AI (B) or an Eletechsup AMIDJ14 (or any future
+// board added to modbus.h's BoardProfile table) with zero manual config.
+BoardProfile boardProfile = BOARD_WAVESHARE_8AI;
 
 WebServer webServer(80);
 
@@ -793,12 +799,34 @@ void pollTask(void* param) {
           Serial.println("[Poll] Boot auto-scan found nothing either — check wiring/board power.");
         }
       }
+
+      // Board auto-detection — reads the Product ID special-function
+      // register (0x00F7) to work out which analog-to-Modbus board is
+      // actually wired up (Waveshare vs. Eletechsup AMIDJ14, etc.) and
+      // picks the matching channel count + raw-value scale automatically.
+      // No dropdown, no jumper, no manual config — plug in either board
+      // and this firmware just works. Runs once at boot, after baud is
+      // already sorted out above (the ID probe needs a working baud).
+      boardProfile = modbusDetectBoard(cfg.modbusSlaveId);
+      Serial.printf("[Poll] Detected board: %s (%d channels, raw/%.0f = mA)\n",
+        boardProfile.name, boardProfile.numChannels, boardProfile.rawDivisor);
+
       xSemaphoreGive(modbusBusMutex);
     }
   }
 
-  // Write mode 3 (4-20mA) to all enabled channels on boot
-  writeChannelModes();
+  // Write mode 3 (4-20mA) to all enabled channels on boot — this is a
+  // Waveshare-specific holding-register convention (boards like the
+  // Eletechsup AMIDJ14 have no such mode-select register at all; the
+  // write below is harmlessly ignored/no-op'd by hardware that doesn't
+  // implement it, but skip it explicitly once we know the board isn't
+  // Waveshare, to avoid a pointless bus round-trip and a scary-looking
+  // "failed to set channel modes" warning on every boot for those boards).
+  if (boardProfile.rawDivisor == BOARD_WAVESHARE_8AI.rawDivisor) {
+    writeChannelModes();
+  } else {
+    Serial.printf("[Modbus] Skipping mode-3 write — %s doesn't use Waveshare's mode registers\n", boardProfile.name);
+  }
   modbusInitDone = true;
   Serial.println("[Poll] Modbus init complete, entering poll loop");
 
@@ -810,7 +838,7 @@ void pollTask(void* param) {
     uint16_t raw[8] = {0};
     bool ok = false;
     if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      ok = modbusReadAll(cfg.modbusSlaveId, raw);
+      ok = modbusReadAll(cfg.modbusSlaveId, raw, boardProfile.numChannels);
       xSemaphoreGive(modbusBusMutex);
     }
     pollCount++;
@@ -827,8 +855,13 @@ void pollTask(void* param) {
       if (ok) {
         memcpy(rawModbus, raw, sizeof(raw));
         for (int ch = 0; ch < 8; ch++) {
-          if (cfg.ch[ch].enabled) {
-            scaleChannel(ch, raw[ch], cfg, readings[ch]);
+          // Channels beyond the detected board's real channel count don't
+          // exist in hardware (e.g. ch 6/7 on a 6-channel AMIDJ14) — treat
+          // them as not-valid rather than scaling a zero-filled raw value
+          // into a fake "open circuit" reading that implies a channel is
+          // there but unwired.
+          if (cfg.ch[ch].enabled && ch < boardProfile.numChannels) {
+            scaleChannel(ch, raw[ch], cfg, readings[ch], boardProfile.rawDivisor);
           } else {
             readings[ch].valid = false;
           }
@@ -924,6 +957,12 @@ String buildPayload(bool bufferedFlag) {
   if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
     for (int ch = 0; ch < 8; ch++) {
       if (!cfg.ch[ch].enabled) continue;
+      // Don't report channels beyond what the detected board actually has
+      // (e.g. ch 6/7 on a 6-channel AMIDJ14) — they're enabled=true by
+      // default (plug-and-play) but there's no real hardware behind them,
+      // so leave them out of the payload entirely instead of sending a
+      // permanently-stale phantom channel.
+      if (ch >= boardProfile.numChannels) continue;
       JsonObject c = chArr.createNestedObject();
       c["ch"]   = ch;
       c["kind"] = cfg.ch[ch].kind;

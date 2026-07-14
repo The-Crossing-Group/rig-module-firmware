@@ -1,8 +1,36 @@
 # Rig Module Firmware
 
-**Version:** rig-module-1.0.0
+**Version:** rig-module-1.5.0
 **Board:** LilyGo T-CAN485 / XY-32 CAN+RS485 (ESP32)
-**Target:** Waveshare Modbus RTU Analog Input 8CH **(B version)**
+**Target:** Waveshare Modbus RTU Analog Input 8CH **(B version)** or Eletechsup AMIDJ14 (6AI-4DO-4DI) — auto-detected, see below.
+
+---
+
+## Multi-Board Support (v1.5.0+)
+
+This firmware now auto-detects which analog-to-Modbus board is wired up —
+**no dropdown, jumper, or manual config needed.** At boot, it reads the
+board's "Product ID" special-function register (0x00F7) over Modbus and
+picks the matching channel count + raw-value scale:
+
+| Board | Product ID | Channels | Raw units |
+|---|---|---|---|
+| Waveshare Modbus RTU Analog Input 8CH (B) | 2308 | 8 | µA (÷1000 = mA) |
+| Eletechsup AMIDJ14 (6AI-4DO-4DI) | 2814 | 6 | 0.01mA (÷100 = mA) |
+
+If the Product ID read fails or returns an ID we don't recognize, the
+firmware falls back to the Waveshare profile (the original default before
+this detection existed), so nothing regresses for existing deployments.
+
+Swap boards, reboot, done — same firmware image, same config UI, correct
+scaling either way. The detected board name + channel count is shown on
+the `/channels` and `/system` pages. Channels beyond a board's real count
+(e.g. ch 7-8 on the 6-channel AMIDJ14) are greyed out on `/channels` and
+omitted from the JSON payload sent to the Pi.
+
+Adding another board: add its Product ID / channel count / raw divisor to
+the `BoardProfile` table in `modbus.h` (`modbusDetectBoard()`) — that's the
+only place board-specific behavior lives.
 
 ---
 

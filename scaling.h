@@ -7,12 +7,17 @@
 #include "config.h"
 
 // Scale one channel
-// raw: 16-bit value from FC04 (in mode 3: 4000-20000 = 4-20 mA in µA units)
-void scaleChannel(int ch, uint16_t raw, ModuleConfig& cfg, ChannelReading& out) {
+// raw: 16-bit value from FC04. Different analog-to-Modbus boards report
+// this raw value in different units — Waveshare 8AI (B) in mode 3 reports
+// µA (divide by 1000 for mA), while the Eletechsup AMIDJ14 reports
+// centi-mA/0.01mA units (divide by 100 for mA). rawDivisor comes from the
+// BoardProfile picked by modbusDetectBoard() at boot (modbus.h) so this
+// function itself never needs to know which specific board is wired up —
+// it just applies whatever divisor was detected.
+void scaleChannel(int ch, uint16_t raw, ModuleConfig& cfg, ChannelReading& out, float rawDivisor) {
   out.valid = true;
 
-  // Convert raw to mA (mode 3: value is µA, divide by 1000)
-  float mA = raw / 1000.0f;
+  float mA = raw / rawDivisor;
   out.mA = mA;
 
   // Open circuit check (disconnected loop reads near 0)

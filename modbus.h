@@ -166,9 +166,97 @@ bool modbusWriteMultiple(uint8_t slaveId, uint16_t startAddr, uint8_t count, uin
   return true;
 }
 
-// Convenience: read all 8 input registers
-bool modbusReadAll(uint8_t slaveId, uint16_t* raw8) {
-  return modbusReadInputRegs(slaveId, 0x0000, 8, raw8);
+// Convenience: read the board's analog input channels. numChannels lets a
+// board with fewer real channels (e.g. the Eletechsup AMIDJ14 only has 6,
+// vs. 8 on the original board this firmware targeted) be read without
+// requesting registers past what it actually implements — asking for more
+// registers than a board has causes it to return a Modbus exception or no
+// response at all, which would otherwise fail the ENTIRE read (all 8
+// channels going stale) just because channels 6/7 don't exist on that
+// hardware. Any channels beyond numChannels are zero-filled (reads as
+// "open circuit", same as a real unwired channel — a reasonable default
+// for "this channel doesn't exist on this board").
+bool modbusReadAll(uint8_t slaveId, uint16_t* raw8, int numChannels = 8) {
+  if (numChannels > 8) numChannels = 8;
+  if (numChannels < 1) numChannels = 1;
+  for (int i = numChannels; i < 8; i++) raw8[i] = 0;
+  return modbusReadInputRegs(slaveId, 0x0000, (uint8_t)numChannels, raw8);
+}
+
+// =============================================================================
+// BOARD AUTO-DETECTION
+//
+// Different analog-to-Modbus boards use a different raw-value scale and a
+// different channel count, but ALL of them we support expose the same
+// "Product ID" special-function register at 0x00F7 (247) — reading it via
+// FC03 identifies the connected board with no jumpers, dropdown, or manual
+// selection needed at all:
+//   0 (or read fails)  -> unknown/legacy -> assume Waveshare (safe default,
+//                         matches every board this firmware originally
+//                         targeted before Product ID detection existed)
+//   2308               -> Waveshare 8AI (B):  8ch, raw is µA          (/1000)
+//   2814               -> Eletechsup AMIDJ14: 6ch, raw is 0.01mA      (/100)
+// Add more SKUs here as needed — this table is the ONLY place board-
+// specific behavior needs to be taught to the firmware; scaleChannel() and
+// the poll task just consume the resulting BoardProfile.
+// =============================================================================
+struct BoardProfile {
+  const char* name;
+  int   numChannels;
+  float rawDivisor;    // raw register value / rawDivisor = mA
+};
+
+static const BoardProfile BOARD_WAVESHARE_8AI  = { "Waveshare 8AI (B)",  8, 1000.0f };
+static const BoardProfile BOARD_ELETECHSUP_AMIDJ14 = { "Eletechsup AMIDJ14", 6, 100.0f };
+
+// Reads special-function register 0x00F7 (Product ID) via FC03. Returns the
+// matching BoardProfile, or Waveshare as the safe fallback if the read
+// fails (unplugged bus, board without this register, wrong baud, etc.) or
+// returns an ID we don't recognize yet — the original 8-channel/µA
+// behavior is that fallback, so any board this firmware worked with
+// before Product-ID detection existed keeps working identically.
+BoardProfile modbusDetectBoard(uint8_t slaveId) {
+  if (!_mbSerial) return BOARD_WAVESHARE_8AI;
+
+  while (_mbSerial->available()) _mbSerial->read();
+
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x03;             // FC03 — read holding/special-function registers
+  req[2] = 0x00;
+  req[3] = 0xF7;             // register 247 = Product ID
+  req[4] = 0x00;
+  req[5] = 0x01;              // read 1 register
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  modbusSend(req, 8);
+
+  uint8_t resp[16];
+  int n = modbusReceive(resp, 7, 300); // slave+fc+len+2 data+2 CRC = 7 bytes
+
+  if (n < 7) {
+    Serial.println("[Modbus] Board ID probe: no/short response — defaulting to Waveshare");
+    return BOARD_WAVESHARE_8AI;
+  }
+  uint16_t rxCrc   = resp[n-2] | ((uint16_t)resp[n-1] << 8);
+  uint16_t calcCrc = modbusCRC(resp, n-2);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x03) {
+    Serial.println("[Modbus] Board ID probe: bad response — defaulting to Waveshare");
+    return BOARD_WAVESHARE_8AI;
+  }
+
+  uint16_t productId = ((uint16_t)resp[3] << 8) | resp[4];
+  Serial.printf("[Modbus] Board ID probe: Product ID register = %u\n", productId);
+
+  switch (productId) {
+    case 2308: return BOARD_WAVESHARE_8AI;
+    case 2814: return BOARD_ELETECHSUP_AMIDJ14;
+    default:
+      Serial.printf("[Modbus] Unrecognized Product ID %u — defaulting to Waveshare\n", productId);
+      return BOARD_WAVESHARE_8AI;
+  }
 }
 
 // =============================================================================

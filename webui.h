@@ -27,6 +27,8 @@ extern ChannelReading readings[8];
 extern SemaphoreHandle_t stateMutex;
 extern SemaphoreHandle_t modbusBusMutex;
 long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud); // modbus.h
+BoardProfile modbusDetectBoard(uint8_t slaveId); // modbus.h
+extern BoardProfile boardProfile; // rig-module-firmware.ino — detected once at boot
 extern NTPClient ntpClient;
 extern bool apModeActive;
 extern String apSSID;
@@ -249,13 +251,23 @@ static String calPage(ModuleConfig& cfg) {
   h += "<p class='small'>Each channel is fully independent — set its own name, kind (free text: level, pressure, temp, "
        "flow, rpm... anything), unit, and scaling. Live mA auto-refreshes every 2s. "
        "Set Zero/Max at known engineering values for the most accurate reading, or rely on the mA linear map below if not calibrated.</p>";
+  // Detected analog-to-Modbus board (modbus.h modbusDetectBoard(), run once
+  // at boot) — no manual selection needed, Waveshare and Eletechsup AMIDJ14
+  // are both auto-identified via their Product ID register.
+  h += "<p class='small'>Detected board: <b>" + String(boardProfile.name) + "</b> (" +
+       String(boardProfile.numChannels) + " channels)</p>";
 
   for (int i = 0; i < 8; i++) {
-    h += "<div class='card'><b>Channel ";
+    bool exists = (i < boardProfile.numChannels);
+    h += "<div class='card'";
+    if (!exists) h += " style='opacity:.4'";
+    h += "><b>Channel ";
     h += String(i+1);
     h += "</b>&nbsp;<span class='small' id='ma";
     h += String(i);
-    h += "'></span>";
+    h += "'>";
+    if (!exists) h += "(not present on " + String(boardProfile.name) + ")";
+    h += "</span>";
     h += "<form method='POST' action='/api/config'>";
     h += "<input type='hidden' name='ch' value='";
     h += String(i);
@@ -361,11 +373,15 @@ static String calPage(ModuleConfig& cfg) {
     h += "</form></div>";
   }
 
+  h += "<script>var _numRealChannels = " + String(boardProfile.numChannels) + ";</script>";
   h += R"(
 <script>
 function fetchRaw(){
   fetch('/api/channel-raw').then(r=>r.json()).then(d=>{
     d.channels.forEach(c=>{
+      // Don't overwrite the "(not present on <board>)" label for channels
+      // beyond what the detected board actually has.
+      if (c.ch >= _numRealChannels) return;
       let el=document.getElementById('ma'+c.ch);
       if(el) el.textContent = c.ma.toFixed(3)+' mA (raw '+c.raw+')';
     });
@@ -438,6 +454,9 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<div class='page'><h2>&#128295; System</h2>";
   h += "<div class='card'><b>Firmware:</b> ";
   h += String(FW_VERSION);
+  h += "<br><b>Detected Board:</b> ";
+  h += String(boardProfile.name);
+  h += " (" + String(boardProfile.numChannels) + " channels, auto-detected via Product ID register)";
   h += "<br><b>Module ID:</b> ";
   h += cfg.moduleId;
   h += "<br><b>MAC:</b> ";
@@ -494,11 +513,15 @@ static void handleChannelRaw() {
   DynamicJsonDocument doc(512);
   JsonArray arr = doc.createNestedArray("channels");
   if (xSemaphoreTake(_mtx, pdMS_TO_TICKS(200)) == pdTRUE) {
+    // Use the auto-detected board's actual raw divisor (modbus.h) — this
+    // used to hardcode Waveshare's /1000 (as raw/10/100), which showed a
+    // wrong (10x too low) live mA reading on the Channels page for any
+    // other board, e.g. the Eletechsup AMIDJ14 (/100).
     for (int i = 0; i < 8; i++) {
       JsonObject o = arr.createNestedObject();
       o["ch"]  = i;
       o["raw"] = _raw[i];
-      o["ma"]  = round(_raw[i] / 10.0f) / 100.0f;
+      o["ma"]  = round(_raw[i] / boardProfile.rawDivisor * 100.0f) / 100.0f;
     }
     xSemaphoreGive(_mtx);
   }
