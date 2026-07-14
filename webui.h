@@ -201,13 +201,11 @@ static String cfgPage(ModuleConfig& cfg) {
        "before falling back to the setup AP.</div>";
   h += "<br><button type='submit'>Save</button>";
   h += "</form>"; // closes the single <form action='/api/config'> opened above
-  if (!apModeActive) {
-    h += "<div class='card' style='margin-top:12px'><b>Forget WiFi</b><br><span class='small'>Clears the "
-         "saved network and reboots straight into setup-AP mode. Use this before moving the unit to a "
-         "different site.</span><br><br>";
-    h += "<button class='btn-red' onclick=\"if(confirm('Forget saved WiFi and reboot into setup mode?'))"
-         "fetch('/api/wifi/forget',{method:'POST'}).then(()=>alert('Forgotten. Rebooting...'))\">Forget WiFi</button></div>";
-  }
+  h += "<div class='card' style='margin-top:12px'><b>Forget WiFi</b><br><span class='small'>Clears the "
+       "saved network and reboots straight into setup-AP mode. Use this before moving the unit to a "
+       "different site, or if it's stuck trying (and failing) to reconnect to a saved network.</span><br><br>";
+  h += "<button class='btn-red' onclick=\"if(confirm('Forget saved WiFi and reboot into setup mode?'))"
+       "fetch('/api/wifi/forget',{method:'POST'}).then(()=>alert('Forgotten. Rebooting...'))\">Forget WiFi</button></div>";
   h += R"JS(
 <script>
 function doScan(){
