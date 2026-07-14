@@ -72,15 +72,17 @@ static const char NAV[] PROGMEM = R"(
   <a href='/channels'>&#128208; Channels</a>
   <a href='/live'>&#128202; Live</a>
   <a href='/system'>&#128295; System</a>
-  <a href='/wifi'>&#128246; WiFi</a>
 </div>
 )";
 
-// AP-mode warning banner — prepended to pages when broadcasting the setup AP
+// AP-mode warning banner — prepended to pages when broadcasting the setup AP.
+// WiFi is configured right on this page (the Config page, "/") now — the
+// old standalone /wifi page was a redundant duplicate of the same SSID/
+// password fields and has been removed.
 static String apBanner() {
   if (!apModeActive) return "";
   return "<div class='ap-banner'>No WiFi configured yet — connect a device to this AP and "
-         "<a href='/wifi'>set your network here</a>.</div>";
+         "set your network below.</div>";
 }
 
 // ─── Helper: get param from WebServer ────────────────────────────────────────
@@ -168,15 +170,75 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<div class='small'>Tank volume (computed from a level channel) now lives on the "
        "<a href='/channels'>&#128208; Channels</a> page — check \"Compute Tank Volume\" on "
        "whichever channel is your level sensor.</div>";
+
+  // --- WiFi (merged in from the old standalone /wifi page — was a
+  // redundant duplicate of these same two fields, so it's gone now and
+  // everything WiFi-related, including network scan, lives right here). ---
   h += "<h3>WiFi</h3>";
-  h += "<label>SSID</label><input name='wifiSSID' value='";
+  if (apModeActive) {
+    h += "<div class='card'>Currently broadcasting setup AP: <b>" + apSSID + "</b><br>"
+         "Not connected to any site network yet.</div>";
+  } else {
+    h += "<div class='card'>Connected to: <b>" + cfg.wifiSSID + "</b><br>"
+         "IP: " + WiFi.localIP().toString() + "  RSSI: " + String(WiFi.RSSI()) + " dBm</div>";
+  }
+  h += "<div class='row' style='margin-bottom:10px'>";
+  h += "<button type='button' onclick='doScan()' id='scanBtn'>&#128269; Scan for Networks</button></div>";
+  h += "<div id='scanResults'></div>";
+  h += "<label>SSID</label><input name='wifiSSID' id='wifiSSID' value='";
   h += cfg.wifiSSID;
-  h += "'>";
-  h += "<label>Password</label><input name='wifiPass' type='password' value='";
+  h += "' placeholder='site wifi network name'>";
+  h += "<label>Password</label><input name='wifiPass' id='wifiPass' type='password' value='";
   h += cfg.wifiPass;
-  h += "'>";
+  h += "' placeholder='site wifi password'>";
+  h += "<div class='small'>Saving with a changed SSID/password reboots the unit to connect to the "
+       "new network. If it can't connect within about a minute, it automatically falls back to "
+       "its own setup AP so you can try again — no need to reflash or recompile anything. If no "
+       "network is saved at all, this unit first auto-scans for a standard rig router (SSID "
+       "starting with \"rig\" followed by numbers, e.g. rig132) using the shared rig password, "
+       "before falling back to the setup AP.</div>";
   h += "<br><button type='submit'>Save</button>";
-  h += "</form>";
+  h += "</form>"; // closes the single <form action='/api/config'> opened above
+  if (!apModeActive) {
+    h += "<div class='card' style='margin-top:12px'><b>Forget WiFi</b><br><span class='small'>Clears the "
+         "saved network and reboots straight into setup-AP mode. Use this before moving the unit to a "
+         "different site.</span><br><br>";
+    h += "<button class='btn-red' onclick=\"if(confirm('Forget saved WiFi and reboot into setup mode?'))"
+         "fetch('/api/wifi/forget',{method:'POST'}).then(()=>alert('Forgotten. Rebooting...'))\">Forget WiFi</button></div>";
+  }
+  h += R"JS(
+<script>
+function doScan(){
+  let btn=document.getElementById('scanBtn');
+  let box=document.getElementById('scanResults');
+  btn.disabled=true; btn.textContent='Scanning...';
+  box.innerHTML='<p class="small">Scanning (a few seconds)...</p>';
+  fetch('/api/wifi/scan').then(r=>r.json()).then(d=>{
+    btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks';
+    let nets = d.networks || [];
+    if(nets.length===0){ box.innerHTML='<p class="small">No networks found. Try again.</p>'; return; }
+    let s = '<div class="card">';
+    nets.forEach(function(n, idx){
+      let bars = n.rssi>-60?'####':n.rssi>-70?'###.':n.rssi>-80?'##..':'#...';
+      let lock = n.secure ? '&#128274;' : '';
+      s += '<div class="row" style="justify-content:space-between;padding:4px 0;border-bottom:1px solid #334;cursor:pointer" '+
+           'data-ssid="'+idx+'" onclick="pickNet(scanNets['+idx+'])">'+
+           '<span>'+lock+' '+n.ssid+'</span><span class="small">'+bars+' '+n.rssi+'dBm</span></div>';
+    });
+    s += '</div>';
+    window.scanNets = nets.map(function(n){ return n.ssid; });
+    box.innerHTML = s;
+  }).catch(function(){
+    btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks';
+    box.innerHTML='<p class="small">Scan failed. Try again.</p>';
+  });
+}
+function pickNet(ssid){
+  document.getElementById('wifiSSID').value = ssid;
+  document.getElementById('wifiPass').value = '';
+  document.getElementById('wifiPass').focus();
+}
+</script>)JS";
   h += "</div>";
   return h;
 }
@@ -329,7 +391,21 @@ static String livePage() {
 <script>
 function fetchLive(){
   fetch('/api/status').then(r=>r.json()).then(d=>{
-    let s = '<h3>Channels</h3><table><tr><th>Ch</th><th>Name</th><th>Kind</th><th>mA</th><th>Value</th><th>Status</th></tr>';
+    let s = '';
+    // Tank Volume up top, big and obvious — this is the number people
+    // actually care about when bench-testing a tank module standalone
+    // (no Pi logger needed to see real gallons/m3).
+    if (d.derived && d.derived.volume && d.derived.volume.status !== 'disabled') {
+      let v = d.derived.volume;
+      let cls = v.status==='ok'?'ok':'open';
+      s += '<div class="card" style="text-align:center">';
+      s += '<div class="small" style="text-transform:uppercase;letter-spacing:.05em">Tank Volume</div>';
+      s += '<div style="font-size:42px;font-weight:bold" class="'+cls+'">'+
+           (v.value!=null?v.value:'--')+' <span style="font-size:20px">'+v.unit+'</span></div>';
+      s += '<div class="small">status: '+v.status+(d.capacity!=null?'  &middot;  capacity: '+d.capacity+' '+v.unit:'')+'</div>';
+      s += '</div>';
+    }
+    s += '<h3>Channels</h3><table><tr><th>Ch</th><th>Name</th><th>Kind</th><th>mA</th><th>Value</th><th>Status</th></tr>';
     (d.channels||[]).forEach(c=>{
       let cls = c.status==='ok'?'ok':'open';
       s += '<tr><td>'+(c.ch+1)+'</td><td>'+c.name+'</td><td>'+(c.kind||'')+'</td><td>'+(c.ma!=null?c.ma.toFixed(2):'--')+'</td>';
@@ -337,14 +413,6 @@ function fetchLive(){
       s += '<td class="'+cls+'">'+c.status+'</td></tr>';
     });
     s += '</table>';
-    if (d.derived && d.derived.volume) {
-      let v = d.derived.volume;
-      let cls = v.status==='ok'?'ok':(v.status==='disabled'?'small':'open');
-      s += '<h3>Tank Volume</h3><table><tr><td>Volume</td><td class="'+cls+'">'+
-           (v.value!=null?v.value+' '+v.unit:'--')+' <span class="small">('+v.status+')</span></td></tr>';
-      if (d.capacity!=null) s += '<tr><td>Capacity</td><td>'+d.capacity+' '+v.unit+'</td></tr>';
-      s += '</table>';
-    }
     let sys = d.system||{};
     s += '<h3>System</h3><table>';
     s += '<tr><td>Module ID</td><td>'+d.moduleId+'</td></tr>';
@@ -400,79 +468,6 @@ function doOTA(){
   fetch('/api/ota?url='+encodeURIComponent(url)).then(r=>r.text()).then(t=>alert(t));
 }
 </script>)";
-  h += "</div>";
-  return h;
-}
-
-static String wifiPage(ModuleConfig& cfg) {
-  String h = FPSTR(NAV);
-  h += apBanner();
-  h += "<div class='page'><h2>&#128246; WiFi Setup</h2>";
-  if (apModeActive) {
-    h += "<div class='card'>Currently broadcasting setup AP: <b>" + apSSID + "</b><br>";
-    h += "Not connected to any site network yet.</div>";
-  } else {
-    h += "<div class='card'>Connected to: <b>" + cfg.wifiSSID + "</b><br>";
-    h += "IP: " + WiFi.localIP().toString() + "  RSSI: " + String(WiFi.RSSI()) + " dBm</div>";
-  }
-  h += "<div class='row' style='margin-bottom:10px'>";
-  h += "<button type='button' onclick='doScan()' id='scanBtn'>&#128269; Scan for Networks</button></div>";
-  h += "<div id='scanResults'></div>";
-  h += "<form method='POST' action='/api/wifi'>";
-  h += "<label>Network Name (SSID)</label><input name='wifiSSID' id='wifiSSID' value='";
-  h += cfg.wifiSSID;
-  h += "' placeholder='site wifi network name' required>";
-  h += "<label>Password</label><input name='wifiPass' id='wifiPass' type='password' value='";
-  h += cfg.wifiPass;
-  h += "' placeholder='site wifi password'>";
-  h += "<button type='submit'>Save &amp; Connect</button>";
-  h += "</form>";
-  h += R"JS(
-<script>
-function doScan(){
-  let btn=document.getElementById('scanBtn');
-  let box=document.getElementById('scanResults');
-  btn.disabled=true; btn.textContent='Scanning...';
-  box.innerHTML='<p class="small">Scanning (a few seconds)...</p>';
-  fetch('/api/wifi/scan').then(r=>r.json()).then(d=>{
-    btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks';
-    let nets = d.networks || [];
-    if(nets.length===0){ box.innerHTML='<p class="small">No networks found. Try again.</p>'; return; }
-    let s = '<div class="card">';
-    nets.forEach(function(n, idx){
-      let bars = n.rssi>-60?'####':n.rssi>-70?'###.':n.rssi>-80?'##..':'#...';
-      let lock = n.secure ? '&#128274;' : '';
-      s += '<div class="row" style="justify-content:space-between;padding:4px 0;border-bottom:1px solid #334;cursor:pointer" '+
-           'data-ssid="'+idx+'" onclick="pickNet(scanNets['+idx+'])">'+
-           '<span>'+lock+' '+n.ssid+'</span><span class="small">'+bars+' '+n.rssi+'dBm</span></div>';
-    });
-    s += '</div>';
-    window.scanNets = nets.map(function(n){ return n.ssid; });
-    box.innerHTML = s;
-  }).catch(function(){
-    btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks';
-    box.innerHTML='<p class="small">Scan failed. Try again.</p>';
-  });
-}
-function pickNet(ssid){
-  document.getElementById('wifiSSID').value = ssid;
-  document.getElementById('wifiPass').value = '';
-  document.getElementById('wifiPass').focus();
-}
-</script>)JS";
-  h += "<p class='small'>Saving reboots the unit and attempts to join this network. "
-       "If it can't connect within about a minute, it automatically falls back to "
-       "this setup AP so you can try again — no need to reflash or recompile anything.</p>";
-  h += "<p class='small'>Note: if no network is saved at all, this unit first auto-scans "
-       "for a standard rig router (SSID starting with \"rig\" followed by numbers, e.g. "
-       "rig132) using the shared rig password, before falling back to this setup AP. "
-       "You only need this page manually for non-standard networks.</p>";
-  if (!apModeActive) {
-    h += "<div class='card'><b>Forget WiFi</b><br><span class='small'>Clears the saved network and reboots "
-         "straight into setup-AP mode. Use this before moving the unit to a different site.</span><br><br>";
-    h += "<button class='btn-red' onclick=\"if(confirm('Forget saved WiFi and reboot into setup mode?'))"
-         "fetch('/api/wifi/forget',{method:'POST'}).then(()=>alert('Forgotten. Rebooting...'))\">Forget WiFi</button></div>";
-  }
   h += "</div>";
   return h;
 }
@@ -646,24 +641,12 @@ static void handleWifiScan() {
   _srv->send(200, "application/json", out);
 }
 
-// Dedicated WiFi setup handler (from /wifi page). Always reboots on save
-// so the device re-runs connectWifi() with the fresh credentials — this
-// is what lets a unit move between site networks with zero recompiling.
-static void handleWifiSave() {
-  if (!_srv->hasArg("wifiSSID") || _srv->arg("wifiSSID").isEmpty()) {
-    _srv->send(400, "text/html; charset=utf-8", "<p>SSID is required. <a href='/wifi'>Go back</a></p>");
-    return;
-  }
-  _cfg->wifiSSID = _srv->arg("wifiSSID");
-  _cfg->wifiPass = _srv->hasArg("wifiPass") ? _srv->arg("wifiPass") : "";
-  saveConfig(*_prefs, *_cfg);
-
-  _srv->send(200, "text/html; charset=utf-8",
-    "<p>Saved. Rebooting and attempting to join \"" + _cfg->wifiSSID + "\"...<br>"
-    "If it can't connect, this unit will fall back to its setup AP automatically.</p>");
-  delay(1000);
-  ESP.restart();
-}
+// NOTE: WiFi save used to have its own dedicated handler + form (from the
+// now-removed standalone /wifi page, POSTing to /api/wifi). WiFi SSID/
+// password fields moved onto the main Config page's single form, so
+// saving them now goes through handleConfig() (/api/config) like every
+// other setting — it already reboots on SSID/password change (see
+// wifiChanged in handleConfig). No separate handler needed anymore.
 
 // Clears saved WiFi creds and reboots straight into setup-AP mode —
 // use when relocating a unit to a different site network.
@@ -783,7 +766,9 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/channels",    HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, calPage(*_cfg)); });
   srv.on("/live",        HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, livePage()); });
   srv.on("/system",      HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, sysPage(*_cfg)); });
-  srv.on("/wifi",        HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, wifiPage(*_cfg)); });
+  // /wifi removed — WiFi settings now live on the main Config page ("/"),
+  // no more redundant standalone page duplicating the same SSID/password
+  // fields.
 
   // GET APIs
   srv.on("/api/status",      HTTP_GET,  handleApiStatus);
@@ -793,7 +778,6 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
 
   // POST APIs
   srv.on("/api/config",        HTTP_POST, handleConfig);
-  srv.on("/api/wifi",          HTTP_POST, handleWifiSave);
   srv.on("/api/wifi/forget",   HTTP_POST, handleWifiForget);
   srv.on("/api/cal/zero",      HTTP_POST, handleCalZero);
   srv.on("/api/cal/max",       HTTP_POST, handleCalMax);

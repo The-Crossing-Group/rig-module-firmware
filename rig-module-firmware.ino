@@ -328,7 +328,7 @@ void setup() {
   setupWebRoutes(webServer, cfg, prefs, readings, rawModbus, stateMutex);
   webServer.begin();
   if (apModeActive) {
-    Serial.printf("[HTTP] Setup AP web server at http://192.168.4.1/wifi (connect to \"%s\")\n", apSSID.c_str());
+    Serial.printf("[HTTP] Setup AP web server at http://192.168.4.1/ (connect to \"%s\")\n", apSSID.c_str());
   } else if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("[HTTP] Web server at http://%s/\n", WiFi.localIP().toString().c_str());
   } else {
@@ -564,12 +564,13 @@ static bool tryAutoConnectRigNetwork() {
 // =============================================================================
 // WIFI SETUP AP — no saved network, no rigXXX network found/reachable.
 // Broadcasts "RigModule-XXXXXX" (last 6 MAC hex chars), password
-// "modulesetup", serves the /wifi config page at 192.168.4.1.
+// "modulesetup", serves the main Config page (with its WiFi section) at
+// 192.168.4.1.
 // =============================================================================
 void startSetupAP() {
-  // AP_STA (not plain AP) so the /wifi page can still scan for networks
-  // while the setup AP is broadcasting — STA stays idle/unconnected,
-  // it's just enough for WiFi.scanNetworks() to work.
+  // AP_STA (not plain AP) so the Config page's WiFi section can still scan
+  // for networks while the setup AP is broadcasting — STA stays idle/
+  // unconnected, it's just enough for WiFi.scanNetworks() to work.
   WiFi.mode(WIFI_AP_STA);
   uint8_t mac[6];
   esp_efuse_mac_get_default(mac);
@@ -583,7 +584,7 @@ void startSetupAP() {
   Serial.println("[WiFi] ----------------------------------------");
   Serial.printf("[WiFi] Starting setup AP: \"%s\" / \"modulesetup\"\n", apSSID.c_str());
   Serial.printf("[WiFi] AP IP: %s\n", WiFi.softAPIP().toString().c_str());
-  Serial.println("[WiFi] Connect to this network, then open http://192.168.4.1/wifi");
+  Serial.println("[WiFi] Connect to this network, then open http://192.168.4.1/");
   Serial.println("[WiFi] ----------------------------------------");
 }
 
@@ -816,13 +817,6 @@ void pollTask(void* param) {
 
     if (ok) {
       ledSet(LED_DATA_OK);
-      // Print raw values — first 10 polls always, then every 30
-      if (pollCount <= 10 || pollCount % 30 == 0) {
-        Serial.printf("[Poll] #%d OK — raw: ", pollCount);
-        for (int i = 0; i < 8; i++) Serial.printf("%5d ", raw[i]);
-        Serial.printf("(%.2f %.2f %.2f mA)\n",
-          raw[0]/1000.0f, raw[1]/1000.0f, raw[2]/1000.0f);
-      }
     } else {
       ledSet(LED_MODBUS_ERROR);
       Serial.printf("[Poll] #%d FAILED — Modbus error (slave ID=%d)\n", pollCount, cfg.modbusSlaveId);
@@ -837,6 +831,39 @@ void pollTask(void* param) {
             scaleChannel(ch, raw[ch], cfg, readings[ch]);
           } else {
             readings[ch].valid = false;
+          }
+        }
+
+        // Debug print: actual engineering values per enabled channel (not
+        // just raw mA) — so the real numbers (e.g. mud tank gallons) are
+        // visible on Serial/USB with no Pi logger hooked up at all. First
+        // 10 polls always, then every 30, same cadence as before.
+        if (ok && (pollCount <= 10 || pollCount % 30 == 0)) {
+          Serial.printf("[Poll] #%d OK\n", pollCount);
+          for (int ch = 0; ch < 8; ch++) {
+            if (!cfg.ch[ch].enabled) continue;
+            ChannelReading& r = readings[ch];
+            String label = cfg.ch[ch].name.isEmpty() ? ("Ch" + String(ch + 1)) : cfg.ch[ch].name;
+            String kind  = cfg.ch[ch].kind.isEmpty() ? "" : (" [" + cfg.ch[ch].kind + "]");
+            if (r.valid && r.hasValue) {
+              Serial.printf("  %-20s%-10s raw=%5d  %6.2f mA  = %8.2f %-6s (%s)\n",
+                label.c_str(), kind.c_str(), raw[ch], r.mA, r.value,
+                cfg.ch[ch].unit.c_str(), r.status.c_str());
+            } else {
+              Serial.printf("  %-20s%-10s raw=%5d  %6.2f mA  -- (%s)\n",
+                label.c_str(), kind.c_str(), raw[ch], r.mA, r.status.c_str());
+            }
+          }
+          VolumeReading volDbg;
+          computeTankVolume(cfg, readings, volDbg);
+          if (volDbg.status != "disabled") {
+            if (volDbg.hasValue) {
+              Serial.printf("  %-20s%-10s          = %8.2f %-6s (%s)\n",
+                "Tank Volume", "[derived]", volDbg.value, volDbg.unit.c_str(), volDbg.status.c_str());
+            } else {
+              Serial.printf("  %-20s%-10s          -- (%s)\n",
+                "Tank Volume", "[derived]", volDbg.status.c_str());
+            }
           }
         }
       }

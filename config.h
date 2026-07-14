@@ -4,15 +4,15 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.3.1"
+#define FW_VERSION "rig-module-1.4.0"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
 // If no WiFi is saved in NVS, the device boots into its own setup AP
-// ("RigModule-XXXXXX" / "modulesetup") and serves a config page at
-// http://192.168.4.1/wifi so you can point it at whatever site network
-// it's deployed on, without recompiling. Once saved, it reconnects to
-// that network on every boot going forward.
+// ("RigModule-XXXXXX" / "modulesetup") and serves the main Config page at
+// http://192.168.4.1/ (its WiFi section) so you can point it at whatever
+// site network it's deployed on, without recompiling. Once saved, it
+// reconnects to that network on every boot going forward.
 // =============================================================================
 #include <WiFi.h>
 #include <Preferences.h>

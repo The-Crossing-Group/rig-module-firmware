@@ -32,7 +32,7 @@ without recompiling.
 | `config.h` | Config structs, NVS load/save |
 | `modbus.h` | Manual Modbus RTU over HardwareSerial (RS485) |
 | `scaling.h` | Raw → mA → engineering value per channel (generic, no kind-specific rounding) |
-| `webui.h` | 4-page WebServer UI + REST API |
+| `webui.h` | 4-page WebServer UI + REST API (Config/Channels/Live/System — no separate WiFi page, that lives on Config) |
 
 ---
 
@@ -69,10 +69,10 @@ Board: **ESP32 Arduino core** (espressif32) — install via Boards Manager.
    router (SSID `rigNNN`, e.g. `rig132`) using the shared rig password. If
    none is found/connectable, it creates a setup AP:
    **RigModule-XXXXXX** / password: `modulesetup`
-3. Connect to it, browse to **http://192.168.4.1/wifi** and set your network
-   (only needed for non-standard networks). Tap **🔍 Scan for Networks** to
-   list nearby SSIDs with signal strength — tap one to fill it in, then just
-   type the password.
+3. Connect to it, browse to **http://192.168.4.1/** and set your network in
+   the WiFi section of the Config page (only needed for non-standard
+   networks). Tap **🔍 Scan for Networks** to list nearby SSIDs with signal
+   strength — tap one to fill it in, then just type the password.
 4. That's it for connectivity — the module is already talking to the Pi.
    X-Rig-Token defaults to the standard shared rig token (`7804991970`,
    same as every rig's `config.json`), and Pi host defaults to mDNS
@@ -185,7 +185,7 @@ extra processing.
 |--------|------|--------------|
 | GET | `/api/status` | Full JSON status (same as Pi payload + system info) |
 | GET | `/api/channel-raw` | Raw Modbus values + mA for all 8 channels |
-| GET | `/api/wifi/scan` | Scan nearby WiFi networks (SSID, RSSI, secure) for the /wifi page |
+| GET | `/api/wifi/scan` | Scan nearby WiFi networks (SSID, RSSI, secure) for the Config page's WiFi section |
 | POST | `/api/config` | Save config fields (form or JSON) |
 | POST | `/api/cal/zero?ch=N` | Capture zero cal for channel N |
 | POST | `/api/cal/max?ch=N` | Capture max cal for channel N |
