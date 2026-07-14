@@ -544,7 +544,13 @@ static void handleConfig() {
   applyParam("modbusBaud",     [&](String v){ long nb = v.toInt(); if (nb != _cfg->modbusBaud) { _cfg->modbusBaud = nb; baudChanged = true; } });
   applyParam("pollIntervalS",  [](String v){ _cfg->pollIntervalS = constrain(v.toInt(),1,30); });
   applyParam("piHost",         [](String v){ _cfg->piHost        = v; });
-  applyParam("rigToken",       [](String v){ _cfg->rigToken      = v; });
+  // Never save a blank token — this field is required for the Pi to accept
+  // the module's posts at all (X-Rig-Token header), and an accidentally
+  // cleared field (autofill, stray select-all+delete, etc.) would
+  // otherwise silently break posting with no obvious symptom on this end.
+  // Still fully editable to any OTHER value; only empty is rejected,
+  // falling back to the shared default instead.
+  applyParam("rigToken",       [](String v){ _cfg->rigToken = v.isEmpty() ? "7804991970" : v; });
 
   bool wifiChanged = false;
   String oldSSID = _cfg->wifiSSID;

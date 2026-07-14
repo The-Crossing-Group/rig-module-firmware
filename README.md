@@ -1,6 +1,6 @@
 # Rig Module Firmware
 
-**Version:** rig-module-1.6.0
+**Version:** rig-module-1.6.1
 **Board:** LilyGo T-CAN485 / XY-32 CAN+RS485 (ESP32)
 **Target:** Waveshare Modbus RTU Analog Input 8CH **(B version)** or Eletechsup AMIDJ14 (6AI-4DO-4DI) — auto-detected, see below.
 
@@ -52,6 +52,23 @@ The old top-level `derived.volume` + `capacity` fields are still sent
 existing consumer that only expects a single tank per module — but with
 multiple tanks configured, the per-channel `volume` field is the complete,
 authoritative source.
+
+---
+
+## X-Rig-Token Self-Heal (v1.6.1)
+
+`X-Rig-Token` (the header the Pi logger checks for auth) defaults to the
+shared rig password (`7804991970`) out of the box, but a unit that had it
+saved as an empty string in NVS (e.g. from a very early config save, or an
+accidental clear on `/config`) would load that blank value forever and
+silently fail to auth against the Pi — no error on the module side, the Pi
+would just reject/ignore its posts.
+
+Fixed at both ends: `loadConfig()` now re-applies the shared default if the
+saved value is empty (self-heals any unit already stuck with a blank
+token, no manual re-entry needed), and `/config`'s save handler refuses to
+persist an empty token going forward. Still fully editable to any other
+value on `/config` for a rig that needs a non-default token.
 
 ---
 

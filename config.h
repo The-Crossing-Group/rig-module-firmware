@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.6.0"
+#define FW_VERSION "rig-module-1.6.1"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -107,6 +107,18 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.pollIntervalS = p.getInt("pollInt", 3);
   c.piHost        = p.getString("piHost", "");
   c.rigToken      = p.getString("rigToken", "7804991970");
+  // Self-heal: p.getString()'s default only applies when the NVS key is
+  // completely absent — if it EXISTS but was saved as an empty string
+  // (e.g. a save from before this default existed, or the field got
+  // cleared and saved), getString() correctly returns "" instead of the
+  // default, and X-Rig-Token then goes out blank on every request,
+  // silently failing auth against the Pi (this is what broke Gerald's
+  // module). Re-apply the shared default here too so any unit that
+  // already has a blank token in NVS heals itself on the very next boot
+  // with no manual re-entry needed — while still leaving it fully
+  // editable/overridable on /config for any rig that legitimately needs
+  // a different token.
+  if (c.rigToken.isEmpty()) c.rigToken = "7804991970";
   c.wifiSSID      = p.getString("wifiSSID", "");
   c.wifiPass      = p.getString("wifiPass", "");
 
