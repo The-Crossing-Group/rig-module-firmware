@@ -259,6 +259,17 @@ static String calPage(ModuleConfig& cfg) {
   h += "<p class='small'>Detected board: <b>" + String(boardProfile.name) + "</b> (" +
        String(boardProfile.numChannels) + " channels)</p>";
 
+  // All 8 channel cards share ONE form now, so configuring several channels
+  // at once (e.g. naming/enabling a whole board) is a single Save instead of
+  // eight separate per-channel saves. "fromChannelsPage" tells handleConfig()
+  // this POST covers every channel's enabled/volumeEnabled checkbox at once
+  // (see handleConfig() for why that distinction matters). Set Zero/Set Max
+  // stay as their own instant AJAX buttons (unchanged) — only the field save
+  // moved to a page-level Save.
+  h += "<form method='POST' action='/api/config'>";
+  h += "<input type='hidden' name='fromChannelsPage' value='1'>";
+  h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save All Channels</button>";
+
   for (int i = 0; i < 8; i++) {
     bool exists = (i < boardProfile.numChannels);
     h += "<div class='card'";
@@ -270,10 +281,6 @@ static String calPage(ModuleConfig& cfg) {
     h += "'>";
     if (!exists) h += "(not present on " + String(boardProfile.name) + ")";
     h += "</span>";
-    h += "<form method='POST' action='/api/config'>";
-    h += "<input type='hidden' name='ch' value='";
-    h += String(i);
-    h += "'>";
     h += "<label><input type='checkbox' name='ch";
     h += String(i);
     h += "en'";
@@ -370,10 +377,12 @@ static String calPage(ModuleConfig& cfg) {
     h += ")'>Set Zero</button>&nbsp;";
     h += "<button type='button' onclick='setMax(";
     h += String(i);
-    h += ")'>Set Max</button>&nbsp;";
-    h += "<button type='submit'>Save</button></div>";
-    h += "</form></div>";
+    h += ")'>Set Max</button></div>";
+    h += "</div>"; // closes .card (no per-channel </form> — one shared form wraps all 8 cards)
   }
+
+  h += "<button type='submit' style='margin-top:6px'>&#128190; Save All Channels</button>";
+  h += "</form>"; // closes the single form opened before the channel loop
 
   h += "<script>var _numRealChannels = " + String(boardProfile.numChannels) + ";</script>";
   h += R"(
@@ -559,25 +568,24 @@ static void handleConfig() {
   applyParam("wifiSSID", [&](String v){ if(v!=_cfg->wifiSSID){_cfg->wifiSSID=v;wifiChanged=true;} });
   applyParam("wifiPass", [](String v){ _cfg->wifiPass = v; });
 
-  // Each of the 8 channel cards on /channels is its OWN <form>, POSTed
-  // independently — only ONE channel's fields are ever present in a given
-  // request (identified by the hidden "ch" field each form carries). This
-  // used to set ch[i].enabled = hasArg(chNen) unconditionally for ALL 8
-  // channels on every single save, which silently disabled every OTHER
-  // channel because their "chNen" checkbox field is simply absent from
-  // whichever one form was actually submitted (hasArg() correctly returns
-  // false for fields not in this POST at all — same reason "only one
-  // channel enabled at a time" was the visible symptom). Only touch the
-  // channel whose form was actually submitted; the other 7 fields already
-  // used applyParam's hasArg-gate correctly and were never the problem.
+  // /channels now submits all 8 channel cards through ONE shared form
+  // ("fromChannelsPage=1" marks this), so every channel's enabled/
+  // volumeEnabled checkbox is present in the same POST and can be applied
+  // unconditionally via hasArg() — a genuinely unchecked box is correctly
+  // absent either way. This replaced the old one-form-per-channel layout
+  // (each card POSTed independently, tagged by a hidden "ch" field) where
+  // only the single submitted channel's checkboxes could be touched
+  // without silently unchecking every other channel; that per-channel
+  // "ch" field/gate is no longer needed now that every channel arrives
+  // together, but is still accepted harmlessly if some older client posts
+  // it (fromChannelsPage absent, which >= 0 still gates to that one
+  // channel, matching the previous behavior exactly).
+  bool allChannels = _srv->hasArg("fromChannelsPage");
   int which = _srv->hasArg("ch") ? _srv->arg("ch").toInt() : -1;
   for (int i = 0; i < 8; i++) {
     String pre = "ch" + String(i);
-    if (i == which) {
+    if (allChannels || i == which) {
       _cfg->ch[i].enabled       = _srv->hasArg((pre+"en").c_str());
-      // Same hasArg-gate as "enabled": a checkbox absent from the POST means
-      // unchecked, but only for the ONE channel form actually submitted —
-      // the other 7 channels' volumeEnabled must NOT be touched here.
       _cfg->ch[i].volumeEnabled = _srv->hasArg((pre+"volEn").c_str());
     }
     applyParam((pre+"nm").c_str(),   [i](String v){ _cfg->ch[i].name  = v; });
@@ -608,10 +616,11 @@ static void handleConfig() {
     ESP.restart();
   } else {
     // Redirect back to whichever page the form actually came from, not
-    // always the index — the "ch" hidden field means this save was one of
-    // the per-channel forms on /channels, so send the user back there
-    // instead of bouncing them to / every time.
-    _srv->sendHeader("Location", which >= 0 ? "/channels" : "/");
+    // always the index — fromChannelsPage (all-channel save) or the
+    // legacy "ch" hidden field (single-channel save) both mean this came
+    // from /channels, so send the user back there instead of bouncing
+    // them to / every time.
+    _srv->sendHeader("Location", (allChannels || which >= 0) ? "/channels" : "/");
     _srv->send(302, "text/plain", "");
   }
 }
