@@ -746,6 +746,20 @@ void resolvePi() {
     return;
   }
 
+  // Standard rig naming convention: SSID "rigNNN" -> Pi/host PC lives at
+  // 192.168.NNN.10 on that rig's own subnet. Deterministic and instant
+  // (no network round-trip needed), so try this first when the SSID
+  // matches — before falling back to mDNS/hostname lookup, which depends
+  // on the Pi's mDNS responder actually being up and reachable. Only
+  // kicks in when Pi Host is left blank on /config; a non-standard SSID
+  // (doesn't match "rigNNN") falls straight through to mDNS as before.
+  if (!cfg.wifiSSID.isEmpty() && isRigSSID(cfg.wifiSSID)) {
+    String rigNum = cfg.wifiSSID.substring(3); // digits after "rig"/"RIG"
+    resolvedPiIp = "192.168." + rigNum + ".10";
+    Serial.printf("[Pi] Derived from rig SSID \"%s\": %s\n", cfg.wifiSSID.c_str(), resolvedPiIp.c_str());
+    return;
+  }
+
   // Try mDNS _rig-logger._tcp.local
   int n = MDNS.queryService("_rig-logger", "_tcp");
   if (n > 0) {

@@ -163,9 +163,13 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='";
   h += String(cfg.pollIntervalS);
   h += "'>";
-  h += "<label>Pi Host (blank = mDNS auto)</label><input name='piHost' value='";
+  h += "<label>Pi Host (blank = auto)</label><input name='piHost' value='";
   h += cfg.piHost;
   h += "' placeholder='192.168.x.x or rig-logger.local'>";
+  h += "<div class='small'>Leave blank for auto-discovery: on a standard \"rigNNN\" WiFi network, "
+       "this derives 192.168.NNN.10 automatically (no typing needed); otherwise falls back to mDNS "
+       "(_rig-logger._tcp.local) then rig-logger.local. Only set this manually for a non-standard "
+       "network or a Pi host that doesn't follow the convention.</div>";
   h += "<label>X-Rig-Token</label><input name='rigToken' type='password' value='";
   h += cfg.rigToken;
   h += "'>";

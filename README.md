@@ -1,8 +1,25 @@
 # Rig Module Firmware
 
-**Version:** rig-module-1.6.1
+**Version:** rig-module-1.7.0
 **Board:** LilyGo T-CAN485 / XY-32 CAN+RS485 (ESP32)
 **Target:** Waveshare Modbus RTU Analog Input 8CH **(B version)** or Eletechsup AMIDJ14 (6AI-4DO-4DI) — auto-detected, see below.
+
+---
+
+## Pi Host Auto-Discovery from Rig SSID (v1.7.0+)
+
+Standard rig sites follow a fixed naming convention: WiFi SSID `rigNNN`
+(e.g. `rig132`) with the Pi/host PC always living at `192.168.NNN.10` on
+that rig's own subnet. With **Pi Host** left blank on `/config`, the
+module now derives that IP directly from whatever `rigNNN` SSID it's
+connected to — no typing, no mDNS round-trip needed, and it re-derives
+automatically if the same unit is later moved to a different rig.
+
+If the connected SSID doesn't match the `rigNNN` pattern (a non-standard
+network), this step is skipped entirely and Pi discovery falls through to
+the existing mDNS (`_rig-logger._tcp.local`) then `rig-logger.local`
+lookups, same as before. Setting Pi Host manually on `/config` always
+takes priority over all auto-discovery, standard or not.
 
 ---
 
