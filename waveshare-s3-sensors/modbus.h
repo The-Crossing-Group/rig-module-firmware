@@ -87,6 +87,55 @@ static int modbusReceive(uint8_t* buf, int maxLen, int timeoutMs, bool verbose) 
 // Returns a status code: 0=ok, 1=timeout, 2=crc error, 3=bad response
 static const int MB_OK = 0, MB_TIMEOUT = 1, MB_CRC_ERROR = 2, MB_BAD_RESPONSE = 3;
 
+// =============================================================================
+// RAW TRAFFIC LOG — every request/response byte, for the web UI's live
+// "RS485 Raw Traffic" panel (/diag). Unlike Serial Monitor output, this
+// captures EVERY transaction, including normal background polling, not
+// just manual probes — so you can watch what a sensor is actually saying
+// without a USB cable plugged in.
+// =============================================================================
+struct ModbusRawLogEntry {
+  unsigned long ms;
+  uint8_t slaveId;
+  uint8_t funcCode;
+  uint8_t txLen;
+  uint8_t tx[8];
+  uint8_t rxLen;
+  uint8_t rx[40];
+  int result; // MB_OK / MB_TIMEOUT / MB_CRC_ERROR / MB_BAD_RESPONSE
+};
+#define MODBUS_LOG_SIZE 40
+static ModbusRawLogEntry _mbLog[MODBUS_LOG_SIZE];
+static int _mbLogHead = 0;
+static int _mbLogCount = 0;
+
+static void modbusLogTransaction(uint8_t slaveId, uint8_t funcCode,
+                                  const uint8_t* tx, int txLen,
+                                  const uint8_t* rx, int rxLen, int result) {
+  ModbusRawLogEntry& e = _mbLog[_mbLogHead];
+  e.ms = millis();
+  e.slaveId = slaveId;
+  e.funcCode = funcCode;
+  e.txLen = (uint8_t)min(txLen, 8);
+  memcpy(e.tx, tx, e.txLen);
+  e.rxLen = (uint8_t)min(rxLen, 40);
+  memcpy(e.rx, rx, e.rxLen);
+  e.result = result;
+  _mbLogHead = (_mbLogHead + 1) % MODBUS_LOG_SIZE;
+  if (_mbLogCount < MODBUS_LOG_SIZE) _mbLogCount++;
+}
+
+// Copies the most recent N transactions out for JSON serialization,
+// newest first. Returns how many were actually copied.
+int modbusGetRecentLog(ModbusRawLogEntry* out, int maxCount) {
+  int n = min(maxCount, _mbLogCount);
+  for (int i = 0; i < n; i++) {
+    int idx = (_mbLogHead - 1 - i + MODBUS_LOG_SIZE * 2) % MODBUS_LOG_SIZE;
+    out[i] = _mbLog[idx];
+  }
+  return n;
+}
+
 int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
                     uint8_t count, uint16_t* regValues, bool verbose = false) {
   if (!_mbSerial) return MB_TIMEOUT;
@@ -114,6 +163,7 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
 
   if (n < expectedLen) {
     if (verbose) Serial.printf("[Modbus] Timeout: got %d, expected %d\n", n, expectedLen);
+    modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_TIMEOUT);
     return MB_TIMEOUT;
   }
 
@@ -121,17 +171,20 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
   uint16_t calcCrc = modbusCRC(resp, n-2);
   if (rxCrc != calcCrc) {
     if (verbose) Serial.printf("[Modbus] CRC error: got %04X, calc %04X\n", rxCrc, calcCrc);
+    modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_CRC_ERROR);
     return MB_CRC_ERROR;
   }
 
   if (resp[0] != slaveId || resp[1] != funcCode) {
     if (verbose) Serial.printf("[Modbus] Bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
+    modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_BAD_RESPONSE);
     return MB_BAD_RESPONSE;
   }
 
   for (int i = 0; i < count; i++) {
     regValues[i] = ((uint16_t)resp[3 + i*2] << 8) | resp[4 + i*2];
   }
+  modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_OK);
   return MB_OK;
 }
 

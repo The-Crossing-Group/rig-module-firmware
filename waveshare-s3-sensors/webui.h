@@ -35,6 +35,7 @@ int  modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr, uint8
 uint8_t modbusRegCount(uint8_t dataType); // modbus.h
 float modbusDecodeValue(uint16_t* regs, uint8_t dataType, uint8_t wordOrder); // modbus.h
 template<typename FoundFn> void modbusScanSlaves(int maxAddr, FoundFn onFound); // modbus.h
+int modbusGetRecentLog(ModbusRawLogEntry* out, int maxCount); // modbus.h (struct + MODBUS_LOG_SIZE defined there)
 bool canStart(int txPin, int rxPin, long bitrate); // can.h
 void canStop(); // can.h
 bool canIsRunning(); // can.h
@@ -448,6 +449,16 @@ static String diagPage(ModuleConfig& cfg) {
 
   h += "<h3>RS485 Sensor Comms Health</h3><div class='card'><div id='commsHealth'>Loading...</div></div>";
 
+  h += "<h3>RS485 Raw Traffic</h3><div class='card'>";
+  h += "<p class='small'>Every Modbus request/response, byte-for-byte, as it actually happens — background polling "
+       "AND manual probes/scans. Newest first. <span class='ok'>ok</span> = valid CRC + expected length; "
+       "<span class='timeout'>timeout</span> = no response at all (check wiring/baud/slave ID); "
+       "<span class='crc'>crc</span> = got bytes back but they don't check out (noise, wrong baud, wiring issue).</p>";
+  h += "<label><input type='checkbox' id='rawPause'> Pause</label>";
+  h += "<div style='max-height:400px;overflow-y:auto;margin-top:8px'><table class='mono'><thead><tr>"
+       "<th>Age (s)</th><th>Slave</th><th>FC</th><th>TX (hex)</th><th>RX (hex)</th><th>Result</th></tr></thead>"
+       "<tbody id='mbLogBody'></tbody></table></div></div>";
+
   h += "<h3>CAN Raw Frame Sniffer</h3><div class='card'>";
   if (!cfg.canEnabled) {
     h += "<p class='small'>CAN is disabled — enable it on the <a href='/'>Config</a> page to see live traffic here.</p>";
@@ -519,6 +530,23 @@ function fetchCanFrames(){
 }
 if(document.getElementById('canFrameBody')) setInterval(fetchCanFrames, 1000);
 fetchCanFrames();
+function fetchModbusLog(){
+  if(document.getElementById('rawPause') && document.getElementById('rawPause').checked) return;
+  fetch('/api/modbus/log').then(r=>r.json()).then(d=>{
+    let body = document.getElementById('mbLogBody');
+    if(!body) return;
+    let s = '';
+    d.log.forEach(e=>{
+      let cls = e.result==='ok'?'ok':e.result;
+      s += '<tr><td>'+(e.ageMs/1000).toFixed(1)+'</td><td>'+e.slaveId+'</td><td>'+e.funcCode+'</td>'+
+           '<td>'+e.tx+'</td><td>'+(e.rx||'<span class="stale">(none)</span>')+'</td>'+
+           '<td class="'+cls+'">'+e.result+'</td></tr>';
+    });
+    body.innerHTML = s || '<tr><td colspan="6" class="small">No traffic yet — add a sensor on /sensors or run a probe/scan above.</td></tr>';
+  });
+}
+if(document.getElementById('mbLogBody')) setInterval(fetchModbusLog, 1000);
+fetchModbusLog();
 </script>)";
   h += "</div>";
   return h;
@@ -713,6 +741,43 @@ static void handleCanFrames() {
       p += snprintf(dataHex + p, sizeof(dataHex) - p, "%02X ", frames[i].data[b]);
     }
     o["data"] = String(dataHex);
+  }
+  String out;
+  serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
+}
+
+// Raw Modbus TX/RX log for the Diagnostics page — every actual
+// transaction (background polling AND manual probes), byte-for-byte, no
+// USB cable required. This is the direct answer to "let me see what the
+// sensor is actually saying."
+static void handleModbusLog() {
+  DynamicJsonDocument doc(8192);
+  doc["serverNowMs"] = (long)millis();
+  JsonArray arr = doc.createNestedArray("log");
+  ModbusRawLogEntry entries[MODBUS_LOG_SIZE];
+  int n;
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+    n = modbusGetRecentLog(entries, MODBUS_LOG_SIZE);
+    xSemaphoreGive(modbusBusMutex);
+  } else {
+    n = 0;
+  }
+  unsigned long now = millis();
+  for (int i = 0; i < n; i++) {
+    JsonObject o = arr.createNestedObject();
+    o["ageMs"]    = (long)(now - entries[i].ms);
+    o["slaveId"]  = entries[i].slaveId;
+    o["funcCode"] = entries[i].funcCode;
+    o["result"]   = (entries[i].result == MB_OK) ? "ok" :
+                     (entries[i].result == MB_TIMEOUT) ? "timeout" :
+                     (entries[i].result == MB_CRC_ERROR) ? "crc" : "bad";
+    char txHex[32] = {0}; int p = 0;
+    for (int b = 0; b < entries[i].txLen; b++) p += snprintf(txHex + p, sizeof(txHex) - p, "%02X ", entries[i].tx[b]);
+    o["tx"] = String(txHex);
+    char rxHex[128] = {0}; p = 0;
+    for (int b = 0; b < entries[i].rxLen && p < (int)sizeof(rxHex) - 4; b++) p += snprintf(rxHex + p, sizeof(rxHex) - p, "%02X ", entries[i].rx[b]);
+    o["rx"] = String(rxHex);
   }
   String out;
   serializeJson(doc, out);
@@ -1012,6 +1077,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/can/frames",   HTTP_GET, handleCanFrames);
   srv.on("/api/modbus/probe", HTTP_GET, handleModbusProbe);
   srv.on("/api/modbus/scan",  HTTP_GET, handleModbusScan);
+  srv.on("/api/modbus/log",   HTTP_GET, handleModbusLog);
   srv.on("/api/wifi/scan",    HTTP_GET, handleWifiScan);
   srv.on("/api/ota",          HTTP_GET, handleOTA);
 
