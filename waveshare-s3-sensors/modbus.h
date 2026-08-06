@@ -326,13 +326,17 @@ void modbusScanSlaves(int maxAddr, FoundFn onFound) {
 // sensor's register map is different), but this closes the "nothing shows
 // up until I use the diagnostics page" gap entirely.
 //
-// Returns how many NEW slots were filled in this call. Does not touch any
-// slot that's already enabled (so on-purpose disabled sensors that still
-// happen to be wired up and answering aren't silently re-enabled/reset).
-// Caller must hold modbusBusMutex for the whole call (same rule as
-// modbusScanSlaves) and should save config + persist afterward if count > 0.
+// Also tries other standard baud rates if the current one finds nothing
+// AND no sensor is enabled yet — see modbusAutoDetectAndEnable() below for
+// why that condition matters (shared-bus baud constraint).
 // =============================================================================
-int modbusAutoDetectAndEnable(ModuleConfig& cfg, int maxAddr) {
+
+// Fast path: scan addresses 1..maxAddr at whatever baud is CURRENTLY
+// active and fill in/enable slots for new hits. Does not touch any slot
+// that's already enabled (so on-purpose disabled sensors that still
+// happen to be wired up and answering aren't silently re-enabled/reset).
+// Returns how many new slots were filled.
+static int _mbScanAndFillAtCurrentBaud(ModuleConfig& cfg, int maxAddr) {
   // Which slave IDs are already configured (enabled or not) so we don't
   // double-assign the same physical sensor to two slots on repeat scans.
   bool alreadyConfigured[248] = { false };
@@ -371,9 +375,74 @@ int modbusAutoDetectAndEnable(ModuleConfig& cfg, int maxAddr) {
 
     alreadyConfigured[addr] = true;
     newCount++;
-    Serial.printf("[AutoDetect] New sensor found: slave=%d fc=%d -> slot %d (enabled, needs register/type tuning)\n",
-      addr, fc, slot);
+    Serial.printf("[AutoDetect] New sensor found: slave=%d fc=%d baud=%u -> slot %d (enabled, needs register/type tuning)\n",
+      addr, fc, _mbSerial ? _mbSerial->baudRate() : 0, slot);
   });
 
   return newCount;
+}
+
+// Full auto-detect: scans the CURRENT baud first (the common case — an
+// existing bus with sensors already talking at the configured rate, plus
+// a freshly-added sensor that happens to match). If that finds nothing
+// AND no sensor is enabled yet at all, it's reasonable to assume the bus
+// itself might just be at a different baud than the default 9600 — so it
+// tries every other standard baud too, and if one of THOSE finds
+// something, adopts that baud as the module's new modbusBaud (persisted
+// by the caller) since every sensor on a shared RS485 bus must run the
+// same baud anyway.
+//
+// Once at least one sensor is enabled, the module's baud is committed —
+// we do NOT keep hopping bauds looking for stray sensors at a different
+// rate, since that would require switching the whole bus's baud (and
+// with it, silence the sensor(s) already configured and working). Add
+// a second sensor at a different baud on a genuinely different physical
+// bus? Not supported by this variant — one shared Serial2, one baud.
+//
+// cfg.modbusBaud is updated in place if a different baud is adopted;
+// caller is responsible for persisting config afterward (matches the
+// existing convention used by modbusAutoDetectBaud()/handleConfig()).
+// Caller must hold modbusBusMutex for the whole call. maxAddr bounds how
+// many slave addresses get probed per baud attempt (keeps worst-case scan
+// time sane — every extra baud tried multiplies the cost by ~maxAddr*2
+// timeouts if the bus is genuinely empty).
+int modbusAutoDetectAndEnable(ModuleConfig& cfg, int maxAddr = 16) {
+  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr > 247) maxAddr = 247;
+
+  int newCount = _mbScanAndFillAtCurrentBaud(cfg, maxAddr);
+  if (newCount > 0) return newCount;
+
+  // Nothing at the current baud. Only worth trying other bauds if we
+  // don't already have sensors relying on this one.
+  bool anyEnabled = false;
+  for (int i = 0; i < MAX_SENSORS; i++) {
+    if (cfg.sensors[i].enabled) { anyEnabled = true; break; }
+  }
+  if (anyEnabled || !_mbSerial) return 0;
+
+  uint32_t originalBaud = (uint32_t)cfg.modbusBaud;
+  for (int i = 0; i < MODBUS_AUTODETECT_BAUDS_COUNT; i++) {
+    uint32_t tryBaud = MODBUS_AUTODETECT_BAUDS[i];
+    if (tryBaud == originalBaud) continue; // already tried above
+    Serial.printf("[AutoDetect] Nothing at %u baud, trying %u...\n", originalBaud, tryBaud);
+    _mbSerial->flush();
+    _mbSerial->updateBaudRate(tryBaud);
+    delay(20);
+
+    newCount = _mbScanAndFillAtCurrentBaud(cfg, maxAddr);
+    if (newCount > 0) {
+      Serial.printf("[AutoDetect] Found sensor(s) at %u baud — adopting as module baud rate\n", tryBaud);
+      cfg.modbusBaud = (long)tryBaud;
+      return newCount;
+    }
+  }
+
+  // Found nothing anywhere — restore the original baud so we don't leave
+  // the bus configured at some random rate from the last failed attempt.
+  Serial.println("[AutoDetect] No sensors found at any standard baud — restoring original");
+  _mbSerial->flush();
+  _mbSerial->updateBaudRate(originalBaud);
+  delay(20);
+  return 0;
 }

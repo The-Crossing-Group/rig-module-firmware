@@ -157,20 +157,23 @@ void setup() {
   modbusInit(RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
 
   // Auto-detect & enable: scan a modest address range (1-16, keeps boot
-  // delay reasonable — worst case ~16 * 600ms if the bus is empty) and
-  // auto-fill/enable any responding slave that isn't already configured.
-  // No mutex contention concern here — nothing else touches the bus yet
-  // this early in setup(), poll task hasn't started.
-  Serial.println("[BOOT] Auto-detecting RS485 sensors (addresses 1-16)...");
+  // delay reasonable) at the configured baud, and if nothing's configured
+  // yet AND nothing answers, also sweep the other standard baud rates
+  // (see modbusAutoDetectAndEnable() in modbus.h) — covers "brand new
+  // module, sensor's already wired, but at some other baud" without any
+  // manual steps. Auto-fills/enables any responding slave that isn't
+  // already configured. No mutex contention concern here — nothing else
+  // touches the bus yet this early in setup(), poll task hasn't started.
+  Serial.println("[BOOT] Auto-detecting RS485 sensors (addresses 1-16, current baud first)...");
   {
     int found = modbusAutoDetectAndEnable(cfg, 16);
     if (found > 0) {
-      Serial.printf("[BOOT] Auto-detect found and enabled %d new sensor(s)\n", found);
+      Serial.printf("[BOOT] Auto-detect found and enabled %d new sensor(s) at %ld baud\n", found, cfg.modbusBaud);
       prefs.begin("rigmod", false);
       saveConfig(prefs, cfg);
       prefs.end();
     } else {
-      Serial.println("[BOOT] Auto-detect found no new sensors");
+      Serial.println("[BOOT] Auto-detect found no new sensors at any standard baud");
     }
   }
 

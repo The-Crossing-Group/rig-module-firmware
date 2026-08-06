@@ -240,9 +240,12 @@ static String sensorsPage(ModuleConfig& cfg) {
   h += "<div class='card' style='border-color:#27ae60'><b>&#9889; Auto-Detect &amp; Enable</b><br>"
        "<span class='small'>Scans the bus (addresses 1-16) and automatically enables any sensor found that isn't "
        "already configured — fills in slave ID + func code, register 0, uint16, scale 1 as a starting point. "
-       "You'll still want to dial in the real register/data type/scale for a meaningful reading, but this gets a "
-       "freshly-wired sensor reporting <i>something</i> immediately without touching this page. Also runs "
-       "automatically on boot and every few minutes in the background.</span><br><br>"
+       "If nothing's configured yet and nothing answers at the current baud, it also sweeps the other standard "
+       "baud rates and adopts whichever one a sensor actually responds at (saved as the module's RS485 baud). "
+       "Once at least one sensor is enabled, the baud is locked in — every sensor on this bus has to share it "
+       "anyway. You'll still want to dial in the real register/data type/scale for a meaningful reading, but "
+       "this gets a freshly-wired sensor reporting <i>something</i> immediately without touching this page. Also "
+       "runs automatically on boot and every few minutes in the background.</span><br><br>"
        "<button type='button' class='btn-green' onclick='autoDetectEnable()' id='adeBtn'>&#9889; Auto-Detect &amp; Enable Now</button>"
        "<div id='adeResult' class='small' style='margin-top:8px'></div></div>";
   h += "<form method='POST' action='/api/sensors/save'>";
@@ -872,8 +875,8 @@ static void handleModbusScan() {
 // for anything new found, saving config if anything changed. Backs both
 // the boot-time/periodic background pass and the manual button on
 // /sensors. Synchronous — same blocking-scan caveat as handleModbusScan.
-extern int modbusAutoDetectAndEnable(ModuleConfig& cfg, int maxAddr); // modbus.h
-
+// modbusAutoDetectAndEnable() is already declared+defined in modbus.h,
+// included before this file — no forward decl needed here.
 static void handleAutoDetectEnable() {
   int maxAddr = _p("max").isEmpty() ? 16 : _p("max").toInt();
   if (maxAddr < 1) maxAddr = 1;
