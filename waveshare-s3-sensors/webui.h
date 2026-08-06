@@ -471,6 +471,22 @@ static String diagPage(ModuleConfig& cfg) {
   h += "<button type='button' onclick='runProbe()'>&#128269; Probe Register</button>";
   h += "<div id='probeResult' class='small' style='margin-top:8px'></div></div>";
 
+  h += "<h3>Register Write</h3><div class='card'>";
+  h += "<p class='small'><b>Caution:</b> writes a value directly to a sensor's config register (Modbus FC06 - "
+       "Write Single Register). Only use this if a sensor's datasheet/manual documents a specific register "
+       "address and value — e.g. switching a radar/ultrasonic level sensor from a slow/filtered measurement "
+       "mode into a fast mode, setting a response-time register, or programming range/blind-zone. Writing the "
+       "wrong register or value on a sensor that doesn't expect it can put it into an unexpected state — double "
+       "check against the manual first.</p>";
+  h += "<div class='grid4'>";
+  h += "<div><label>Slave ID</label><input id='wrSid' type='number' min='1' max='247' value='1'></div>";
+  h += "<div><label>Register (hex or dec)</label><input id='wrReg' value='0'></div>";
+  h += "<div><label>Value (hex or dec)</label><input id='wrVal' value='0'></div>";
+  h += "<div></div>";
+  h += "</div>";
+  h += "<button type='button' onclick='runWrite()'>&#9888; Write Register</button>";
+  h += "<div id='wrResult' class='small' style='margin-top:8px'></div></div>";
+
   h += "<h3>RS485 Sensor Comms Health</h3><div class='card'><div id='commsHealth'>Loading...</div></div>";
 
   h += "<h3>RS485 Raw Traffic</h3><div class='card'>";
@@ -520,6 +536,19 @@ function runProbe(){
   fetch('/api/modbus/probe?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&dataType='+dt+'&wordOrder=0')
     .then(r=>r.json()).then(d=>{
       if(d.ok) box.innerHTML = '<span class="ok">OK</span> — raw registers: ['+d.regs.join(', ')+']  decoded: <b>'+d.decoded.toFixed(4)+'</b>';
+      else box.innerHTML = '<span class="timeout">FAILED</span> — '+d.error;
+    }).catch(e=>{ box.textContent='Request failed: '+e; });
+}
+function runWrite(){
+  let sid=document.getElementById('wrSid').value;
+  let reg=document.getElementById('wrReg').value;
+  let val=document.getElementById('wrVal').value;
+  let box=document.getElementById('wrResult');
+  if(!confirm('Write value '+val+' to register '+reg+' on slave '+sid+'? Make sure this matches the sensor\'s documented register map.')) return;
+  box.textContent='Writing...';
+  fetch('/api/modbus/write?slaveId='+sid+'&reg='+reg+'&value='+val,{method:'POST'})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok) box.innerHTML = '<span class="ok">OK</span> — sensor confirmed register '+d.reg+' = '+d.value;
       else box.innerHTML = '<span class="timeout">FAILED</span> — '+d.error;
     }).catch(e=>{ box.textContent='Request failed: '+e; });
 }
@@ -858,6 +887,42 @@ static void handleModbusProbe() {
   _srv->send(200, "application/json", out);
 }
 
+// Writes a single register to a slave right now (Modbus FC06). Backs
+// the /diag "Register Write" tool — for sensor-side config registers
+// (measurement mode, response time, range/blind-zone, etc.) that a
+// datasheet documents but this firmware has no dedicated field for.
+// Deliberately manual/one-shot — nothing here is saved to our own NVS
+// config; it's a direct write to the SENSOR's own memory.
+static void handleModbusWrite() {
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    _srv->send(503, "application/json", "{\"ok\":false,\"error\":\"bus busy\"}");
+    return;
+  }
+  uint8_t slaveId = _p("slaveId").toInt();
+  String regStr = _p("reg");
+  String valStr = _p("value");
+  uint16_t regAddr = (uint16_t)strtol(regStr.c_str(), nullptr, 0);
+  uint16_t value = (uint16_t)strtol(valStr.c_str(), nullptr, 0);
+
+  int rc = modbusWriteReg(slaveId, regAddr, value, true);
+  xSemaphoreGive(modbusBusMutex);
+
+  DynamicJsonDocument doc(256);
+  if (rc == MB_OK) {
+    doc["ok"] = true;
+    doc["reg"] = regAddr;
+    doc["value"] = value;
+  } else {
+    doc["ok"] = false;
+    doc["error"] = (rc == MB_TIMEOUT) ? "timeout — no response" :
+                   (rc == MB_CRC_ERROR) ? "CRC error" :
+                   (rc == MB_BAD_RESPONSE) ? "sensor rejected write (exception response)" : "bad response";
+  }
+  String out;
+  serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
+}
+
 // Bus-wide slave scan for the Diagnostics page — synchronous/blocking,
 // holds modbusBusMutex for the whole scan so the poll task can't
 // interleave. Deliberately capped by the caller's "max" param since a
@@ -1137,6 +1202,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/can/live",     HTTP_GET, handleCanLive);
   srv.on("/api/can/frames",   HTTP_GET, handleCanFrames);
   srv.on("/api/modbus/probe", HTTP_GET, handleModbusProbe);
+  srv.on("/api/modbus/write", HTTP_POST, handleModbusWrite);
   srv.on("/api/modbus/scan",  HTTP_GET, handleModbusScan);
   srv.on("/api/modbus/log",   HTTP_GET, handleModbusLog);
   srv.on("/api/wifi/scan",    HTTP_GET, handleWifiScan);

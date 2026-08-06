@@ -276,6 +276,80 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
   return MB_OK;
 }
 
+// Writes a single 16-bit register (FC06 - Write Single Register). Used
+// for sensor-side config registers that a datasheet documents but our
+// firmware has no dedicated UI for (e.g. a "fast measurement mode"
+// switch, a response-time/filter setting, a range/blind-zone value).
+// Standard Modbus RTU: request and a well-formed reply both echo back
+// the register address + value written, so success is "got back exactly
+// what we sent, CRC-correct" — nothing to decode.
+// Returns MB_OK/MB_TIMEOUT/MB_CRC_ERROR/MB_BAD_RESPONSE, same codes as
+// modbusReadRegs.
+int modbusWriteReg(uint8_t slaveId, uint16_t regAddr, uint16_t value,
+                    bool verbose = false, int timeoutMs = 600) {
+  if (!_mbSerial) return MB_TIMEOUT;
+
+  modbusFlushRx(); // same late-byte defense as modbusReadRegs
+
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x06; // Write Single Register
+  req[2] = regAddr >> 8;
+  req[3] = regAddr & 0xFF;
+  req[4] = value >> 8;
+  req[5] = value & 0xFF;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  modbusSend(req, 8, verbose);
+
+  uint8_t resp[16];
+  int n = modbusReceive(resp, sizeof(resp), timeoutMs, verbose);
+
+  if (n < 3) {
+    if (verbose) Serial.printf("[Modbus] Write timeout: got %d bytes\n", n);
+    modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_TIMEOUT);
+    return MB_TIMEOUT;
+  }
+
+  // Exception response: slaveId, funcCode|0x80, exceptionCode, CRC(2) = 5 bytes
+  if ((resp[1] & 0x80) && n >= 5) {
+    uint16_t rxCrc = resp[3] | ((uint16_t)resp[4] << 8);
+    uint16_t calcCrc = modbusCRC(resp, 3);
+    if (rxCrc == calcCrc) {
+      if (verbose) Serial.printf("[Modbus] Write exception response: code %02X\n", resp[2]);
+      modbusLogTransaction(slaveId, 0x06, req, 8, resp, 5, MB_BAD_RESPONSE);
+      return MB_BAD_RESPONSE;
+    }
+  }
+
+  // Normal FC06 reply is always exactly 8 bytes: slaveId, 0x06, regHi,
+  // regLo, valHi, valLo, CRC(2) — same length as the request.
+  if (n < 8) {
+    if (verbose) Serial.printf("[Modbus] Write: short response (%d bytes)\n", n);
+    modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_BAD_RESPONSE);
+    return MB_BAD_RESPONSE;
+  }
+
+  uint16_t rxCrc = resp[6] | ((uint16_t)resp[7] << 8);
+  uint16_t calcCrc = modbusCRC(resp, 6);
+  if (rxCrc != calcCrc) {
+    if (verbose) Serial.printf("[Modbus] Write CRC error: got %04X, calc %04X\n", rxCrc, calcCrc);
+    modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_CRC_ERROR);
+    return MB_CRC_ERROR;
+  }
+
+  if (resp[0] != slaveId || resp[1] != 0x06) {
+    if (verbose) Serial.printf("[Modbus] Write: bad response slave=%02X fc=%02X\n", resp[0], resp[1]);
+    modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_BAD_RESPONSE);
+    return MB_BAD_RESPONSE;
+  }
+
+  modbusLogTransaction(slaveId, 0x06, req, 8, resp, 8, MB_OK);
+  return MB_OK;
+}
+
 // Decodes 1 or 2 raw registers into a float per the sensor's configured
 // data type + word order. This is the whole point of making sensors
 // generic: any Modbus sensor is "read N registers, interpret as type X".
