@@ -1,5 +1,5 @@
 // =============================================================================
-// rig-module-firmware-waveshare-s3.ino — Generic Rig Module Firmware
+// waveshare-s3.ino — Generic Rig Module Firmware
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
 // Reads Waveshare Modbus RTU Analog Input 8CH (B) via RS485
 // Reports RAW ENGINEERING VALUES per channel — no tank/mud-specific logic.

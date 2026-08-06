@@ -1,5 +1,5 @@
 // =============================================================================
-// rig-module-firmware-waveshare-s3-sensors.ino — Direct-Sensor Rig Module
+// waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
 //
 // Unlike waveshare-s3/ (which talks to ONE fixed analog-to-Modbus adapter
