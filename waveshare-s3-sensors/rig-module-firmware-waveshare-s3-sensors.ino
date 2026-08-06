@@ -156,6 +156,24 @@ void setup() {
     RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
   modbusInit(RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
 
+  // Auto-detect & enable: scan a modest address range (1-16, keeps boot
+  // delay reasonable — worst case ~16 * 600ms if the bus is empty) and
+  // auto-fill/enable any responding slave that isn't already configured.
+  // No mutex contention concern here — nothing else touches the bus yet
+  // this early in setup(), poll task hasn't started.
+  Serial.println("[BOOT] Auto-detecting RS485 sensors (addresses 1-16)...");
+  {
+    int found = modbusAutoDetectAndEnable(cfg, 16);
+    if (found > 0) {
+      Serial.printf("[BOOT] Auto-detect found and enabled %d new sensor(s)\n", found);
+      prefs.begin("rigmod", false);
+      saveConfig(prefs, cfg);
+      prefs.end();
+    } else {
+      Serial.println("[BOOT] Auto-detect found no new sensors");
+    }
+  }
+
   // CAN only comes up if explicitly enabled on the Config page — listen-
   // only mode (see can.h), so an unconfigured/unused CAN bus is never
   // touched at all unless you ask for it.
@@ -539,9 +557,36 @@ void pollTask(void* param) {
   delay(2000);
 
   int cycleCount = 0;
+  unsigned long lastAutoDetectMs = millis(); // boot-time scan already ran in setup()
   for (;;) {
     cycleCount++;
     int okCount = 0, failCount = 0;
+
+    // Periodic background auto-detect: every ~5 min, and only if a free
+    // sensor slot actually exists (skip the bus-hogging scan entirely
+    // once all slots are full — nothing more it could do anyway). Runs
+    // between poll cycles rather than interleaved with per-sensor polls,
+    // so a slow/empty scan doesn't stall live sensors that are already
+    // reporting fine.
+    if (millis() - lastAutoDetectMs > 300000UL) {
+      lastAutoDetectMs = millis();
+      bool hasFreeSlot = false;
+      for (int i = 0; i < MAX_SENSORS; i++) {
+        if (!cfg.sensors[i].enabled) { hasFreeSlot = true; break; }
+      }
+      if (hasFreeSlot) {
+        if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+          int found = modbusAutoDetectAndEnable(cfg, 16);
+          xSemaphoreGive(modbusBusMutex);
+          if (found > 0) {
+            Serial.printf("[Poll] Background auto-detect found %d new sensor(s)\n", found);
+            prefs.begin("rigmod", false);
+            saveConfig(prefs, cfg);
+            prefs.end();
+          }
+        }
+      }
+    }
 
     for (int i = 0; i < MAX_SENSORS; i++) {
       SensorConfig& s = cfg.sensors[i];

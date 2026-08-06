@@ -237,6 +237,14 @@ static String sensorsPage(ModuleConfig& cfg) {
        "slave ID, register, data type, and scaling. Works with any Modbus sensor (pressure, temp, flow, level...). "
        "Don't know a sensor's slave ID or register yet? Use the <a href='/diag'>Diagnostics</a> page's bus scan "
        "and register probe first.</p>";
+  h += "<div class='card' style='border-color:#27ae60'><b>&#9889; Auto-Detect &amp; Enable</b><br>"
+       "<span class='small'>Scans the bus (addresses 1-16) and automatically enables any sensor found that isn't "
+       "already configured — fills in slave ID + func code, register 0, uint16, scale 1 as a starting point. "
+       "You'll still want to dial in the real register/data type/scale for a meaningful reading, but this gets a "
+       "freshly-wired sensor reporting <i>something</i> immediately without touching this page. Also runs "
+       "automatically on boot and every few minutes in the background.</span><br><br>"
+       "<button type='button' class='btn-green' onclick='autoDetectEnable()' id='adeBtn'>&#9889; Auto-Detect &amp; Enable Now</button>"
+       "<div id='adeResult' class='small' style='margin-top:8px'></div></div>";
   h += "<form method='POST' action='/api/sensors/save'>";
   h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save All Sensors</button>";
 
@@ -339,6 +347,16 @@ function autoBaud(i){
     else el.textContent = 'No response at any baud for slave '+sid+'.';
   });
 }
+function autoDetectEnable(){
+  let btn=document.getElementById('adeBtn'); let box=document.getElementById('adeResult');
+  btn.disabled=true; btn.textContent='Scanning...';
+  box.textContent='Scanning addresses 1-16...';
+  fetch('/api/modbus/autodetect-enable?max=16',{method:'POST'}).then(r=>r.json()).then(d=>{
+    btn.disabled=false; btn.innerHTML='&#9889; Auto-Detect &amp; Enable Now';
+    if(d.newCount>0){ box.innerHTML = '<span class="ok">Found and enabled '+d.newCount+' new sensor(s).</span> Reloading...'; setTimeout(()=>location.reload(),1200); }
+    else box.textContent = 'No new sensors found (either nothing new on the bus, or all sensor slots are full).';
+  }).catch(e=>{ btn.disabled=false; btn.innerHTML='&#9889; Auto-Detect &amp; Enable Now'; box.textContent='Request failed: '+e; });
+}
 
 </script>)";
   h += "</div>";
@@ -430,7 +448,9 @@ static String diagPage(ModuleConfig& cfg) {
   h += "<p class='small'>Probes every Modbus slave address 1-247 at the current baud rate (" + String(cfg.modbusBaud) +
        ") and reports which ones respond. Takes up to ~30s depending on how many addresses time out (no response "
        "is the slow case — a wired sensor answers almost instantly). Use this to find a new sensor's slave ID "
-       "before adding it on the <a href='/sensors'>Sensors</a> page.</p>";
+       "before adding it on the <a href='/sensors'>Sensors</a> page. (This just reports what's out there — it "
+       "doesn't configure anything. For auto-enabling new sensors automatically, see \"Auto-Detect &amp; Enable\" "
+       "on the <a href='/sensors'>Sensors</a> page, which also runs on its own on boot and every few minutes.)</p>";
   h += "<div class='row'><div><label>Scan up to address</label><input id='scanMax' type='number' min='1' max='247' value='32'></div>";
   h += "<button type='button' onclick='runScan()' id='scanBusBtn' style='margin-top:18px'>&#128269; Scan Bus</button></div>";
   h += "<div id='scanBusResult' class='small'></div></div>";
@@ -839,10 +859,38 @@ static void handleModbusScan() {
   JsonArray found = doc.createNestedArray("found");
 
   if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(60000)) == pdTRUE) {
-    modbusScanSlaves(maxAddr, [&](int addr) { found.add(addr); });
+    modbusScanSlaves(maxAddr, [&](int addr, int fc) { found.add(addr); });
     xSemaphoreGive(modbusBusMutex);
   }
 
+  String out;
+  serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
+}
+
+// Auto-Detect & Enable — scans the bus and fills in/enables sensor slots
+// for anything new found, saving config if anything changed. Backs both
+// the boot-time/periodic background pass and the manual button on
+// /sensors. Synchronous — same blocking-scan caveat as handleModbusScan.
+extern int modbusAutoDetectAndEnable(ModuleConfig& cfg, int maxAddr); // modbus.h
+
+static void handleAutoDetectEnable() {
+  int maxAddr = _p("max").isEmpty() ? 16 : _p("max").toInt();
+  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr > 247) maxAddr = 247;
+
+  int newCount = 0;
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(60000)) == pdTRUE) {
+    newCount = modbusAutoDetectAndEnable(*_cfg, maxAddr);
+    xSemaphoreGive(modbusBusMutex);
+  }
+  if (newCount > 0) {
+    saveConfig(*_prefs, *_cfg);
+  }
+
+  DynamicJsonDocument doc(256);
+  doc["ok"] = true;
+  doc["newCount"] = newCount;
   String out;
   serializeJson(doc, out);
   _srv->send(200, "application/json", out);
@@ -1087,6 +1135,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/can/save",       HTTP_POST, handleCanSave);
   srv.on("/api/wifi/forget",    HTTP_POST, handleWifiForget);
   srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);
+  srv.on("/api/modbus/autodetect-enable", HTTP_POST, handleAutoDetectEnable);
 
   srv.on("/api/buffer/flush", HTTP_POST, [](){
     flushNow = true;

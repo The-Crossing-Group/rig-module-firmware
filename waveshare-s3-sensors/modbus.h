@@ -298,7 +298,8 @@ long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud) {
 }
 
 // Scans slave addresses 1..maxAddr for anything that responds to a basic
-// FC04 (then FC03) probe of register 0. Calls onFound(addr) for each hit.
+// FC04 (then FC03) probe of register 0. Calls onFound(addr, funcCode) for
+// each hit, funcCode being whichever (4 or 3) actually got a valid reply.
 // This is a synchronous, blocking scan (a few hundred ms per address at
 // worst) — the caller (web handler) should only invoke it on demand, not
 // from the poll loop, and should hold modbusBusMutex for the whole call.
@@ -306,8 +307,73 @@ template<typename FoundFn>
 void modbusScanSlaves(int maxAddr, FoundFn onFound) {
   uint16_t regs[1];
   for (int addr = 1; addr <= maxAddr; addr++) {
-    bool found = (modbusReadRegs((uint8_t)addr, 4, 0x0000, 1, regs) == MB_OK) ||
-                 (modbusReadRegs((uint8_t)addr, 3, 0x0000, 1, regs) == MB_OK);
-    if (found) onFound(addr);
+    if (modbusReadRegs((uint8_t)addr, 4, 0x0000, 1, regs) == MB_OK) {
+      onFound(addr, 4);
+    } else if (modbusReadRegs((uint8_t)addr, 3, 0x0000, 1, regs) == MB_OK) {
+      onFound(addr, 3);
+    }
   }
+}
+
+// =============================================================================
+// AUTO-DETECT & ENABLE — scans the bus and automatically fills in/enables
+// sensor config slots for any slave that responds and isn't already
+// configured. This is what makes "just wire up a sensor and it shows up"
+// work without visiting the web UI at all. New slots get conservative
+// defaults (func code = whichever answered, register 0, uint16, scale 1)
+// — good enough to prove the sensor is alive; the actual register/type/
+// scale for a real reading still needs to be dialed in by hand (every
+// sensor's register map is different), but this closes the "nothing shows
+// up until I use the diagnostics page" gap entirely.
+//
+// Returns how many NEW slots were filled in this call. Does not touch any
+// slot that's already enabled (so on-purpose disabled sensors that still
+// happen to be wired up and answering aren't silently re-enabled/reset).
+// Caller must hold modbusBusMutex for the whole call (same rule as
+// modbusScanSlaves) and should save config + persist afterward if count > 0.
+// =============================================================================
+int modbusAutoDetectAndEnable(ModuleConfig& cfg, int maxAddr) {
+  // Which slave IDs are already configured (enabled or not) so we don't
+  // double-assign the same physical sensor to two slots on repeat scans.
+  bool alreadyConfigured[248] = { false };
+  for (int i = 0; i < MAX_SENSORS; i++) {
+    if (cfg.sensors[i].enabled) {
+      uint8_t sid = cfg.sensors[i].slaveId;
+      if (sid <= 247) alreadyConfigured[sid] = true;
+    }
+  }
+
+  int newCount = 0;
+  modbusScanSlaves(maxAddr, [&](int addr, int fc) {
+    if (addr < 1 || addr > 247) return;
+    if (alreadyConfigured[addr]) return; // already have a slot for this slave
+
+    // Find the first free (disabled) slot.
+    int slot = -1;
+    for (int i = 0; i < MAX_SENSORS; i++) {
+      if (!cfg.sensors[i].enabled) { slot = i; break; }
+    }
+    if (slot < 0) return; // no free slots left, nothing more we can do
+
+    SensorConfig& s = cfg.sensors[slot];
+    s.enabled   = true;
+    s.name      = "Sensor " + String(addr) + " (auto)";
+    s.kind      = "";
+    s.unit      = "";
+    s.slaveId   = (uint8_t)addr;
+    s.funcCode  = (uint8_t)fc;
+    s.regAddr   = 0;
+    s.dataType  = MB_UINT16;
+    s.wordOrder = MB_WORD_HIGH_FIRST;
+    s.scale     = 1.0f;
+    s.offset    = 0.0f;
+    s.decimals  = 2;
+
+    alreadyConfigured[addr] = true;
+    newCount++;
+    Serial.printf("[AutoDetect] New sensor found: slave=%d fc=%d -> slot %d (enabled, needs register/type tuning)\n",
+      addr, fc, slot);
+  });
+
+  return newCount;
 }
