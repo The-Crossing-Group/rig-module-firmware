@@ -32,8 +32,18 @@ void computeSensorVolume(SensorConfig& s, SensorReading& reading, VolumeReading&
   if (s.capacity <= 0.0f) return;
   if (s.volMaxLevel <= s.volZeroLevel) return;
 
-  if (!reading.valid || !reading.hasValue) {
-    out.status = reading.valid ? reading.status : "stale";
+  // Use the debounced displayStatus, not raw valid/status, for the same
+  // reason the sensor's own /sensors and /live display debounces a lone
+  // timeout: a sensor with a slow measurement cycle can fail a poll
+  // without anything actually being wrong, and the volume gauge next to
+  // it shouldn't flap to "stale" every time that happens while the
+  // sensor's own status stays showing "ok".
+  if (!reading.hasValue) {
+    out.status = "stale";
+    return;
+  }
+  if (reading.displayStatus != "ok") {
+    out.status = reading.displayStatus;
     return;
   }
 

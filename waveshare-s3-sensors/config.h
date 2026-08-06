@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.4.0"
+#define FW_VERSION "rig-module-sensors-1.5.0"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -78,12 +78,32 @@ struct SensorConfig {
 };
 
 // Live reading for one sensor.
+// How many consecutive raw timeouts (see `status` below) before a sensor
+// that HAS reported successfully before is allowed to show "timeout" on
+// the /sensors and /live pages. Some sensors (e.g. a radar level unit
+// with a slow measurement cycle) only have fresh data ready on 1 out of
+// every 2-3 polls by design — that's not a fault, but it looked like one
+// on those two pages every single poll cycle. /diag's comms health table
+// and raw traffic log always show every raw timeout regardless of this,
+// since those pages exist specifically to see what's really happening.
+#define TIMEOUT_DISPLAY_THRESHOLD 6
+
 struct SensorReading {
   bool   valid    = false;   // false = comms failure (timeout/CRC/no response)
   bool   hasValue = false;   // true once a real value has been decoded
   float  rawValue = 0.0f;    // decoded raw value BEFORE scale/offset (for diagnostics)
   float  value    = 0.0f;    // final engineering value (raw*scale+offset)
-  String status   = "stale"; // "ok" | "timeout" | "crc" | "stale" | "disabled"
+  String status   = "stale"; // RAW per-poll result: "ok" | "timeout" | "crc" | "stale" | "disabled"
+  // Debounced version of `status` for the /sensors and /live pages: a
+  // lone timeout (or a short run of them, under TIMEOUT_DISPLAY_THRESHOLD)
+  // on a sensor that has reported OK before just keeps showing the last
+  // real status instead of flapping to "timeout" every time. Only flips
+  // to "timeout" once that many consecutive raw timeouts have piled up.
+  // CRC/other errors are NOT debounced — those are real, unexpected
+  // failures and show immediately. `status` above is untouched by this
+  // and always reflects exactly what just happened, for diagnostics.
+  String displayStatus       = "stale";
+  unsigned long consecutiveTimeouts = 0;
   unsigned long lastPollMs   = 0;
   unsigned long lastOkMs     = 0;
   unsigned long pollCount    = 0;

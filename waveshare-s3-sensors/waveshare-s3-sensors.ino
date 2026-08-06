@@ -614,6 +614,8 @@ void pollTask(void* param) {
           r.rawValue = raw;
           r.value = round(value * 100.0f) / 100.0f;
           r.status = "ok";
+          r.displayStatus = "ok";
+          r.consecutiveTimeouts = 0;
           r.lastOkMs = millis();
           okCount++;
         } else {
@@ -621,6 +623,25 @@ void pollTask(void* param) {
           r.errorCount++;
           r.status = (rc == MB_TIMEOUT) ? "timeout" : (rc == MB_CRC_ERROR) ? "crc" : "error";
           failCount++;
+
+          if (rc == MB_TIMEOUT) {
+            r.consecutiveTimeouts++;
+            // Some sensors (slow measurement cycle) only answer on a
+            // fraction of polls by design — don't flap the /sensors and
+            // /live pages to "timeout" over a short run of these if the
+            // sensor has reported a real value before. /diag always sees
+            // every raw timeout via `status` regardless of this.
+            bool hasReportedBefore = r.hasValue;
+            if (!hasReportedBefore || r.consecutiveTimeouts >= TIMEOUT_DISPLAY_THRESHOLD) {
+              r.displayStatus = "timeout";
+            }
+            // else: leave displayStatus as whatever it last was (likely "ok")
+          } else {
+            // CRC/other errors are real, unexpected failures — always
+            // shown immediately, no debouncing.
+            r.consecutiveTimeouts = 0;
+            r.displayStatus = r.status;
+          }
         }
         xSemaphoreGive(stateMutex);
       }
@@ -709,7 +730,13 @@ String buildPayload(bool bufferedFlag) {
       } else {
         c["value"] = nullptr;
       }
+      // "status" = raw per-poll result (unchanged wire format, what the
+      // Pi/rig-dashboard has always received). "displayStatus" = the
+      // debounced version for this firmware's OWN /live page only —
+      // added rather than substituted so the Pi-side payload keeps
+      // reporting exactly what actually just happened.
       c["status"] = r.status;
+      c["displayStatus"] = r.displayStatus;
 
       if (s.volumeEnabled) {
         VolumeReading vol;

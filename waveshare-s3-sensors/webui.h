@@ -315,9 +315,10 @@ function fetchLive(){
     d.sensors.forEach(s=>{
       let el=document.getElementById('live'+s.idx);
       if(!el) return;
-      if (s.hasValue) el.textContent = s.value.toFixed(2)+' ('+s.status+')';
-      else el.textContent = '-- ('+s.status+')';
-      el.className = 'small mono ' + s.status;
+      let ds = s.displayStatus || s.status;
+      if (s.hasValue) el.textContent = s.value.toFixed(2)+' ('+ds+')';
+      else el.textContent = '-- ('+ds+')';
+      el.className = 'small mono ' + ds;
     });
   });
 }
@@ -586,7 +587,8 @@ function fetchLive(){
     let s = '';
     s += '<h3>RS485 Sensors</h3><table><tr><th>Name</th><th>Kind</th><th>Slave</th><th>Value</th><th>Volume</th><th>Status</th></tr>';
     (d.channels||[]).forEach(c=>{
-      let cls = c.status==='ok'?'ok':c.status;
+      let ds = c.displayStatus || c.status;
+      let cls = ds==='ok'?'ok':ds;
       s += '<tr><td>'+(c.name||'')+'</td><td>'+(c.kind||'')+'</td><td>'+c.ch+'</td>';
       s += '<td>'+(c.value!=null?c.value+' '+c.unit:'--')+'</td>';
       if (c.volume) {
@@ -596,7 +598,7 @@ function fetchLive(){
         if (c.capacity!=null) vtxt += ' <span class="small">/ '+c.capacity+' '+v.unit+'</span>';
         s += '<td class="'+vcls+'">'+vtxt+'</td>';
       } else { s += '<td class="small">--</td>'; }
-      s += '<td class="'+cls+'">'+c.status+'</td></tr>';
+      s += '<td class="'+cls+'">'+ds+'</td></tr>';
     });
     s += '</table>';
     if (d.canEnabled) {
@@ -699,7 +701,15 @@ static void handleSensorsLive() {
       o["hasValue"]   = r.hasValue;
       o["value"]      = r.hasValue ? r.value : (float)0;
       if (!r.hasValue) o["value"] = nullptr;
-      o["status"]     = s.enabled ? r.status : "disabled";
+      // "status" = raw per-poll result, used by /diag's comms health
+      // table (shows every real timeout/CRC error, unfiltered — that
+      // page exists specifically to see what's actually happening).
+      // "displayStatus" = debounced version for the /sensors page's own
+      // live indicator next to each sensor card (suppresses a lone
+      // timeout on a sensor with a slow measurement cycle that's
+      // otherwise reporting fine).
+      o["status"]        = s.enabled ? r.status : "disabled";
+      o["displayStatus"] = s.enabled ? r.displayStatus : "disabled";
       o["pollCount"]  = r.pollCount;
       o["errorCount"] = r.errorCount;
       if (r.lastOkMs) o["lastOkAgoMs"] = (long)(millis() - r.lastOkMs);
