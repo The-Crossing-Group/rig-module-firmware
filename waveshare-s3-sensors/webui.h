@@ -852,7 +852,7 @@ static void handleModbusProbe() {
 // holds modbusBusMutex for the whole scan so the poll task can't
 // interleave. Deliberately capped by the caller's "max" param since a
 // full 1-247 scan is slow when most addresses are empty (each miss is a
-// 300ms timeout).
+// ~400ms*2 timeout — FC04 then FC03 both get tried per address).
 static void handleModbusScan() {
   int maxAddr = _p("max").isEmpty() ? 32 : _p("max").toInt();
   if (maxAddr < 1) maxAddr = 1;

@@ -136,13 +136,34 @@ int modbusGetRecentLog(ModbusRawLogEntry* out, int maxCount) {
   return n;
 }
 
+// Drains any bytes sitting in the RX buffer, but doesn't stop at the
+// first empty check — waits until the bus has been quiet for a few ms
+// before returning. A one-shot "while(available()) read()" can miss the
+// tail end of a PREVIOUS response that's still trickling in (slow
+// sensor + fixed timeout can leave late bytes arriving just as the next
+// query is about to fire) — those leftover bytes would otherwise get
+// misread as the response to the new query, corrupting it and failing
+// CRC even though the wiring/baud are actually fine. Capped so a noisy/
+// continuously-chattering bus can't hang this forever.
+static void modbusFlushRx() {
+  unsigned long quietUntil = millis() + 8;
+  unsigned long hardDeadline = millis() + 80;
+  while (millis() < quietUntil && millis() < hardDeadline) {
+    if (_mbSerial->available()) {
+      _mbSerial->read();
+      quietUntil = millis() + 8; // saw a byte, reset the quiet timer
+    }
+  }
+}
+
 int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
-                    uint8_t count, uint16_t* regValues, bool verbose = false) {
+                    uint8_t count, uint16_t* regValues, bool verbose = false,
+                    int timeoutMs = 600) {
   if (!_mbSerial) return MB_TIMEOUT;
   if (count < 1) count = 1;
   if (count > 16) count = 16;
 
-  while (_mbSerial->available()) _mbSerial->read(); // flush stale RX
+  modbusFlushRx(); // drain any late bytes left over from a previous, slower-than-expected response
 
   uint8_t req[8];
   req[0] = slaveId;
@@ -159,7 +180,7 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
 
   int expectedLen = 3 + count * 2 + 2;
   uint8_t resp[40];
-  int n = modbusReceive(resp, expectedLen, 300, verbose);
+  int n = modbusReceive(resp, expectedLen, timeoutMs, verbose);
 
   if (n < expectedLen) {
     if (verbose) Serial.printf("[Modbus] Timeout: got %d, expected %d\n", n, expectedLen);
@@ -303,13 +324,20 @@ long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud) {
 // This is a synchronous, blocking scan (a few hundred ms per address at
 // worst) — the caller (web handler) should only invoke it on demand, not
 // from the poll loop, and should hold modbusBusMutex for the whole call.
+//
+// timeoutMs per probe defaults to 400 — some sensors (radar/ultrasonic
+// level sensors especially) take noticeably longer than a simple
+// pressure/temp transducer to answer a query. Too short a timeout here
+// doesn't just slow the scan down, it can cause outright MISSED
+// detections (sensor's real answer arrives after we've already given up
+// and moved to the next address) — worth the extra time per address.
 template<typename FoundFn>
-void modbusScanSlaves(int maxAddr, FoundFn onFound) {
+void modbusScanSlaves(int maxAddr, FoundFn onFound, int timeoutMs = 400) {
   uint16_t regs[1];
   for (int addr = 1; addr <= maxAddr; addr++) {
-    if (modbusReadRegs((uint8_t)addr, 4, 0x0000, 1, regs) == MB_OK) {
+    if (modbusReadRegs((uint8_t)addr, 4, 0x0000, 1, regs, false, timeoutMs) == MB_OK) {
       onFound(addr, 4);
-    } else if (modbusReadRegs((uint8_t)addr, 3, 0x0000, 1, regs) == MB_OK) {
+    } else if (modbusReadRegs((uint8_t)addr, 3, 0x0000, 1, regs, false, timeoutMs) == MB_OK) {
       onFound(addr, 3);
     }
   }
