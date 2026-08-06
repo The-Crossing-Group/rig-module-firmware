@@ -30,12 +30,12 @@ extern SensorReading    sensorReadings[MAX_SENSORS];
 extern CanSignalReading canReadings[MAX_CAN_SIGNALS];
 extern SemaphoreHandle_t stateMutex;
 extern SemaphoreHandle_t modbusBusMutex;
-long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud); // modbus.h
-int  modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr, uint8_t count, uint16_t* regValues, bool verbose); // modbus.h
-uint8_t modbusRegCount(uint8_t dataType); // modbus.h
-float modbusDecodeValue(uint16_t* regs, uint8_t dataType, uint8_t wordOrder); // modbus.h
-template<typename FoundFn> void modbusScanSlaves(int maxAddr, FoundFn onFound); // modbus.h
-int modbusGetRecentLog(ModbusRawLogEntry* out, int maxCount); // modbus.h (struct + MODBUS_LOG_SIZE defined there)
+// modbusAutoDetectBaud(), modbusReadRegs(), modbusRegCount(),
+// modbusDecodeValue(), modbusScanSlaves(), modbusGetRecentLog() are all
+// already declared+defined in modbus.h, included before this file in the
+// .ino — no forward decls here. (Previously duplicated declarations here
+// caused "ambiguous overload" compile errors once modbus.h's real
+// signatures grew default parameters that these stale copies didn't have.)
 bool canStart(int txPin, int rxPin, long bitrate); // can.h
 void canStop(); // can.h
 bool canIsRunning(); // can.h
