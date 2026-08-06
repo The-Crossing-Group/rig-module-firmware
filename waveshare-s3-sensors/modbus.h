@@ -178,34 +178,101 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
 
   modbusSend(req, 8, verbose);
 
-  int expectedLen = 3 + count * 2 + 2;
+  // IMPORTANT: don't size the read off of what WE asked for. Some real
+  // sensors (confirmed in the field: an RS485 radar level sensor) don't
+  // echo back the function code / register count we requested at all —
+  // they just always answer with whatever fixed register block they
+  // have (e.g. we ask FC04/1 register, they reply FC03/3 registers,
+  // every single time, regardless of the query). Sizing the read to our
+  // own request truncated their longer replies and CRC-checked the
+  // wrong slice — that's what caused "constant CRC errors" even though
+  // the sensor's actual replies were perfectly well-formed. Read up to
+  // the full buffer instead and use the RESPONSE's own byte-count field
+  // (byte index 2 of any FC03/FC04 reply) to figure out the real frame
+  // length after the fact.
   uint8_t resp[40];
-  int n = modbusReceive(resp, expectedLen, timeoutMs, verbose);
+  int n = modbusReceive(resp, sizeof(resp), timeoutMs, verbose);
 
-  if (n < expectedLen) {
-    if (verbose) Serial.printf("[Modbus] Timeout: got %d, expected %d\n", n, expectedLen);
+  if (n < 3) {
+    if (verbose) Serial.printf("[Modbus] Timeout: got %d bytes (need >=3 for a header)\n", n);
     modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_TIMEOUT);
     return MB_TIMEOUT;
   }
 
-  uint16_t rxCrc = resp[n-2] | ((uint16_t)resp[n-1] << 8);
-  uint16_t calcCrc = modbusCRC(resp, n-2);
+  // Exception response: slave, (funcCode|0x80), exceptionCode, CRC(2) — fixed 5 bytes
+  if (resp[1] & 0x80) {
+    if (n < 5) {
+      modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_TIMEOUT);
+      return MB_TIMEOUT;
+    }
+    uint16_t rxCrc = resp[3] | ((uint16_t)resp[4] << 8);
+    uint16_t calcCrc = modbusCRC(resp, 3);
+    if (rxCrc != calcCrc) {
+      modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_CRC_ERROR);
+      return MB_CRC_ERROR;
+    }
+    if (verbose) Serial.printf("[Modbus] Exception response: code %02X\n", resp[2]);
+    modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_BAD_RESPONSE);
+    return MB_BAD_RESPONSE;
+  }
+
+  // Only FC03/FC04 are read-register replies we know how to parse.
+  if (resp[1] != 0x03 && resp[1] != 0x04) {
+    if (verbose) Serial.printf("[Modbus] Bad response: unexpected function code %02X\n", resp[1]);
+    modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_BAD_RESPONSE);
+    return MB_BAD_RESPONSE;
+  }
+
+  uint8_t byteCount = resp[2];
+  int frameLen = 3 + byteCount + 2;
+  if (frameLen > (int)sizeof(resp)) {
+    if (verbose) Serial.printf("[Modbus] Bad response: byte count %d implies an oversized frame\n", byteCount);
+    modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_BAD_RESPONSE);
+    return MB_BAD_RESPONSE;
+  }
+  if (n < frameLen) {
+    if (verbose) Serial.printf("[Modbus] Timeout: got %d bytes, frame needs %d (byteCount=%d)\n", n, frameLen, byteCount);
+    modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_TIMEOUT);
+    return MB_TIMEOUT;
+  }
+
+  uint16_t rxCrc = resp[frameLen-2] | ((uint16_t)resp[frameLen-1] << 8);
+  uint16_t calcCrc = modbusCRC(resp, frameLen-2);
   if (rxCrc != calcCrc) {
     if (verbose) Serial.printf("[Modbus] CRC error: got %04X, calc %04X\n", rxCrc, calcCrc);
     modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_CRC_ERROR);
     return MB_CRC_ERROR;
   }
 
-  if (resp[0] != slaveId || resp[1] != funcCode) {
-    if (verbose) Serial.printf("[Modbus] Bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
+  if (resp[0] != slaveId) {
+    if (verbose) Serial.printf("[Modbus] Bad response: slave=%02X (expected %02X)\n", resp[0], slaveId);
+    modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_BAD_RESPONSE);
+    return MB_BAD_RESPONSE;
+  }
+  // Deliberately NOT checking resp[1] == funcCode here — some sensors
+  // (see comment above modbusReceive call) reply with a different
+  // function code than what was requested but otherwise valid,
+  // CRC-correct data. We only care that it was SOME valid read-register
+  // reply, already confirmed above (0x03 or 0x04, no exception bit).
+
+  uint8_t regsInResponse = byteCount / 2;
+  if (regsInResponse < count) {
+    // Sensor sent back fewer registers than we asked for — genuinely
+    // can't satisfy the request, unlike the "sent more than asked"
+    // case which we just take the front slice of below.
+    if (verbose) Serial.printf("[Modbus] Bad response: got %d registers, need %d\n", regsInResponse, count);
     modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_BAD_RESPONSE);
     return MB_BAD_RESPONSE;
   }
 
+  // regValues[] is sized by the CALLER for `count` registers — even if
+  // the sensor sent back more (e.g. always answers with a fixed 3-reg
+  // block regardless of what was requested), only copy out `count` of
+  // them so we never write past the caller's buffer.
   for (int i = 0; i < count; i++) {
     regValues[i] = ((uint16_t)resp[3 + i*2] << 8) | resp[4 + i*2];
   }
-  modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_OK);
+  modbusLogTransaction(slaveId, funcCode, req, 8, resp, frameLen, MB_OK);
   return MB_OK;
 }
 
