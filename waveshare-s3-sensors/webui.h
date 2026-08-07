@@ -137,7 +137,7 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<label>Module Name</label><input name='moduleName' value='" + cfg.moduleName + "' placeholder='e.g. Standpipe Pressure Skid'>";
   h += "<label>Module Type</label><input name='moduleType' list='moduleTypeOpts' value='" + cfg.moduleType + "' placeholder='e.g. pressure, drill'>";
   h += "<datalist id='moduleTypeOpts'><option value='generic'><option value='pressure'><option value='tank'><option value='pump'><option value='drill'></datalist>";
-  h += "<div class='small'>Shown on the rig dashboard's module card. Type anything, or pick a suggestion.</div>";
+  h += "<div class='small'>Shown on the rig dashboard.</div>";
   h += "<label>Description</label><input name='description' value='" + cfg.description + "'>";
 
   h += "<h3>RS485 / Modbus Bus</h3>";
@@ -154,9 +154,7 @@ static String cfgPage(ModuleConfig& cfg) {
     }
   }
   h += "</select>";
-  h += "<div class='small'>Shared by every sensor on the bus — all your RS485 sensors must use the same baud rate "
-       "(that's a Modbus RTU / RS485 wiring requirement, not something this firmware can work around). Use the "
-       "<a href='/diag'>Diagnostics</a> page's bus scan to find sensors and confirm this is right.</div>";
+  h += "<div class='small'>All sensors on the bus must use this baud rate.</div>";
 
   h += "<h3>CAN Bus</h3>";
   h += "<label><input type='checkbox' name='canEnabled'";
@@ -175,14 +173,12 @@ static String cfgPage(ModuleConfig& cfg) {
     }
   }
   h += "</select>";
-  h += "<div class='small'>Runs in <b>listen-only</b> mode — this module never transmits on the CAN bus, only "
-       "reads. Not sure what's on the bus yet? Enable it and check the <a href='/diag'>Diagnostics</a> page's "
-       "live raw frame sniffer — see actual traffic before defining any signals on the <a href='/can'>CAN</a> page.</div>";
+  h += "<div class='small'>Listen-only. See raw traffic on <a href='/diag'>Diagnostics</a>.</div>";
 
   h += "<h3>Pi Logger</h3>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
   h += "<label>Pi Host (blank = auto)</label><input name='piHost' value='" + cfg.piHost + "' placeholder='192.168.x.x or rig-logger.local'>";
-  h += "<div class='small'>Leave blank for auto-discovery via the standard \"rigNNN\" convention or mDNS.</div>";
+  h += "<div class='small'>Blank = auto-discover.</div>";
   h += "<label>X-Rig-Token</label><input name='rigToken' type='password' value='" + cfg.rigToken + "'>";
 
   h += "<h3>WiFi</h3>";
@@ -195,8 +191,7 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<div id='scanResults'></div>";
   h += "<label>SSID</label><input name='wifiSSID' id='wifiSSID' value='" + cfg.wifiSSID + "' placeholder='site wifi network name'>";
   h += "<label>Password</label><input name='wifiPass' id='wifiPass' type='password' value='" + cfg.wifiPass + "' placeholder='site wifi password'>";
-  h += "<div class='small'>Saving with a changed SSID/password reboots the unit. No saved network? This unit "
-       "auto-scans for a standard rig router (SSID like rig132) first, before falling back to its own setup AP.</div>";
+  h += "<div class='small'>Changing SSID/password reboots the unit.</div>";
   h += "<br><button type='submit'>Save</button>";
   h += "</form>";
   h += "<div class='card' style='margin-top:12px'><b>Forget WiFi</b><br><span class='small'>Clears saved network, reboots into setup-AP mode.</span><br><br>";
@@ -233,19 +228,11 @@ function pickNet(ssid){ document.getElementById('wifiSSID').value = ssid; docume
 static String sensorsPage(ModuleConfig& cfg) {
   String h = FPSTR(NAV);
   h += "<div class='page'><h2>&#128225; RS485 Sensors</h2>";
-  h += "<p class='small'>Each sensor here is an independent Modbus RTU slave on the shared RS485 bus — its own "
-       "slave ID, register, data type, and scaling. Works with any Modbus sensor (pressure, temp, flow, level...). "
-       "Don't know a sensor's slave ID or register yet? Use the <a href='/diag'>Diagnostics</a> page's bus scan "
-       "and register probe first.</p>";
+  h += "<p class='small'>Any Modbus RTU sensor on the RS485 bus. Don't know its slave ID/register? Use "
+       "<a href='/diag'>Diagnostics</a> first.</p>";
   h += "<div class='card' style='border-color:#27ae60'><b>&#9889; Auto-Detect &amp; Enable</b><br>"
-       "<span class='small'>Scans the bus (addresses 1-16) and automatically enables any sensor found that isn't "
-       "already configured — fills in slave ID + func code, register 0, uint16, scale 1 as a starting point. "
-       "If nothing's configured yet and nothing answers at the current baud, it also sweeps the other standard "
-       "baud rates and adopts whichever one a sensor actually responds at (saved as the module's RS485 baud). "
-       "Once at least one sensor is enabled, the baud is locked in — every sensor on this bus has to share it "
-       "anyway. You'll still want to dial in the real register/data type/scale for a meaningful reading, but "
-       "this gets a freshly-wired sensor reporting <i>something</i> immediately without touching this page. Also "
-       "runs automatically on boot and every few minutes in the background.</span><br><br>"
+       "<span class='small'>Scans addresses 1-16, auto-enables new sensors with starter defaults. Also runs "
+       "on boot and every few minutes.</span><br><br>"
        "<button type='button' class='btn-green' onclick='autoDetectEnable()' id='adeBtn'>&#9889; Auto-Detect &amp; Enable Now</button>"
        "<div id='adeResult' class='small' style='margin-top:8px'></div></div>";
   h += "<form method='POST' action='/api/sensors/save'>";
@@ -292,7 +279,7 @@ static String sensorsPage(ModuleConfig& cfg) {
     if (s.volumeEnabled) h += " checked";
     h += "> Compute Tank Volume from this sensor</label>";
     h += "<div id='volFields" + String(i) + "' style='display:" + String(s.volumeEnabled ? "block" : "none") + "'>";
-    h += "<div class='small'>This sensor's value at \"Empty\" = 0 volume, value at \"Full\" = Capacity.</div>";
+    h += "<div class='small'>Empty = 0 volume, Full = Capacity.</div>";
     h += "<div class='row'><div><label>Capacity</label><input name='s" + String(i) + "cap' type='number' step='any' min='0' value='" + String(s.capacity) + "'></div>";
     h += "<div><label>Unit</label><select name='s" + String(i) + "cu'>";
     h += "<option value='m3'" + String(s.capacityUnit == "m3" ? " selected" : "") + ">m&#179;</option>";
@@ -406,9 +393,8 @@ static String canPage(ModuleConfig& cfg) {
          "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps. "
          "See raw frames on the <a href='/diag'>Diagnostics</a> page.</div>";
   }
-  h += "<p class='small'>Each signal pulls a byte range out of frames matching a specific CAN ID and decodes it "
-       "into a value — the same idea as a Modbus sensor, just sourced from CAN. Define these once you've "
-       "identified a pattern in the raw frames (Diagnostics page).</p>";
+  h += "<p class='small'>Decodes a byte range from a specific CAN ID into a value. Identify the pattern on "
+       "<a href='/diag'>Diagnostics</a> first.</p>";
   h += "<form method='POST' action='/api/can/save'>";
   h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save All Signals</button>";
 
@@ -475,19 +461,15 @@ static String diagPage(ModuleConfig& cfg) {
   h += "<div class='page'><h2>&#128269; Diagnostics</h2>";
 
   h += "<h3>RS485 Bus Scan</h3><div class='card'>";
-  h += "<p class='small'>Probes every Modbus slave address 1-247 at the current baud rate (" + String(cfg.modbusBaud) +
-       ") and reports which ones respond. Takes up to ~30s depending on how many addresses time out (no response "
-       "is the slow case — a wired sensor answers almost instantly). Use this to find a new sensor's slave ID "
-       "before adding it on the <a href='/sensors'>Sensors</a> page. (This just reports what's out there — it "
-       "doesn't configure anything. For auto-enabling new sensors automatically, see \"Auto-Detect &amp; Enable\" "
-       "on the <a href='/sensors'>Sensors</a> page, which also runs on its own on boot and every few minutes.)</p>";
+  h += "<p class='small'>Finds which slave addresses respond at " + String(cfg.modbusBaud) + " baud (1-247, "
+       "up to ~30s). Report only — for auto-config see \"Auto-Detect &amp; Enable\" on "
+       "<a href='/sensors'>Sensors</a>.</p>";
   h += "<div class='row'><div><label>Scan up to address</label><input id='scanMax' type='number' min='1' max='247' value='32'></div>";
   h += "<button type='button' onclick='runScan()' id='scanBusBtn' style='margin-top:18px'>&#128269; Scan Bus</button></div>";
   h += "<div id='scanBusResult' class='small'></div></div>";
 
   h += "<h3>Register Probe</h3><div class='card'>";
-  h += "<p class='small'>Read a specific register from a specific slave right now, without saving a sensor "
-       "config — the fastest way to confirm a slave ID/register/data type combo before committing to it.</p>";
+  h += "<p class='small'>Read one register now, without saving a sensor config.</p>";
   h += "<div class='grid4'>";
   h += "<div><label>Slave ID</label><input id='probeSid' type='number' min='1' max='247' value='1'></div>";
   h += "<div><label>Function Code</label><select id='probeFc'><option value='4'>04 - Input Regs</option><option value='3'>03 - Holding Regs</option></select></div>";
@@ -520,10 +502,8 @@ static String diagPage(ModuleConfig& cfg) {
   h += "<h3>RS485 Sensor Comms Health</h3><div class='card'><div id='commsHealth'>Loading...</div></div>";
 
   h += "<h3>RS485 Raw Traffic</h3><div class='card'>";
-  h += "<p class='small'>Every Modbus request/response, byte-for-byte, as it actually happens — background polling "
-       "AND manual probes/scans. Newest first. <span class='ok'>ok</span> = valid CRC + expected length; "
-       "<span class='timeout'>timeout</span> = no response at all (check wiring/baud/slave ID); "
-       "<span class='crc'>crc</span> = got bytes back but they don't check out (noise, wrong baud, wiring issue).</p>";
+  h += "<p class='small'>Newest first. <span class='ok'>ok</span> = valid, "
+       "<span class='timeout'>timeout</span> = no response, <span class='crc'>crc</span> = bad reply.</p>";
   h += "<label><input type='checkbox' id='rawPause'> Pause</label>";
   h += "<div style='max-height:400px;overflow-y:auto;margin-top:8px'><table class='mono'><thead><tr>"
        "<th>Age (s)</th><th>Slave</th><th>FC</th><th>TX (hex)</th><th>RX (hex)</th><th>Result</th></tr></thead>"
@@ -531,11 +511,10 @@ static String diagPage(ModuleConfig& cfg) {
 
   h += "<h3>CAN Raw Frame Sniffer</h3><div class='card'>";
   if (!cfg.canEnabled) {
-    h += "<p class='small'>CAN is disabled — enable it on the <a href='/'>Config</a> page to see live traffic here.</p>";
+    h += "<p class='small'>CAN disabled — enable on <a href='/'>Config</a>.</p>";
   } else {
-    h += "<p class='small'>Live capture of the most recent frames seen on the bus (newest first). Look for a "
-         "consistent ID reporting a value you recognize (e.g. matches a known pressure/RPM reading), note its "
-         "byte offset, then define it as a signal on the <a href='/can'>CAN</a> page.</p>";
+    h += "<p class='small'>Newest first. Spot a recognizable value, note the byte offset, define it on "
+         "<a href='/can'>CAN</a>.</p>";
     h += "<div>Total frames: <span id='diagCanTotal'>...</span> &nbsp; Rate: <span id='diagCanRate'>...</span> fps &nbsp; "
          "Last frame: <span id='diagCanLast'>...</span></div>";
     h += "<div style='max-height:400px;overflow-y:auto;margin-top:8px'><table class='mono'><thead><tr>"
