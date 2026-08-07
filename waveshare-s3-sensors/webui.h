@@ -485,6 +485,7 @@ static String diagPage(ModuleConfig& cfg) {
   h += "<div class='row'><div><label>Preset</label><select id='wrPreset' onchange='wrPresetChange()'>";
   h += "<option value='custom'>Custom (enter register manually)</option>";
   h += "<option value='0x006B'>Calibration offset (0x006B) — 0-1000 adds, 64535-65535 subtracts</option>";
+  h += "<option value='0x0065'>RECOMMENDED: measuring points (0x0065) — value 1-20, likely averaging count. Lower = faster/noisier reading</option>";
   h += "<option value='0x0066'>Slave address (0x0066) — value 1-249</option>";
   h += "<option value='0x0067'>Baud rate (0x0067) — 1=2400 2=4800 3=9600 4=19200 5=38400 6=115200</option>";
   h += "<option value='0x0068'>EXPERIMENTAL: comm mode (0x0068) — value 1-4, meaning unknown</option>";
