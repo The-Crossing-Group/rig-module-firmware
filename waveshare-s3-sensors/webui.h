@@ -335,12 +335,38 @@ function probeSensor(i){
   let dt  = document.querySelector('[name=s'+i+'dt]').value;
   let wo  = document.querySelector('[name=s'+i+'wo]').value;
   let el = document.getElementById('live'+i);
-  el.textContent = 'Probing...';
-  fetch('/api/modbus/probe?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&dataType='+dt+'&wordOrder='+wo)
-    .then(r=>r.json()).then(d=>{
-      if(d.ok) el.textContent = 'Probe OK: raw='+d.raw+' decoded='+d.decoded.toFixed(3);
-      else el.textContent = 'Probe FAILED: '+d.error;
-    }).catch(e=>{ el.textContent = 'Request failed'; });
+  probeWithRetry('/api/modbus/probe?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&dataType='+dt+'&wordOrder='+wo, el,
+    (d)=>'Probe OK: raw='+d.raw+' decoded='+d.decoded.toFixed(3),
+    (d)=>'Probe FAILED: '+d.error);
+}
+// Many sensors (e.g. slow-cycle radar/ultrasonic level sensors) only have
+// fresh data ready on some fraction of polls and time out the rest — that's
+// normal sensor behavior, not a comms fault (see modbus.h notes). Rather
+// than making the user mash the probe button until one lands, retry
+// automatically a handful of times with a short gap and show whichever
+// result comes back first (ok wins immediately; only shows FAILED after
+// exhausting all attempts). renderOk/renderFail build the final message.
+function probeWithRetry(url, el, renderOk, renderFail, attempt){
+  attempt = attempt || 1;
+  const maxAttempts = 8;     // ~8 tries...
+  const gapMs = 900;         // ...spaced out ~900ms apart => up to ~7s total,
+                              // enough to catch a sensor mid-cycle without
+                              // the page feeling like it's hung.
+  el.textContent = attempt === 1 ? 'Probing...' : ('Probing... (retry '+attempt+'/'+maxAttempts+')');
+  fetch(url).then(r=>r.json()).then(d=>{
+    if (d.ok) { el.innerHTML = renderOk(d); return; }
+    if (attempt < maxAttempts) {
+      setTimeout(()=>probeWithRetry(url, el, renderOk, renderFail, attempt+1), gapMs);
+    } else {
+      el.innerHTML = renderFail(d) + ' (after '+maxAttempts+' attempts)';
+    }
+  }).catch(e=>{
+    if (attempt < maxAttempts) {
+      setTimeout(()=>probeWithRetry(url, el, renderOk, renderFail, attempt+1), gapMs);
+    } else {
+      el.textContent = 'Request failed: '+e;
+    }
+  });
 }
 function autoBaud(i){
   let sid = document.querySelector('[name=s'+i+'sid]').value;
@@ -545,12 +571,9 @@ function runProbe(){
   let reg=document.getElementById('probeReg').value;
   let dt=document.getElementById('probeDt').value;
   let box=document.getElementById('probeResult');
-  box.textContent='Probing...';
-  fetch('/api/modbus/probe?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&dataType='+dt+'&wordOrder=0')
-    .then(r=>r.json()).then(d=>{
-      if(d.ok) box.innerHTML = '<span class="ok">OK</span> — raw registers: ['+d.regs.join(', ')+']  decoded: <b>'+d.decoded.toFixed(4)+'</b>';
-      else box.innerHTML = '<span class="timeout">FAILED</span> — '+d.error;
-    }).catch(e=>{ box.textContent='Request failed: '+e; });
+  probeWithRetry('/api/modbus/probe?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&dataType='+dt+'&wordOrder=0', box,
+    (d)=>'<span class="ok">OK</span> — raw registers: ['+d.regs.join(', ')+']  decoded: <b>'+d.decoded.toFixed(4)+'</b>',
+    (d)=>'<span class="timeout">FAILED</span> — '+d.error);
 }
 function wrPresetChange(){
   let p=document.getElementById('wrPreset').value;
