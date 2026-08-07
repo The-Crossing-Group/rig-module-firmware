@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.6.6"
+#define FW_VERSION "rig-module-sensors-1.6.7"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -146,7 +146,7 @@ struct ModuleConfig {
   String moduleType     = "generic";
   String description    = "";
   long   modbusBaud     = 9600;
-  int    pollIntervalS  = 3;     // how often to POST to the Pi
+  int    pollIntervalS  = 7;     // how often to POST to the Pi (also the poll-task cycle gap — 7s default clears radar sensors' ~6s measurement cycle without spamming timeouts)
   String piHost         = "";
   String rigToken       = "7804991970";
   String wifiSSID       = "";
@@ -175,7 +175,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.moduleType    = p.getString("modType", "generic");
   c.description   = p.getString("desc", "");
   c.modbusBaud    = p.getLong("mbBaud", 9600);
-  c.pollIntervalS = p.getInt("pollInt", 3);
+  c.pollIntervalS = p.getInt("pollInt", 7);
   c.piHost        = p.getString("piHost", "");
   c.rigToken      = p.getString("rigToken", "7804991970");
   if (c.rigToken.isEmpty()) c.rigToken = "7804991970"; // self-heal, see other variants
