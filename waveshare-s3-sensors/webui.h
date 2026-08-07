@@ -478,6 +478,19 @@ static String diagPage(ModuleConfig& cfg) {
        "mode into a fast mode, setting a response-time register, or programming range/blind-zone. Writing the "
        "wrong register or value on a sensor that doesn't expect it can put it into an unexpected state — double "
        "check against the manual first.</p>";
+  h += "<p class='small'>Known presets below are confirmed from the SONBEST/Sonbust manufacturer manual (this "
+       "sensor family) — they auto-fill the register for you, but you still need to work out the right value. "
+       "There is currently no known/documented register for a \"fast measurement mode\" or acquisition-time "
+       "setting on this sensor — the manual doesn't cover it. If you get that from the seller/manufacturer, "
+       "use \"Custom / other\" below with the register + value they give you.</p>";
+  h += "<div class='row'><div><label>Preset</label><select id='wrPreset' onchange='wrPresetChange()'>";
+  h += "<option value='custom'>Custom / other (enter register manually)</option>";
+  h += "<option value='0x006B'>Correction/calibration offset (reg 0x006B) — add or subtract from every reading. "
+       "Value 0-1000 = add that many raw units; 64535-65535 = negative (e.g. 65535-100+1=65436 subtracts 100)</option>";
+  h += "<option value='0x0066'>Device (slave) address (reg 0x0066) — value = new address 1-249</option>";
+  h += "<option value='0x0067'>Baud rate (reg 0x0067) — value: 1=2400 2=4800 3=9600 4=19200 5=38400 6=115200. "
+       "Sensor goes silent at old baud immediately after — update your sensor config's baud to match</option>";
+  h += "</select></div></div>";
   h += "<div class='grid4'>";
   h += "<div><label>Slave ID</label><input id='wrSid' type='number' min='1' max='247' value='1'></div>";
   h += "<div><label>Register (hex or dec)</label><input id='wrReg' value='0'></div>";
@@ -538,6 +551,11 @@ function runProbe(){
       if(d.ok) box.innerHTML = '<span class="ok">OK</span> — raw registers: ['+d.regs.join(', ')+']  decoded: <b>'+d.decoded.toFixed(4)+'</b>';
       else box.innerHTML = '<span class="timeout">FAILED</span> — '+d.error;
     }).catch(e=>{ box.textContent='Request failed: '+e; });
+}
+function wrPresetChange(){
+  let p=document.getElementById('wrPreset').value;
+  if(p==='custom') return;
+  document.getElementById('wrReg').value = p;
 }
 function runWrite(){
   let sid=document.getElementById('wrSid').value;
