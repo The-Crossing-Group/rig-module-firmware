@@ -498,31 +498,15 @@ static String diagPage(ModuleConfig& cfg) {
   h += "<div id='probeResult' class='small' style='margin-top:8px'></div></div>";
 
   h += "<h3>Register Write</h3><div class='card'>";
-  h += "<p class='small'><b>Caution:</b> writes a value directly to a sensor's config register (Modbus FC06 - "
-       "Write Single Register). Only use this if a sensor's datasheet/manual documents a specific register "
-       "address and value — e.g. switching a radar/ultrasonic level sensor from a slow/filtered measurement "
-       "mode into a fast mode, setting a response-time register, or programming range/blind-zone. Writing the "
-       "wrong register or value on a sensor that doesn't expect it can put it into an unexpected state — double "
-       "check against the manual first.</p>";
-  h += "<p class='small'>Known presets below are confirmed from the SONBEST/Sonbust manufacturer manual (this "
-       "sensor family) — they auto-fill the register for you, but you still need to work out the right value. "
-       "There is currently no <b>confirmed</b> register for a \"fast measurement mode\" or acquisition-time "
-       "setting on this sensor — the manual doesn't document what one does. The two \"experimental\" entries "
-       "below DO exist in the manual with a value range given, but the manual never explains what the values "
-       "actually do — worth testing per the note, but not guaranteed safe or useful. If you get an official "
-       "answer from the seller/manufacturer, use \"Custom / other\" with the register + value they give you.</p>";
+  h += "<p class='small'><b>Caution:</b> writes directly to a sensor register (FC06). Probe-read the current "
+       "value first and write it down, in case you need to undo a change.</p>";
   h += "<div class='row'><div><label>Preset</label><select id='wrPreset' onchange='wrPresetChange()'>";
-  h += "<option value='custom'>Custom / other (enter register manually)</option>";
-  h += "<option value='0x006B'>Correction/calibration offset (reg 0x006B) — add or subtract from every reading. "
-       "Value 0-1000 = add that many raw units; 64535-65535 = negative (e.g. 65535-100+1=65436 subtracts 100)</option>";
-  h += "<option value='0x0066'>Device (slave) address (reg 0x0066) — value = new address 1-249</option>";
-  h += "<option value='0x0067'>Baud rate (reg 0x0067) — value: 1=2400 2=4800 3=9600 4=19200 5=38400 6=115200. "
-       "Sensor goes silent at old baud immediately after — update your sensor config's baud to match</option>";
-  h += "<option value='0x0068'>EXPERIMENTAL: \"Communication mode\" (reg 0x0068) — value range 1-4 per manual, "
-       "meaning NOT documented. Probe-read current value FIRST and write it down before trying anything else, "
-       "so you can restore it if the sensor stops responding.</option>";
-  h += "<option value='0x0069'>EXPERIMENTAL: \"Protocol type\" (reg 0x0069) — value range 1-10 per manual, "
-       "meaning NOT documented. Same caution as above: read+record the current value before changing it.</option>";
+  h += "<option value='custom'>Custom (enter register manually)</option>";
+  h += "<option value='0x006B'>Calibration offset (0x006B) — 0-1000 adds, 64535-65535 subtracts</option>";
+  h += "<option value='0x0066'>Slave address (0x0066) — value 1-249</option>";
+  h += "<option value='0x0067'>Baud rate (0x0067) — 1=2400 2=4800 3=9600 4=19200 5=38400 6=115200</option>";
+  h += "<option value='0x0068'>EXPERIMENTAL: comm mode (0x0068) — value 1-4, meaning unknown</option>";
+  h += "<option value='0x0069'>EXPERIMENTAL: protocol type (0x0069) — value 1-10, meaning unknown</option>";
   h += "</select></div></div>";
   h += "<div class='grid4'>";
   h += "<div><label>Slave ID</label><input id='wrSid' type='number' min='1' max='247' value='1'></div>";
