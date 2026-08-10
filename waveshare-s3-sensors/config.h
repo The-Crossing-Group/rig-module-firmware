@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.6.7"
+#define FW_VERSION "rig-module-sensors-1.7.0"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -146,6 +146,19 @@ struct ModuleConfig {
   String moduleType     = "generic";
   String description    = "";
   long   modbusBaud     = 9600;
+  // True once the user has explicitly set the baud on /config (or via the
+  // per-sensor "Auto-Detect Baud" button). While true, auto-detect (boot-
+  // time AND the periodic background scan) will ONLY probe the current
+  // baud looking for new sensors — it will never hunt through other baud
+  // rates and silently overwrite this setting. Without this flag, a noisy/
+  // colliding bus with no sensor slot currently enabled could produce a
+  // false-positive CRC match at some other baud during a routine scan and
+  // stomp a baud you just deliberately set — that's exactly what happened
+  // 2026-08-10 (radar+pressure sensor address collision -> garbled bus ->
+  // manual baud fix kept reverting because every reboot re-ran the full
+  // baud hunt). Defaults false so a genuinely fresh module still gets the
+  // "just wire up a sensor, it's auto-found" convenience.
+  bool   baudManuallySet = false;
   int    pollIntervalS  = 7;     // how often to POST to the Pi (also the poll-task cycle gap — 7s default clears radar sensors' ~6s measurement cycle without spamming timeouts)
   String piHost         = "";
   String rigToken       = "7804991970";
@@ -175,6 +188,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.moduleType    = p.getString("modType", "generic");
   c.description   = p.getString("desc", "");
   c.modbusBaud    = p.getLong("mbBaud", 9600);
+  c.baudManuallySet = p.getBool("mbBaudSet", false);
   c.pollIntervalS = p.getInt("pollInt", 7);
   c.piHost        = p.getString("piHost", "");
   c.rigToken      = p.getString("rigToken", "7804991970");
@@ -230,6 +244,7 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   p.putString("modType", c.moduleType);
   p.putString("desc", c.description);
   p.putLong("mbBaud", c.modbusBaud);
+  p.putBool("mbBaudSet", c.baudManuallySet);
   p.putInt("pollInt", c.pollIntervalS);
   p.putString("piHost", c.piHost);
   p.putString("rigToken", c.rigToken);

@@ -313,7 +313,13 @@ int modbusWriteReg(uint8_t slaveId, uint16_t regAddr, uint16_t value,
     return MB_TIMEOUT;
   }
 
-  // Exception response: slaveId, funcCode|0x80, exceptionCode, CRC(2) = 5 bytes
+  // Exception response: slaveId, funcCode|0x80, exceptionCode, CRC(2) = 5 bytes.
+  // Unlike modbusReadRegs, this used to only return early when the
+  // exception frame's own CRC checked out — a CRC mismatch fell through
+  // into the normal-response parsing below instead of being reported as
+  // an error, a small but real gap versus modbusReadRegs' equivalent
+  // check. Now matches that pattern: any CRC failure on what looks like
+  // an exception frame is reported immediately, not silently ignored.
   if ((resp[1] & 0x80) && n >= 5) {
     uint16_t rxCrc = resp[3] | ((uint16_t)resp[4] << 8);
     uint16_t calcCrc = modbusCRC(resp, 3);
@@ -322,6 +328,9 @@ int modbusWriteReg(uint8_t slaveId, uint16_t regAddr, uint16_t value,
       modbusLogTransaction(slaveId, 0x06, req, 8, resp, 5, MB_BAD_RESPONSE);
       return MB_BAD_RESPONSE;
     }
+    if (verbose) Serial.printf("[Modbus] Write: exception-shaped response failed CRC (got %04X, calc %04X)\n", rxCrc, calcCrc);
+    modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_CRC_ERROR);
+    return MB_CRC_ERROR;
   }
 
   // Normal FC06 reply is always exactly 8 bytes: slaveId, 0x06, regHi,
@@ -583,12 +592,20 @@ int modbusAutoDetectAndEnable(ModuleConfig& cfg, int maxAddr = 16) {
   if (newCount > 0) return newCount;
 
   // Nothing at the current baud. Only worth trying other bauds if we
-  // don't already have sensors relying on this one.
+  // don't already have sensors relying on this one, AND the user hasn't
+  // explicitly locked the baud in via /config or the per-sensor
+  // Auto-Detect Baud button. Without this second check, a noisy/
+  // colliding bus (e.g. two sensors sharing a slave address, or any
+  // other source of garbled traffic) could produce a false-positive CRC
+  // match at some other baud during a routine background scan and
+  // silently overwrite a baud the user just deliberately set — that bug
+  // bit hard on 2026-08-10 (manual baud fix kept reverting because every
+  // reboot + periodic scan re-ran the full baud hunt regardless).
   bool anyEnabled = false;
   for (int i = 0; i < MAX_SENSORS; i++) {
     if (cfg.sensors[i].enabled) { anyEnabled = true; break; }
   }
-  if (anyEnabled || !_mbSerial) return 0;
+  if (anyEnabled || cfg.baudManuallySet || !_mbSerial) return 0;
 
   uint32_t originalBaud = (uint32_t)cfg.modbusBaud;
   for (int i = 0; i < MODBUS_AUTODETECT_BAUDS_COUNT; i++) {

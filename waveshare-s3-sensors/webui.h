@@ -155,6 +155,13 @@ static String cfgPage(ModuleConfig& cfg) {
   }
   h += "</select>";
   h += "<div class='small'>All sensors on the bus must use this baud rate.</div>";
+  if (cfg.baudManuallySet) {
+    h += "<div class='small ok'>&#128274; Baud is locked — auto-detect will not change this without you setting it again "
+         "or using Auto-Detect Baud on a sensor.</div>";
+  } else {
+    h += "<div class='small warn'>&#128275; Baud not yet locked — background auto-detect may still adjust this "
+         "automatically if no sensor is enabled yet. Save this form (or run Auto-Detect Baud on a sensor) to lock it.</div>";
+  }
 
   h += "<h3>CAN Bus</h3>";
   h += "<label><input type='checkbox' name='canEnabled'";
@@ -996,7 +1003,15 @@ static void handleConfig() {
   applyParam("description", [](String v){ _cfg->description = v; });
 
   bool baudChanged = false;
-  applyParam("modbusBaud", [&](String v){ long nb = v.toInt(); if (nb != _cfg->modbusBaud) { _cfg->modbusBaud = nb; baudChanged = true; } });
+  applyParam("modbusBaud", [&](String v){
+    long nb = v.toInt();
+    if (nb != _cfg->modbusBaud) { _cfg->modbusBaud = nb; baudChanged = true; }
+    // Any explicit save from this form counts as "user has decided the
+    // baud" — even re-selecting the same value locks it in, since the
+    // form always submits a modbusBaud value. Prevents the background
+    // auto-detect from ever silently changing it again after this.
+    _cfg->baudManuallySet = true;
+  });
 
   bool canChanged = false;
   bool newCanEnabled = _srv->hasArg("canEnabled");
@@ -1150,6 +1165,7 @@ static void handleModbusAutoDetect() {
 
   if (found > 0) {
     _cfg->modbusBaud = found;
+    _cfg->baudManuallySet = true; // confirmed baud via active probe — lock it in
     saveConfig(*_prefs, *_cfg);
     String r = "{\"ok\":true,\"detected\":true,\"baud\":" + String(found) + "}";
     _srv->send(200, "application/json", r);
