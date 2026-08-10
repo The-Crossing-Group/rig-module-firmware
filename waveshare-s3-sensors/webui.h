@@ -809,6 +809,30 @@ static String sysPage(ModuleConfig& cfg) {
       h += "</div>";
     }
   }
+  {
+    // Live ground-truth readback: read mbBaud/mbBaudSet straight from
+    // flash right now (not from cfg, which is just RAM) and compare
+    // against what's currently in RAM. If these two ever disagree, it's
+    // definitive proof of a save that didn't actually persist — no
+    // guessing, no reboot-and-check-later.
+    Preferences verify;
+    verify.begin("rigmod", true);
+    long flashBaud = verify.getLong("mbBaud", -1);
+    bool flashBaudSet = verify.getBool("mbBaudSet", false);
+    verify.end();
+    bool mismatch = (flashBaud != cfg.modbusBaud) || (flashBaudSet != cfg.baudManuallySet);
+    h += "<div class='card'><b>Baud Persistence Check:</b>";
+    h += "<br>In RAM right now: baud=" + String(cfg.modbusBaud) + " manuallySet=" + String(cfg.baudManuallySet ? "true" : "false");
+    h += "<br>On flash right now: baud=" + String(flashBaud) + " manuallySet=" + String(flashBaudSet ? "true" : "false");
+    if (mismatch) {
+      h += "<br><span class='warn'>&#9888; MISMATCH — flash does not match what's running. "
+           "This confirms the save isn't persisting; the values shown above as \"on flash\" are what "
+           "will come back after a reboot.</span>";
+    } else {
+      h += "<br><span class='ok'>&#10003; Match — flash agrees with what's running.</span>";
+    }
+    h += "</div>";
+  }
   h += "<h3>OTA Update</h3><div class='card'>";
   h += "<label>OTA from URL:</label><div class='row'><input id='otaUrl' placeholder='http://...'>&nbsp;";
   h += "<button onclick='doOTA()'>Update</button></div></div>";
@@ -1225,12 +1249,33 @@ static void handleConfig() {
 
   saveConfig(*_prefs, *_cfg);
 
+  // Read the two baud keys straight back from NVS right now, in a fresh
+  // Preferences handle — not from the in-RAM _cfg struct, which would
+  // "verify" nothing (it's just proving RAM still has what we put there
+  // 2 lines ago). This is the actual ground truth of what's on flash at
+  // this exact moment, shown on the save confirmation itself so a silent
+  // NVS write failure would be visible immediately instead of only
+  // discovered after a reboot+guess cycle.
+  Preferences verify;
+  verify.begin("rigmod", true); // read-only
+  long verifiedBaud = verify.getLong("mbBaud", -1);
+  bool verifiedBaudSet = verify.getBool("mbBaudSet", false);
+  verify.end();
+  String verifyMsg = "<p class='small'>Verified on flash right now: mbBaud=" + String(verifiedBaud) +
+    " mbBaudSet=" + String(verifiedBaudSet ? "true" : "false") + "</p>";
+  if (verifiedBaud != _cfg->modbusBaud || verifiedBaudSet != _cfg->baudManuallySet) {
+    verifyMsg = "<p class='small warn'><b>WARNING: readback mismatch!</b> Wrote baud=" + String(_cfg->modbusBaud) +
+      " manuallySet=" + String(_cfg->baudManuallySet ? "true" : "false") +
+      " but flash shows baud=" + String(verifiedBaud) + " manuallySet=" + String(verifiedBaudSet ? "true" : "false") +
+      " — the NVS write did not stick.</p>";
+  }
+
   if (wifiChanged) {
-    _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to connect to new WiFi...</p>");
+    _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to connect to new WiFi...</p>" + verifyMsg);
     delay(1000);
     ESP.restart();
   } else if (baudChanged) {
-    _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to apply new RS485 baud rate...</p>");
+    _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to apply new RS485 baud rate...</p>" + verifyMsg);
     delay(1000);
     ESP.restart();
   } else if (canChanged) {
