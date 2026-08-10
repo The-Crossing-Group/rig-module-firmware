@@ -486,6 +486,22 @@ static String diagPage(ModuleConfig& cfg) {
   String h = FPSTR(NAV);
   h += "<div class='page'><h2>&#128269; Diagnostics</h2>";
 
+  h += "<h3>Test Baud (temporary)</h3><div class='card'>";
+  h += "<p class='small'>Try a baud rate against the bus right now — no save, no reboot. "
+       "Reverts to the saved baud (" + String(cfg.modbusBaud) + ") on next reboot or config save. "
+       "Found the right one? Go set it for real on <a href='/'>Config</a>.</p>";
+  h += "<div class='row'><div><label>Baud</label><select id='testBaud'>";
+  {
+    long bauds[] = { 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200 };
+    for (long b : bauds) {
+      h += "<option value='" + String(b) + "'";
+      if ((uint32_t)b == modbusGetCurrentBaud()) h += " selected";
+      h += ">" + String(b) + "</option>";
+    }
+  }
+  h += "</select></div><button type='button' onclick='setTestBaud()' style='margin-top:18px'>&#9889; Apply Live</button></div>";
+  h += "<div id='testBaudResult' class='small' style='margin-top:8px'>Bus currently running at <b>" + String(modbusGetCurrentBaud()) + "</b> baud.</div></div>";
+
   h += "<h3>RS485 Bus Scan</h3><div class='card'>";
   h += "<p class='small'>Finds which slave addresses respond at " + String(cfg.modbusBaud) + " baud (1-247, "
        "up to ~30s). Report only — for auto-config see \"Auto-Detect &amp; Enable\" on "
@@ -569,6 +585,14 @@ static String diagPage(ModuleConfig& cfg) {
 
   h += R"(
 <script>
+function setTestBaud(){
+  let baud=document.getElementById('testBaud').value;
+  let box=document.getElementById('testBaudResult');
+  box.textContent='Applying...';
+  fetch('/api/modbus/set-baud-live?baud='+baud,{method:'POST'}).then(r=>r.json()).then(d=>{
+    box.innerHTML='Bus now running at <b>'+d.baud+'</b> baud (not saved — try Register Probe / Bus Scan below).';
+  }).catch(e=>{ box.textContent='Failed: '+e; });
+}
 function runScan(){
   let btn=document.getElementById('scanBusBtn'); let box=document.getElementById('scanBusResult');
   let max=document.getElementById('scanMax').value;
@@ -770,6 +794,19 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<br><b>MAC:</b> " + WiFi.macAddress();
   h += "<br><b>Chip:</b> " + String(ESP.getChipModel()) + " @ " + String(ESP.getCpuFreqMHz()) + "MHz";
   h += "<br><b>CAN:</b> " + String(cfg.canEnabled ? ("enabled, " + String(cfg.canBitrate) + " bit/s") : "disabled") + "</div>";
+  {
+    NvsStats st = getNvsStats();
+    if (st.ok) {
+      bool low = st.freeEntries < 20;
+      h += "<div class='card'><b>NVS Storage:</b> " + String(st.usedEntries) + " used / " +
+           String(st.totalEntries) + " total entries (" + String(st.freeEntries) + " free)";
+      if (low) {
+        h += "<br><span class='warn'>&#9888; Running low — new config keys may silently fail to save. "
+             "If settings (e.g. baud rate) aren't sticking, this is likely why.</span>";
+      }
+      h += "</div>";
+    }
+  }
   h += "<h3>OTA Update</h3><div class='card'>";
   h += "<label>OTA from URL:</label><div class='row'><input id='otaUrl' placeholder='http://...'>&nbsp;";
   h += "<button onclick='doOTA()'>Update</button></div></div>";
@@ -1054,6 +1091,27 @@ static void handleModbusWrite() {
                    (rc == MB_CRC_ERROR) ? "CRC error" :
                    (rc == MB_BAD_RESPONSE) ? "sensor rejected write (exception response)" : "bad response";
   }
+  String out;
+  serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
+}
+
+// Temporary, non-persisted baud change for the /diag "Test Baud" tool —
+// changes Serial2 immediately so Register Probe / Bus Scan can be tried
+// against a different rate in seconds. Deliberately does NOT touch
+// cfg.modbusBaud or NVS at all: a reboot, a genuine /config save, or the
+// background auto-detect task will put the bus back to the saved baud.
+// Held behind modbusBusMutex since it touches the shared Serial2 object
+// the poll task also uses.
+static void handleModbusSetBaudLive() {
+  long baud = _p("baud").isEmpty() ? 9600 : _p("baud").toInt();
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+    modbusSetBaudLive((uint32_t)baud);
+    xSemaphoreGive(modbusBusMutex);
+  }
+  DynamicJsonDocument doc(128);
+  doc["ok"] = true;
+  doc["baud"] = (long)modbusGetCurrentBaud();
   String out;
   serializeJson(doc, out);
   _srv->send(200, "application/json", out);
@@ -1361,6 +1419,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/wifi/forget",    HTTP_POST, handleWifiForget);
   srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);
   srv.on("/api/modbus/autodetect-enable", HTTP_POST, handleAutoDetectEnable);
+  srv.on("/api/modbus/set-baud-live", HTTP_POST, handleModbusSetBaudLive);
 
   srv.on("/api/buffer/flush", HTTP_POST, [](){
     flushNow = true;

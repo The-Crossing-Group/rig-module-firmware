@@ -12,12 +12,14 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.7.2"
+#define FW_VERSION "rig-module-sensors-1.8.0"
 
 #include <WiFi.h>
 #include <Preferences.h>
 #include <esp_efuse.h>
 #include <esp_mac.h>
+#include <nvs.h>
+#include <nvs_flash.h>
 
 // Max number of independently-configured RS485 Modbus sensors on the bus.
 // Modbus RTU addressing goes up to 247 slaves, but polling time and NVS
@@ -237,14 +239,59 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   }
 }
 
-// Save all config to NVS
+// NVS partition stats for the "rigmod" namespace's underlying storage —
+// used to catch a real, silent failure mode: Preferences::putXxx() does
+// NOT throw or block on a full partition, it just returns 0 (failure)
+// while everything else carries on as if nothing happened. With 16
+// sensor slots x ~16 keys each + 16 CAN slots x ~13 keys each, this
+// namespace alone is ~490 keys — if the default NVS partition (a few KB
+// after accounting for entry overhead) fills up, NEW keys silently fail
+// to write while EXISTING keys keep updating fine. mbBaudSet is exactly
+// this shape: added in v1.7.0, long after modbusBaud already existed —
+// if the partition was already full, mbBaudSet could never get created
+// at all, so baudManuallySet would read back false on every single boot
+// even though the code setting it to true "succeeded" (the in-RAM value
+// was true right up until save, it just never actually landed in flash).
+// Exposed on /system so this is visible without a serial cable.
+struct NvsStats {
+  size_t usedEntries = 0;
+  size_t freeEntries = 0;
+  size_t totalEntries = 0;
+  bool   ok = false;
+};
+NvsStats getNvsStats() {
+  NvsStats s;
+  nvs_stats_t nvsStats;
+  if (nvs_get_stats(NULL, &nvsStats) == ESP_OK) {
+    s.usedEntries  = nvsStats.used_entries;
+    s.freeEntries  = nvsStats.free_entries;
+    s.totalEntries = nvsStats.total_entries;
+    s.ok = true;
+  }
+  return s;
+}
+
+// Save all config to NVS. Checks the two baud-related keys' actual write
+// result and logs loudly if either silently failed (see getNvsStats()
+// comment above) — every other key is best-effort like before, but these
+// two are exactly what's been reported stuck, so they get verified.
 void saveConfig(Preferences& p, ModuleConfig& c) {
   p.begin("rigmod", false);
   p.putString("modName", c.moduleName);
   p.putString("modType", c.moduleType);
   p.putString("desc", c.description);
-  p.putLong("mbBaud", c.modbusBaud);
-  p.putBool("mbBaudSet", c.baudManuallySet);
+  size_t wroteBaud = p.putLong("mbBaud", c.modbusBaud);
+  size_t wroteBaudSet = p.putBool("mbBaudSet", c.baudManuallySet);
+  if (wroteBaud == 0 || wroteBaudSet == 0) {
+    Serial.printf("[Config] WARNING: NVS write FAILED for mbBaud (ret=%u) and/or mbBaudSet (ret=%u) "
+      "— partition may be full. baud=%ld manuallySet=%d\n",
+      (unsigned)wroteBaud, (unsigned)wroteBaudSet, c.modbusBaud, (int)c.baudManuallySet);
+    NvsStats st = getNvsStats();
+    if (st.ok) {
+      Serial.printf("[Config] NVS entries: used=%u free=%u total=%u\n",
+        (unsigned)st.usedEntries, (unsigned)st.freeEntries, (unsigned)st.totalEntries);
+    }
+  }
   p.putInt("pollInt", c.pollIntervalS);
   p.putString("piHost", c.piHost);
   p.putString("rigToken", c.rigToken);

@@ -16,6 +16,14 @@
 
 static int _RS485_DE_PIN = -1;
 static HardwareSerial* _mbSerial = nullptr;
+// Tracks whatever baud Serial2 is ACTUALLY running at right now, which is
+// not always cfg.modbusBaud — see modbusSetBaudLive() below, used by the
+// /diag "Test Baud" tool to try a rate without saving/rebooting. Set here
+// so the web UI can show "live bus baud" vs "saved baud" distinctly.
+static uint32_t _mbCurrentBaud = 0;
+
+// Returns whatever baud Serial2 is actually running at right now.
+uint32_t modbusGetCurrentBaud() { return _mbCurrentBaud; }
 
 // CRC16 for Modbus RTU
 static uint16_t modbusCRC(const uint8_t* buf, int len) {
@@ -39,7 +47,24 @@ void modbusInit(int rxPin, int txPin, int dePin, uint32_t baud) {
 
   _mbSerial = &Serial2;
   _mbSerial->begin(baud, SERIAL_8N1, rxPin, txPin);
+  _mbCurrentBaud = baud;
   Serial.printf("[Modbus] Init on Serial2 RX=%d TX=%d DE=%d baud=%u\n", rxPin, txPin, dePin, baud);
+}
+
+// Changes Serial2's baud LIVE, without touching cfg.modbusBaud or NVS at
+// all — purely for the /diag "Test Baud" tool, so you can try a rate
+// against a sensor in seconds instead of save+reboot+check. This is
+// deliberately NOT persisted anywhere; a reboot (or the poll task's own
+// background auto-detect, or genuinely saving /config) will put Serial2
+// back to whatever cfg.modbusBaud says. If you find the right baud this
+// way, you still need to go set it for real on /config to keep it.
+void modbusSetBaudLive(uint32_t baud) {
+  if (!_mbSerial) return;
+  _mbSerial->flush();
+  _mbSerial->updateBaudRate(baud);
+  _mbCurrentBaud = baud;
+  delay(20);
+  Serial.printf("[Modbus] Live baud change (NOT saved) -> %u\n", baud);
 }
 
 // Send bytes, toggle DE high during TX
