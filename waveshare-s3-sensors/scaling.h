@@ -30,7 +30,15 @@ void computeSensorVolume(SensorConfig& s, SensorReading& reading, VolumeReading&
 
   if (!s.volumeEnabled) return;
   if (s.capacity <= 0.0f) return;
-  if (s.volMaxLevel <= s.volZeroLevel) return;
+  // Only reject an exact match (divide-by-zero) — volMaxLevel is allowed
+  // to be LESS than volZeroLevel on purpose. Distance-based level sensors
+  // (e.g. a radar unit reporting air-gap-to-surface, like the SM7779)
+  // report a SMALLER raw value as the tank fills, so the natural config
+  // is volZeroLevel=large (empty) / volMaxLevel=small (full). The frac
+  // formula below is a symmetric ratio and produces the right 0..1 curve
+  // either way — this used to require volMaxLevel > volZeroLevel, which
+  // silently disabled Tank Volume for every inverted-direction sensor.
+  if (s.volMaxLevel == s.volZeroLevel) return;
 
   // Use the debounced displayStatus, not raw valid/status, for the same
   // reason the sensor's own /sensors and /live display debounces a lone

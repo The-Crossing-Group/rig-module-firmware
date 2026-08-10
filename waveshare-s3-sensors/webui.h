@@ -116,6 +116,25 @@ static String _p(const char* name) {
 }
 static bool _has(const char* name) { return _srv->hasArg(name); }
 
+// Arduino's String(float) defaults to only 2 decimal places — fine for
+// display, but a real bug for round-tripping config values BACK into an
+// editable form field: a scale/offset/calibration value smaller than
+// 0.01 (e.g. 0.001) would render as "0.00", and if that form is ever
+// submitted again without the user manually re-typing the exact value,
+// the tiny-but-real number silently gets overwritten with 0. Used for
+// every numeric config field embedded as an <input value='...'> below.
+static String _f(float v) {
+  String s = String(v, 6);
+  // Trim trailing zeros (but keep at least one digit after the decimal
+  // point) so common whole/2-decimal values still look clean, e.g.
+  // "1.000000" -> "1", "0.010000" -> "0.01" -- not just a wall of zeros.
+  if (s.indexOf('.') >= 0) {
+    while (s.endsWith("0")) s.remove(s.length() - 1);
+    if (s.endsWith(".")) s.remove(s.length() - 1);
+  }
+  return s;
+}
+
 static const char* dataTypeName(uint8_t dt) {
   switch (dt) {
     case MB_UINT16: return "uint16";
@@ -279,20 +298,20 @@ static String sensorsPage(ModuleConfig& cfg) {
     h += "<option value='0'" + String(s.wordOrder == 0 ? " selected" : "") + ">High word first</option>";
     h += "<option value='1'" + String(s.wordOrder == 1 ? " selected" : "") + ">Low word first</option>";
     h += "</select></div>";
-    h += "<div><label>Scale (value = raw * scale + offset)</label><input name='s" + String(i) + "sc' type='number' step='any' value='" + String(s.scale) + "'></div>";
-    h += "<div><label>Offset</label><input name='s" + String(i) + "of' type='number' step='any' value='" + String(s.offset) + "'></div></div>";
+    h += "<div><label>Scale (value = raw * scale + offset)</label><input name='s" + String(i) + "sc' type='number' step='any' value='" + _f(s.scale) + "'></div>";
+    h += "<div><label>Offset</label><input name='s" + String(i) + "of' type='number' step='any' value='" + _f(s.offset) + "'></div></div>";
 
     h += "<label style='margin-top:8px'><input type='checkbox' name='s" + String(i) + "volEn' id='volEn" + String(i) + "' onchange='toggleVol(" + String(i) + ")'";
     if (s.volumeEnabled) h += " checked";
     h += "> Compute Tank Volume from this sensor</label>";
     h += "<div id='volFields" + String(i) + "' style='display:" + String(s.volumeEnabled ? "block" : "none") + "'>";
     h += "<div class='small'>Empty = 0 volume, Full = Capacity.</div>";
-    h += "<div class='row'><div><label>Capacity</label><input name='s" + String(i) + "cap' type='number' step='any' min='0' value='" + String(s.capacity) + "'></div>";
+    h += "<div class='row'><div><label>Capacity</label><input name='s" + String(i) + "cap' type='number' step='any' min='0' value='" + _f(s.capacity) + "'></div>";
     h += "<div><label>Unit</label><select name='s" + String(i) + "cu'>";
     h += "<option value='m3'" + String(s.capacityUnit == "m3" ? " selected" : "") + ">m&#179;</option>";
     h += "<option value='gal'" + String(s.capacityUnit == "gal" ? " selected" : "") + ">gal</option></select></div></div>";
-    h += "<div class='row'><div><label>Value @ Empty</label><input name='s" + String(i) + "vz' type='number' step='any' value='" + String(s.volZeroLevel) + "'></div>";
-    h += "<div><label>Value @ Full</label><input name='s" + String(i) + "vm' type='number' step='any' value='" + String(s.volMaxLevel) + "'></div></div>";
+    h += "<div class='row'><div><label>Value @ Empty</label><input name='s" + String(i) + "vz' type='number' step='any' value='" + _f(s.volZeroLevel) + "'></div>";
+    h += "<div><label>Value @ Full</label><input name='s" + String(i) + "vm' type='number' step='any' value='" + _f(s.volMaxLevel) + "'></div></div>";
     h += "</div>";
 
     h += "<div class='row' style='margin-top:8px'><button type='button' onclick='probeSensor(" + String(i) + ")'>&#128269; Probe Now</button>";
@@ -433,8 +452,8 @@ static String canPage(ModuleConfig& cfg) {
     h += "<div><label>Signed</label><select name='c" + String(i) + "sv'>";
     h += "<option value='0'" + String(!sg.signedVal ? " selected" : "") + ">Unsigned</option>";
     h += "<option value='1'" + String(sg.signedVal ? " selected" : "") + ">Signed</option></select></div>";
-    h += "<div><label>Scale</label><input name='c" + String(i) + "sc' type='number' step='any' value='" + String(sg.scale) + "'></div>";
-    h += "<div><label>Offset</label><input name='c" + String(i) + "of' type='number' step='any' value='" + String(sg.offset) + "'></div>";
+    h += "<div><label>Scale</label><input name='c" + String(i) + "sc' type='number' step='any' value='" + _f(sg.scale) + "'></div>";
+    h += "<div><label>Offset</label><input name='c" + String(i) + "of' type='number' step='any' value='" + _f(sg.offset) + "'></div>";
     h += "</div>";
     h += "</div>";
   }
@@ -493,6 +512,7 @@ static String diagPage(ModuleConfig& cfg) {
   h += "<div class='row'><div><label>Preset</label><select id='mrPreset' onchange='mrPresetChange()'>";
   h += "<option value='custom'>Custom</option>";
   h += "<option value='qdw90a'>QDW90A / QDY30A family (FC03, start 0x0000, count 7)</option>";
+  h += "<option value='sm7779'>SM7779 radar level (FC03, start 0x0064, count 6)</option>";
   h += "</select></div></div>";
   h += "<div class='grid4'>";
   h += "<div><label>Slave ID</label><input id='mrSid' type='number' min='1' max='247' value='1'></div>";
@@ -579,6 +599,10 @@ const MR_QDW90A_LABELS = ['Slave address (1-255)','Baud code (0=1200..7=115200)'
   'Pressure unit code (0=none 1=CM 2=MM 3=MPa 4=Pa 5=KPa 6=mA — labels sometimes unreliable, verify empirically)',
   'Decimal places code (0=#### 1=###.# 2=##.## 3=#.###)','Measured value (signed, apply decimal code)',
   'Range zero point','Range full-scale point'];
+const MR_SM7779_LABELS = ['Model code','Measuring points (1-20, higher=slower/steadier)',
+  'Device address (1-249) — CAUTION: changing this breaks comms immediately',
+  'Baud code (1=2400 2=4800 3=9600 4=19200 5=38400 6=115200) — CAUTION: changing this breaks comms immediately',
+  'Comm mode (1-4, experimental/undocumented)','Protocol type (1-10, experimental/undocumented)'];
 function mrPresetChange(){
   let p=document.getElementById('mrPreset').value;
   if(p==='custom') return;
@@ -586,6 +610,10 @@ function mrPresetChange(){
     document.getElementById('mrFc').value='3';
     document.getElementById('mrReg').value='0x0000';
     document.getElementById('mrCount').value='7';
+  } else if(p==='sm7779'){
+    document.getElementById('mrFc').value='3';
+    document.getElementById('mrReg').value='0x0064';
+    document.getElementById('mrCount').value='6';
   }
 }
 function runMultiProbe(){
@@ -599,12 +627,13 @@ function runMultiProbe(){
   fetch('/api/modbus/probe-multi?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&count='+count)
     .then(r=>r.json()).then(d=>{
       if(!d.ok){ box.innerHTML='<span class="timeout">FAILED</span> — '+d.error; return; }
+      let labels = preset==='qdw90a' ? MR_QDW90A_LABELS : preset==='sm7779' ? MR_SM7779_LABELS : null;
       let s='<table><tr><th>#</th><th>Value (dec)</th><th>Value (hex)</th>';
-      if(preset==='qdw90a') s+='<th>Meaning</th>';
+      if(labels) s+='<th>Meaning</th>';
       s+='</tr>';
       d.regs.forEach((v,i)=>{
         s+='<tr><td>'+i+'</td><td>'+v+'</td><td>0x'+v.toString(16).toUpperCase().padStart(4,'0')+'</td>';
-        if(preset==='qdw90a') s+='<td>'+(MR_QDW90A_LABELS[i]||'')+'</td>';
+        if(labels) s+='<td>'+(labels[i]||'')+'</td>';
         s+='</tr>';
       });
       s+='</table>';
@@ -1275,7 +1304,7 @@ static void handleOTA() {
   if (code == 200) {
     int len = http.getSize();
     WiFiClient* stream = http.getStreamPtr();
-    if (!Update.begin(len)) { Serial.println("[OTA] Not enough space"); return; }
+    if (!Update.begin(len)) { Serial.println("[OTA] Not enough space"); http.end(); return; }
     size_t written = Update.writeStream(*stream);
     if (written == (size_t)len && Update.end()) {
       Serial.println("[OTA] Success, rebooting");
