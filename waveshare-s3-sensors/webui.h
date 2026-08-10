@@ -486,6 +486,23 @@ static String diagPage(ModuleConfig& cfg) {
   h += "<button type='button' onclick='runProbe()'>&#128269; Probe Register</button>";
   h += "<div id='probeResult' class='small' style='margin-top:8px'></div></div>";
 
+  h += "<h3>Multi-Register Read</h3><div class='card'>";
+  h += "<p class='small'>Reads a contiguous block of registers in one query — for sensors whose whole "
+       "config/status lives in a known range (e.g. QDW90A/QDY30A-family pressure &amp; level sensors, "
+       "registers 0-6).</p>";
+  h += "<div class='row'><div><label>Preset</label><select id='mrPreset' onchange='mrPresetChange()'>";
+  h += "<option value='custom'>Custom</option>";
+  h += "<option value='qdw90a'>QDW90A / QDY30A family (FC03, start 0x0000, count 7)</option>";
+  h += "</select></div></div>";
+  h += "<div class='grid4'>";
+  h += "<div><label>Slave ID</label><input id='mrSid' type='number' min='1' max='247' value='1'></div>";
+  h += "<div><label>Function Code</label><select id='mrFc'><option value='3'>03 - Holding Regs</option><option value='4'>04 - Input Regs</option></select></div>";
+  h += "<div><label>Start Register</label><input id='mrReg' value='0'></div>";
+  h += "<div><label>Count</label><input id='mrCount' type='number' min='1' max='16' value='7'></div>";
+  h += "</div>";
+  h += "<button type='button' onclick='runMultiProbe()'>&#128269; Read Registers</button>";
+  h += "<div id='mrResult' class='small' style='margin-top:8px'></div></div>";
+
   h += "<h3>Register Write</h3><div class='card'>";
   h += "<p class='small'><b>Caution:</b> writes directly to a sensor register (FC06). Probe-read the current "
        "value first and write it down, in case you need to undo a change.</p>";
@@ -557,6 +574,42 @@ function wrPresetChange(){
   let p=document.getElementById('wrPreset').value;
   if(p==='custom') return;
   document.getElementById('wrReg').value = p;
+}
+const MR_QDW90A_LABELS = ['Slave address (1-255)','Baud code (0=1200..7=115200)',
+  'Pressure unit code (0=none 1=CM 2=MM 3=MPa 4=Pa 5=KPa 6=mA — labels sometimes unreliable, verify empirically)',
+  'Decimal places code (0=#### 1=###.# 2=##.## 3=#.###)','Measured value (signed, apply decimal code)',
+  'Range zero point','Range full-scale point'];
+function mrPresetChange(){
+  let p=document.getElementById('mrPreset').value;
+  if(p==='custom') return;
+  if(p==='qdw90a'){
+    document.getElementById('mrFc').value='3';
+    document.getElementById('mrReg').value='0x0000';
+    document.getElementById('mrCount').value='7';
+  }
+}
+function runMultiProbe(){
+  let sid=document.getElementById('mrSid').value;
+  let fc=document.getElementById('mrFc').value;
+  let reg=document.getElementById('mrReg').value;
+  let count=document.getElementById('mrCount').value;
+  let preset=document.getElementById('mrPreset').value;
+  let box=document.getElementById('mrResult');
+  box.textContent='Reading...';
+  fetch('/api/modbus/probe-multi?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&count='+count)
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ box.innerHTML='<span class="timeout">FAILED</span> — '+d.error; return; }
+      let s='<table><tr><th>#</th><th>Value (dec)</th><th>Value (hex)</th>';
+      if(preset==='qdw90a') s+='<th>Meaning</th>';
+      s+='</tr>';
+      d.regs.forEach((v,i)=>{
+        s+='<tr><td>'+i+'</td><td>'+v+'</td><td>0x'+v.toString(16).toUpperCase().padStart(4,'0')+'</td>';
+        if(preset==='qdw90a') s+='<td>'+(MR_QDW90A_LABELS[i]||'')+'</td>';
+        s+='</tr>';
+      });
+      s+='</table>';
+      box.innerHTML=s;
+    }).catch(e=>{ box.textContent='Request failed: '+e; });
 }
 function runWrite(){
   let sid=document.getElementById('wrSid').value;
@@ -906,6 +959,41 @@ static void handleModbusProbe() {
   _srv->send(200, "application/json", out);
 }
 
+// Reads a contiguous block of raw registers (no decoding) — backs the
+// /diag "Multi-Register Read" tool. Useful for sensors that expose a
+// chunk of config/status registers together (e.g. QDW90A/QDY30A-family
+// pressure & level sensors: address, baud, unit, decimals, value, zero,
+// full-scale all sit in registers 0-6). Doesn't touch saved config.
+static void handleModbusProbeMulti() {
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    _srv->send(503, "application/json", "{\"ok\":false,\"error\":\"bus busy\"}");
+    return;
+  }
+  uint8_t slaveId = _p("slaveId").toInt();
+  uint8_t funcCode = _p("funcCode").toInt();
+  String regStr = _p("reg");
+  uint16_t startAddr = (uint16_t)strtol(regStr.c_str(), nullptr, 0);
+  uint8_t count = (uint8_t)constrain(_p("count").toInt(), 1, 16);
+
+  uint16_t regs[16] = {0};
+  int rc = modbusReadRegs(slaveId, funcCode, startAddr, count, regs, true);
+  xSemaphoreGive(modbusBusMutex);
+
+  DynamicJsonDocument doc(512);
+  if (rc == MB_OK) {
+    doc["ok"] = true;
+    JsonArray regsArr = doc.createNestedArray("regs");
+    for (int i = 0; i < count; i++) regsArr.add(regs[i]);
+  } else {
+    doc["ok"] = false;
+    doc["error"] = (rc == MB_TIMEOUT) ? "timeout — no response" :
+                   (rc == MB_CRC_ERROR) ? "CRC error" : "bad response";
+  }
+  String out;
+  serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
+}
+
 // Writes a single register to a slave right now (Modbus FC06). Backs
 // the /diag "Register Write" tool — for sensor-side config registers
 // (measurement mode, response time, range/blind-zone, etc.) that a
@@ -1230,6 +1318,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/can/live",     HTTP_GET, handleCanLive);
   srv.on("/api/can/frames",   HTTP_GET, handleCanFrames);
   srv.on("/api/modbus/probe", HTTP_GET, handleModbusProbe);
+  srv.on("/api/modbus/probe-multi", HTTP_GET, handleModbusProbeMulti);
   srv.on("/api/modbus/write", HTTP_POST, handleModbusWrite);
   srv.on("/api/modbus/scan",  HTTP_GET, handleModbusScan);
   srv.on("/api/modbus/log",   HTTP_GET, handleModbusLog);
