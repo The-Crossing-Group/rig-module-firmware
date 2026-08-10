@@ -611,7 +611,8 @@ function runProbe(){
   let dt=document.getElementById('probeDt').value;
   let box=document.getElementById('probeResult');
   probeWithRetry('/api/modbus/probe?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&dataType='+dt+'&wordOrder=0', box,
-    (d)=>'<span class="ok">OK</span> — raw registers: ['+d.regs.join(', ')+']  decoded: <b>'+d.decoded.toFixed(4)+'</b>',
+    (d)=>'<span class="ok">OK</span> — raw registers: ['+d.regs.join(', ')+']  decoded: <b>'+d.decoded.toFixed(4)+'</b>'+
+      (d.actualSlaveId!==undefined ? '  <b>[broadcast reply — sensor\'s real address is '+d.actualSlaveId+']</b>' : ''),
     (d)=>'<span class="timeout">FAILED</span> — '+d.error);
 }
 function wrPresetChange(){
@@ -661,6 +662,7 @@ function runMultiProbe(){
         s+='</tr>';
       });
       s+='</table>';
+      if(d.actualSlaveId!==undefined) s+='<p class="ok"><b>Broadcast reply — sensor\'s real address is '+d.actualSlaveId+'</b></p>';
       box.innerHTML=s;
     }).catch(e=>{ box.textContent='Request failed: '+e; });
 }
@@ -1004,7 +1006,8 @@ static void handleModbusProbe() {
 
   uint8_t n = modbusRegCount(dataType);
   uint16_t regs[2] = {0, 0};
-  int rc = modbusReadRegs(slaveId, funcCode, regAddr, n, regs, true);
+  uint8_t actualSlaveId = 0;
+  int rc = modbusReadRegs(slaveId, funcCode, regAddr, n, regs, true, 600, &actualSlaveId);
   xSemaphoreGive(modbusBusMutex);
 
   DynamicJsonDocument doc(512);
@@ -1015,10 +1018,22 @@ static void handleModbusProbe() {
     JsonArray regsArr = doc.createNestedArray("regs");
     for (int i = 0; i < n; i++) regsArr.add(regs[i]);
     doc["decoded"] = decoded;
+    // If we queried a broadcast address, report which real address the
+    // sensor answered as — that's the whole point of a broadcast probe.
+    if (modbusIsBroadcastAddr(slaveId)) doc["actualSlaveId"] = actualSlaveId;
   } else {
     doc["ok"] = false;
     doc["error"] = (rc == MB_TIMEOUT) ? "timeout — no response" :
                    (rc == MB_CRC_ERROR) ? "CRC error" : "bad response";
+    // rc==MB_BAD_RESPONSE can mean "CRC-valid reply from a DIFFERENT
+    // address than queried" — surface that address, it's diagnostic gold
+    // (means the sensor is alive and talking, just not at the address
+    // you thought).
+    if (rc == MB_BAD_RESPONSE && actualSlaveId != 0 && actualSlaveId != slaveId) {
+      doc["error"] = String("bad response — but got a reply FROM address ") + actualSlaveId +
+                     " instead of the address you queried (" + slaveId + ")";
+      doc["actualSlaveId"] = actualSlaveId;
+    }
   }
   String out;
   serializeJson(doc, out);
@@ -1042,7 +1057,8 @@ static void handleModbusProbeMulti() {
   uint8_t count = (uint8_t)constrain(_p("count").toInt(), 1, 16);
 
   uint16_t regs[16] = {0};
-  int rc = modbusReadRegs(slaveId, funcCode, startAddr, count, regs, true);
+  uint8_t actualSlaveId = 0;
+  int rc = modbusReadRegs(slaveId, funcCode, startAddr, count, regs, true, 600, &actualSlaveId);
   xSemaphoreGive(modbusBusMutex);
 
   DynamicJsonDocument doc(512);
@@ -1050,10 +1066,16 @@ static void handleModbusProbeMulti() {
     doc["ok"] = true;
     JsonArray regsArr = doc.createNestedArray("regs");
     for (int i = 0; i < count; i++) regsArr.add(regs[i]);
+    if (modbusIsBroadcastAddr(slaveId)) doc["actualSlaveId"] = actualSlaveId;
   } else {
     doc["ok"] = false;
     doc["error"] = (rc == MB_TIMEOUT) ? "timeout — no response" :
                    (rc == MB_CRC_ERROR) ? "CRC error" : "bad response";
+    if (rc == MB_BAD_RESPONSE && actualSlaveId != 0 && actualSlaveId != slaveId) {
+      doc["error"] = String("bad response — but got a reply FROM address ") + actualSlaveId +
+                     " instead of the address you queried (" + slaveId + ")";
+      doc["actualSlaveId"] = actualSlaveId;
+    }
   }
   String out;
   serializeJson(doc, out);

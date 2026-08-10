@@ -181,9 +181,14 @@ static void modbusFlushRx() {
   }
 }
 
+// Modbus broadcast addresses: standard RTU broadcast is 0, but several
+// real sensors (SM7779 confirmed) instead use 0xFA/250 as their broadcast
+// listen address. Treat both as "no real reply address is expected back."
+static bool modbusIsBroadcastAddr(uint8_t addr) { return addr == 0 || addr == 250; }
+
 int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
                     uint8_t count, uint16_t* regValues, bool verbose = false,
-                    int timeoutMs = 600) {
+                    int timeoutMs = 600, uint8_t* actualSlaveIdOut = nullptr) {
   if (!_mbSerial) return MB_TIMEOUT;
   if (count < 1) count = 1;
   if (count > 16) count = 16;
@@ -269,8 +274,26 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
     return MB_CRC_ERROR;
   }
 
-  if (resp[0] != slaveId) {
-    if (verbose) Serial.printf("[Modbus] Bad response: slave=%02X (expected %02X)\n", resp[0], slaveId);
+  // BUG FIXED 2026-08-10: this used to hard-reject ANY reply whose slave
+  // ID byte didn't literally match what we sent — including a broadcast
+  // query (0 or 250), where the sensor is SUPPOSED to reply using its own
+  // real address, not the broadcast address. That's the whole point of
+  // broadcast discovery. This meant a perfectly healthy, CRC-valid,
+  // real reading got thrown away and mislabeled MB_BAD_RESPONSE just
+  // because of an address mismatch — indistinguishable from "garbage
+  // data" in the UI, while consistently tracking real sensor movement.
+  //
+  // Broader than just broadcast, too: if a sensor's address ever drifted
+  // from what we think it is (e.g. from an earlier config-register write,
+  // or it was never actually at the address we assumed), a NORMAL query
+  // would hit this same false-reject — CRC-good, data-good, address
+  // mismatch, reported as "bad" every time, tracking real movement. So:
+  // always surface the actual replying address on a CRC-valid frame, and
+  // only treat the mismatch as fatal when it's NOT a broadcast query.
+  bool addrMismatch = (resp[0] != slaveId);
+  if (actualSlaveIdOut) *actualSlaveIdOut = resp[0];
+  if (addrMismatch && !modbusIsBroadcastAddr(slaveId)) {
+    if (verbose) Serial.printf("[Modbus] Bad response: slave=%02X (expected %02X) — sensor answered as a DIFFERENT address than queried; data may still be valid, just came from address %02X instead\n", resp[0], slaveId, resp[0]);
     modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_BAD_RESPONSE);
     return MB_BAD_RESPONSE;
   }
@@ -374,7 +397,10 @@ int modbusWriteReg(uint8_t slaveId, uint16_t regAddr, uint16_t value,
     return MB_CRC_ERROR;
   }
 
-  if (resp[0] != slaveId || resp[1] != 0x06) {
+  // Same broadcast-reply bug fixed as in modbusReadRegs above: a
+  // broadcast write's reply comes back from the sensor's real address,
+  // not the broadcast address we sent to.
+  if ((!modbusIsBroadcastAddr(slaveId) && resp[0] != slaveId) || resp[1] != 0x06) {
     if (verbose) Serial.printf("[Modbus] Write: bad response slave=%02X fc=%02X\n", resp[0], resp[1]);
     modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_BAD_RESPONSE);
     return MB_BAD_RESPONSE;
