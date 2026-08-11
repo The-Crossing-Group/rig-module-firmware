@@ -136,6 +136,47 @@ bool dbgSerialAvailable() { return _dbgSerial && _dbgSerial->available(); }
 uint8_t dbgSerialReadByte() { return _dbgSerial ? (uint8_t)_dbgSerial->read() : 0; }
 
 // =============================================================================
+// AUTO-SNIFF — continuous background capture of unsolicited bus traffic,
+// no button required. Call dbgAutoSniffPoll() every loop() iteration; it
+// grabs whatever unsolicited bytes have shown up since the last active
+// request/response, and once there's been a quiet gap it logs the burst
+// (label "AUTO") and prints it straight to Serial. Purely passive - it
+// only ever reads, never transmits, so it can't collide with the request
+// helpers above (dbgRawSend calls dbgFlushRx() first, which just means
+// any bytes this already logged get silently drained before the next
+// request goes out - nothing is double-counted or lost from the log).
+// =============================================================================
+#define AUTO_SNIFF_BUF_SIZE 64
+static uint8_t _autoSniffBuf[AUTO_SNIFF_BUF_SIZE];
+static int _autoSniffLen = 0;
+static unsigned long _autoSniffLastByte = 0;
+static bool _autoSniffEnabled = true;
+
+void dbgAutoSniffSetEnabled(bool en) { _autoSniffEnabled = en; }
+bool dbgAutoSniffGetEnabled() { return _autoSniffEnabled; }
+
+void dbgAutoSniffPoll() {
+  if (!_autoSniffEnabled || !_dbgSerial) return;
+
+  while (_dbgSerial->available()) {
+    if (_autoSniffLen < AUTO_SNIFF_BUF_SIZE) {
+      _autoSniffBuf[_autoSniffLen++] = (uint8_t)_dbgSerial->read();
+    } else {
+      _dbgSerial->read(); // drop, buffer full - still counts as activity
+    }
+    _autoSniffLastByte = millis();
+  }
+
+  // 20ms of silence after at least one byte = treat the burst as done.
+  if (_autoSniffLen > 0 && millis() - _autoSniffLastByte > 20) {
+    String hex = bytesToHex(_autoSniffBuf, _autoSniffLen);
+    dbgLog("AUTO", nullptr, 0, _autoSniffBuf, _autoSniffLen, "unsolicited");
+    Serial.println("[Auto] RX: " + hex);
+    _autoSniffLen = 0;
+  }
+}
+
+// =============================================================================
 // RAW WIRE ACCESS — no Modbus framing assumed at all. Sends exactly the
 // bytes given, toggles DE around the transmission, and captures whatever
 // comes back for up to timeoutMs (extending on each new byte by an

@@ -75,6 +75,7 @@ write! <slaveId> <reg> <value> FC06 write, no confirmation prompt
 raw <hex bytes>               e.g.: raw 01 03 00 00 00 01 84 0A
 log [n]                       last n traffic log entries
 sniff <seconds>                passive listen, no TX (catches auto-report sensors)
+autosniff <on|off>             toggle continuous background traffic capture
 ```
 
 ## What's on the web page
@@ -84,9 +85,17 @@ sniff <seconds>                passive listen, no TX (catches auto-report sensor
   register write changed the sensor's parity/stop-bit framing instead
   of (or in addition to) baud, this is the only way to find that.
 - **Bus scan** — FC03/FC04 probe across a range of addresses.
-- **Passive sniff** — listens for N seconds with zero transmission, in
-  case the sensor is spontaneously streaming data (some have an
-  "auto-report" mode) rather than waiting to be polled.
+- **Auto traffic capture** — always running in the background, no
+  button needed. Any unsolicited bytes on the bus get logged
+  automatically (shows up in the traffic log and prints to Serial with
+  an `[Auto]` prefix) — catches sensors with an "auto-report" mode that
+  stream data on their own rather than waiting to be polled. Pause/Resume
+  button on the page if you want to stop it temporarily (it also pauses
+  itself automatically during a manual timed sniff so the two don't
+  split the same bytes).
+- **Manual timed sniff** — listens for N seconds with zero transmission
+  (same idea as auto-capture, but bounded to a fixed window if you want
+  a clean before/after comparison).
 - **Read registers** — FC03/FC04, any slave/register/count.
 - **Write register** — FC06, any slave/register/value (confirm dialog
   before it sends).
@@ -117,8 +126,10 @@ Suggested order of attack:
 3. If still nothing, sweep parity (Even/Odd) and stop bits (2) at each
    baud — this is the framing possibility the production firmware can't
    test at all.
-4. Run **Passive sniff** at any point to check if the sensor is
-   spontaneously streaming data instead of waiting to be polled.
+4. Auto traffic capture is already running the whole time (no button
+   needed) — check the Serial Monitor for `[Auto]` lines or the traffic
+   log to see if the sensor is spontaneously streaming data instead of
+   waiting to be polled.
 5. Once *anything* answers to a scan, **Read** register 0x0000 (liquid
    level) and 0x0064 with count 6 (model code through protocol type) to
    see what state the sensor is actually in.

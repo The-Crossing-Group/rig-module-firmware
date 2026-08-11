@@ -90,6 +90,7 @@ void printHelp() {
     "  raw <hex bytes>               send exact bytes, e.g.: raw 01 03 00 00 00 01 84 0A\n"
     "  log [n]                       show last n traffic log entries (default 15)\n"
     "  sniff <seconds>               listen passively for unsolicited bus traffic\n"
+    "  autosniff <on|off>            toggle continuous background traffic capture\n"
   ));
 }
 
@@ -224,6 +225,8 @@ void doStop(std::vector<String>& args) {
 
 void doSniff(std::vector<String>& args) {
   int secs = args.size() > 1 ? parseNum(args[1]) : 5;
+  bool wasAutoOn = dbgAutoSniffGetEnabled();
+  dbgAutoSniffSetEnabled(false);
   Serial.printf("Sniffing bus passively for %d seconds (no TX)...\n", secs);
   unsigned long deadline = millis() + (unsigned long)secs * 1000;
   uint8_t buf[64];
@@ -241,6 +244,19 @@ void doSniff(std::vector<String>& args) {
   }
   if (n > 0) Serial.println("  RX: " + bytesToHex(buf, n));
   Serial.println("Sniff done.");
+  dbgAutoSniffSetEnabled(wasAutoOn);
+}
+
+void doAutoSniff(std::vector<String>& args) {
+  if (args.size() < 2) {
+    Serial.println(String("Auto traffic capture is currently ") + (dbgAutoSniffGetEnabled() ? "ON" : "OFF") + ". Usage: autosniff <on|off>");
+    return;
+  }
+  String v = args[1];
+  v.toLowerCase();
+  if (v == "on" || v == "1") { dbgAutoSniffSetEnabled(true); Serial.println("Auto traffic capture ON — unsolicited bytes will print with [Auto] prefix."); }
+  else if (v == "off" || v == "0") { dbgAutoSniffSetEnabled(false); Serial.println("Auto traffic capture OFF."); }
+  else Serial.println("Usage: autosniff <on|off>");
 }
 
 void handleCommand(String line) {
@@ -262,6 +278,7 @@ void handleCommand(String line) {
   else if (cmd == "raw") doRaw(line);
   else if (cmd == "log") doLog(args);
   else if (cmd == "sniff") doSniff(args);
+  else if (cmd == "autosniff") doAutoSniff(args);
   else Serial.println("Unknown command '" + cmd + "'. Type 'help' for the list.");
 }
 
@@ -321,6 +338,12 @@ void handleRoot() {
   h += "<div>AP: " + String(AP_SSID) + " &nbsp; IP: " + WiFi.softAPIP().toString() + " &nbsp; "
        "Clients: " + String(WiFi.softAPgetStationNum()) + " &nbsp; "
        "<a href='/log'>traffic log</a></div>";
+
+  h += "<h2>Auto traffic capture: " + String(dbgAutoSniffGetEnabled() ? "ON" : "OFF") + "</h2>"
+       "<div class='row'>Every unsolicited byte on the bus is captured and logged automatically, no button needed - "
+       "check <a href='/log'>traffic log</a> or the Serial Monitor ([Auto] lines). "
+       "<a href='/autosniff?on=" + String(dbgAutoSniffGetEnabled() ? "0" : "1") + "'>"
+       "<button type='button'>" + String(dbgAutoSniffGetEnabled() ? "Pause" : "Resume") + "</button></a></div>";
 
   h += "<h2>Serial config: " + String(sc.baud) + " baud, 8" + String(sc.parity) + String(sc.stopBits) + "</h2>";
   h += "<form action='/config' method='GET'><div class='row'>"
@@ -411,10 +434,24 @@ void handleScan() {
   server.send(200, "text/html", h);
 }
 
+void handleAutosniff() {
+  bool on = server.hasArg("on") ? server.arg("on").toInt() != 0 : true;
+  dbgAutoSniffSetEnabled(on);
+  Serial.println(String("[Web] Auto traffic capture ") + (on ? "resumed" : "paused"));
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
 void handleSniff() {
   int secs = server.hasArg("secs") ? server.arg("secs").toInt() : 5;
   if (secs < 1) secs = 1;
   if (secs > 30) secs = 30;
+
+  // Manual timed sniff and continuous auto-capture both read the same
+  // serial port - pause auto-capture for the duration so bytes aren't
+  // split between the two, then restore whatever state it was in.
+  bool wasAutoOn = dbgAutoSniffGetEnabled();
+  dbgAutoSniffSetEnabled(false);
 
   String out = "Sniffing passively for " + String(secs) + "s (no TX)...\n";
   unsigned long deadline = millis() + (unsigned long)secs * 1000;
@@ -434,6 +471,7 @@ void handleSniff() {
   if (n > 0) out += "  RX: " + bytesToHex(buf, n) + "\n";
   out += "Sniff done.";
   Serial.println("[Web] " + out);
+  dbgAutoSniffSetEnabled(wasAutoOn);
 
   String h = String(PAGE_HEAD) + "<h2>Sniff result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
   server.send(200, "text/html", h);
@@ -502,6 +540,7 @@ void setupWebServer() {
   server.on("/config", handleConfig);
   server.on("/scan", handleScan);
   server.on("/sniff", handleSniff);
+  server.on("/autosniff", handleAutosniff);
   server.on("/read", handleReadWeb);
   server.on("/write", handleWriteWeb);
   server.on("/raw", handleRawWeb);
@@ -542,4 +581,5 @@ void setup() {
 void loop() {
   pollSerial();
   server.handleClient();
+  dbgAutoSniffPoll();
 }
