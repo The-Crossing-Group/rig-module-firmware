@@ -285,12 +285,23 @@ void doBitscope(std::vector<String>& args) {
 // (that register was never touched, so 9600 almost certainly still
 // applies) - only parity/stop bits are swept, since a "comm mode" write
 // is a plausible way to have changed the sensor's own serial framing.
-// At each of the 6 combos: broadcast (slave 250, no reply expected)
-// FC06 writes of 1 -> 0x0068 and 1 -> 0x0069 (the documented defaults),
-// then switch back to standard 9600 8N1 and check whether slave 1 (or
-// anything on 1-5) responds normally. First combo that produces a live
-// response wins and the sweep stops there, leaving the port at 9600 8N1
-// so the sensor can be read/used immediately.
+//
+// IMPORTANT: this uses UNICAST writes to address 1 as the primary probe,
+// not broadcast. dbgWriteReg() reports ok=true for ANY broadcast address
+// with zero reply by design (that's correct behavior for normal traffic
+// logging - Modbus broadcast slaves must not reply - but it's a useless
+// signal here, since it can't distinguish "reset landed and worked" from
+// "wrong framing, sensor never even saw it"). A unicast write gets a real
+// ack (echo) or exception code back, which actually proves the framing
+// matched and the sensor is alive - false positives aren't possible.
+//
+// At each of the 6 combos: unicast (slave 1) FC06 writes of 1 -> 0x0068
+// and 1 -> 0x0069 (documented defaults). If either gets a real ack/
+// exception, that framing is confirmed live - stop there. Only if
+// unicast-to-1 gets nothing at every combo do we fall back to a best-
+// effort broadcast pass (both address 0, the actual Modbus-standard
+// broadcast, and 250) purely to try landing the reset blind, since we
+// have no better option left.
 // =============================================================================
 String dbgRecoverySweep() {
   String report;
@@ -299,6 +310,7 @@ String dbgRecoverySweep() {
   const int stops[] = {1, 2};
   bool found = false;
 
+  report += "--- Pass 1: unicast to address 1 (real ack = proof the framing matched) ---\n";
   for (int s = 0; s < 2 && !found; s++) {
     for (int p = 0; p < 3 && !found; p++) {
       char parity = parities[p];
@@ -306,46 +318,80 @@ String dbgRecoverySweep() {
       dbgSerialApply(9600, parity, stopBits);
       delay(30);
 
-      ModbusResult w1 = dbgWriteReg(250, 0x0068, 1, 300); // comm mode -> default
+      ModbusResult w1 = dbgWriteReg(1, 0x0068, 1, 400); // comm mode -> default
       delay(80);
-      ModbusResult w2 = dbgWriteReg(250, 0x0069, 1, 300); // protocol type -> default
-      delay(300); // give the sensor a moment to apply a mode change before we probe it
+      ModbusResult w2 = dbgWriteReg(1, 0x0069, 1, 400); // protocol type -> default
 
-      dbgSerialApply(9600, 'N', 1); // Modbus RTU standard framing to test with
-      delay(30);
+      report += "9600 8" + String(parity) + String(stopBits) + ": 0x68 write -> "
+        + (w1.ok ? "ACK (confirmed)" : w1.error) + " | 0x69 write -> "
+        + (w2.ok ? "ACK (confirmed)" : w2.error) + "\n";
 
-      report += "9600 8" + String(parity) + String(stopBits) + ": reset writes sent (0x68 "
-        + (w1.ok ? "ok" : "no-ack") + ", 0x69 " + (w2.ok ? "ok" : "no-ack") + "). Checking for a response at 8N1... ";
-
-      ModbusResult r = dbgReadRegs(1, 3, 0x0000, 3, 400);
-      if (r.ok) {
-        report += "RESPONSE from slave " + String(r.actualSlaveId) + ": ";
-        for (int i = 0; i < r.regCount; i++) report += String(r.regs[i]) + " ";
-        report += "\n\n*** Sensor is back! Left at 9600 8N1 - it should work normally now. ***\n";
+      if (w1.ok || w2.ok) {
+        delay(300); // let a mode change actually apply before re-probing
+        dbgSerialApply(9600, 'N', 1);
+        delay(30);
+        ModbusResult r = dbgReadRegs(1, 3, 0x0000, 3, 400);
+        if (r.ok) {
+          report += "  -> Read-back OK from slave " + String(r.actualSlaveId) + ": ";
+          for (int i = 0; i < r.regCount; i++) report += String(r.regs[i]) + " ";
+          report += "\n\n*** Sensor confirmed alive and acked the reset at 9600 8" + String(parity) + String(stopBits)
+            + ". Left at 9600 8N1. ***\n";
+        } else {
+          report += "\n*** Sensor ACKed the write at 9600 8" + String(parity) + String(stopBits)
+            + " (framing confirmed correct) but a follow-up read at 8N1 didn't respond - "
+            + "leaving the port at 9600 8" + String(parity) + String(stopBits) + " since that's the framing that worked. "
+            + "Try reading it manually from here. ***\n";
+          dbgSerialApply(9600, parity, stopBits);
+        }
         found = true;
         break;
       }
-      // Slave ID register (0x0066) was never touched, but check a small
-      // range anyway in case something else shifted it.
-      bool anyHit = false;
-      for (int addr = 1; addr <= 5 && !anyHit; addr++) {
-        ModbusResult rr = dbgReadRegs((uint8_t)addr, 3, 0x0000, 1, 300);
-        if (rr.ok) {
-          report += "no reply from addr 1, but addr " + String(addr) + " responded!\n\n*** Sensor is back, now at address " + String(addr) + ", left at 9600 8N1. ***\n";
-          anyHit = true;
+    }
+  }
+
+  if (!found) {
+    report += "\nNo unicast ack at any framing combo - the sensor never confirmed receiving anything.\n";
+    report += "\n--- Pass 2: best-effort broadcast (blind, no ack possible, last resort) ---\n";
+    for (int s = 0; s < 2 && !found; s++) {
+      for (int p = 0; p < 3 && !found; p++) {
+        char parity = parities[p];
+        int stopBits = stops[s];
+        dbgSerialApply(9600, parity, stopBits);
+        delay(30);
+        dbgWriteReg(0, 0x0068, 1, 200);
+        delay(50);
+        dbgWriteReg(0, 0x0069, 1, 200);
+        delay(50);
+        dbgWriteReg(250, 0x0068, 1, 200);
+        delay(50);
+        dbgWriteReg(250, 0x0069, 1, 200);
+        delay(300);
+
+        dbgSerialApply(9600, 'N', 1);
+        delay(30);
+        report += "9600 8" + String(parity) + String(stopBits) + " blind broadcast sent, checking 8N1 for a response... ";
+        ModbusResult r = dbgReadRegs(1, 3, 0x0000, 3, 400);
+        if (r.ok) {
+          report += "RESPONSE from slave " + String(r.actualSlaveId) + "!\n\n*** Sensor is back, left at 9600 8N1. ***\n";
           found = true;
+          break;
         }
+        report += "no response.\n";
       }
-      if (!anyHit) report += "no response.\n";
     }
   }
 
   if (!found) {
     dbgSerialApply(orig.baud, orig.parity, orig.stopBits);
-    report += "\nNo framing combo produced a response after the reset writes. Possible next steps: "
-      "the writes may not have landed in ANY of these framings (try 'sniff 10' right after this to "
-      "see if the sensor's auto-report burst changed at all), a baud change may be needed too even "
-      "though 0x0067 wasn't touched, or the sensor may need a hardware/power-cycle reset.";
+    report += "\nNothing acked or responded at any framing/method. This means either:\n"
+      "  1. The sensor's receiver isn't at 9600 in ANY of these parity/stop combos (baud itself may\n"
+      "     have changed too, despite 0x0067 not being an intentional target)\n"
+      "  2. It needs a power cycle before register writes take effect\n"
+      "  3. Those registers control something other than serial framing (comm mode may mean RS232\n"
+      "     vs RS485, or half/full duplex, not parity/stop bits)\n"
+      "Next: run 'sniff 10' right after this to check if the ~5.2s auto-burst pattern changed at all "
+      "(even a byte-count or timing change would prove something landed). If the burst is byte-for-byte "
+      "identical to before, try a power cycle next - some sensors only apply config writes on boot.";
   }
   return report;
 }
