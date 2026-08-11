@@ -189,7 +189,7 @@ void doLog(std::vector<String>& args) {
 
 void doStatus() {
   SerialCfg sc = dbgGetSerialCfg();
-  Serial.printf("Current RS485 config: %u baud, 8%c%d\n", sc.baud, sc.parity, sc.stopBits);
+  Serial.printf("Current RS485 config: %lu baud, 8%c%d\n", sc.baud, sc.parity, sc.stopBits);
 }
 
 void doBaud(std::vector<String>& args) {
@@ -381,6 +381,7 @@ void handleConfig() {
   char parity = server.hasArg("parity") ? server.arg("parity")[0] : sc.parity;
   int stop = server.hasArg("stop") ? server.arg("stop").toInt() : sc.stopBits;
   dbgSerialApply(baud, parity, stop);
+  Serial.printf("[Web] Config applied: %lu baud, 8%c%d\n", baud, parity, stop);
   server.sendHeader("Location", "/");
   server.send(303);
 }
@@ -399,6 +400,7 @@ void handleScan() {
     if (r3.ok) { out += "  addr " + String(addr) + " responded to FC03\n"; found++; }
   }
   out += "Scan done. " + String(found) + " address(es) responded.";
+  Serial.println("[Web] " + out);
 
   String h = String(PAGE_HEAD) + "<h2>Scan result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
   server.send(200, "text/html", h);
@@ -426,6 +428,7 @@ void handleSniff() {
   }
   if (n > 0) out += "  RX: " + bytesToHex(buf, n) + "\n";
   out += "Sniff done.";
+  Serial.println("[Web] " + out);
 
   String h = String(PAGE_HEAD) + "<h2>Sniff result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
   server.send(200, "text/html", h);
@@ -449,6 +452,7 @@ void handleReadWeb() {
   }
   out += "TX: " + r.txHex + "\n";
   if (r.rxHex.length()) out += "RX: " + r.rxHex;
+  Serial.println("[Web] " + out);
 
   String h = String(PAGE_HEAD) + "<h2>Read result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
   server.send(200, "text/html", h);
@@ -465,6 +469,7 @@ void handleWriteWeb() {
   else out += "FAILED \xe2\x80\x94 " + r.error + "\n";
   out += "TX: " + r.txHex + "\n";
   if (r.rxHex.length()) out += "RX: " + r.rxHex;
+  Serial.println("[Web] " + out);
 
   String h = String(PAGE_HEAD) + "<h2>Write result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
   server.send(200, "text/html", h);
@@ -475,6 +480,7 @@ void handleRawWeb() {
   String out = "Sending raw: " + hex + "\n";
   String rx = dbgRawHexSend(hex, 800);
   out += rx.length() ? ("Reply: " + rx) : String("No reply.");
+  Serial.println("[Web] " + out);
 
   String h = String(PAGE_HEAD) + "<h2>Raw send result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
   server.send(200, "text/html", h);

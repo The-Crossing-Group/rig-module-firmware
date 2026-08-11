@@ -49,7 +49,7 @@ void dbgSerialInit(int rxPin, int txPin, int dePin, uint32_t baud, char parity =
   _dbgCfg.baud = baud;
   _dbgCfg.parity = parity;
   _dbgCfg.stopBits = stopBits;
-  Serial.printf("[Debug] Serial2 RX=%d TX=%d DE=%d baud=%u parity=%c stop=%d\n",
+  Serial.printf("[Debug] Serial2 RX=%d TX=%d DE=%d baud=%lu parity=%c stop=%d\n",
     rxPin, txPin, dePin, baud, parity, stopBits);
 }
 
@@ -65,7 +65,7 @@ void dbgSerialApply(uint32_t baud, char parity, int stopBits) {
   _dbgCfg.parity = parity;
   _dbgCfg.stopBits = stopBits;
   delay(20);
-  Serial.printf("[Debug] Serial config applied: baud=%u parity=%c stop=%d\n", baud, parity, stopBits);
+  Serial.printf("[Debug] Serial config applied: baud=%lu parity=%c stop=%d\n", baud, parity, stopBits);
 }
 
 SerialCfg dbgGetSerialCfg() { return _dbgCfg; }
