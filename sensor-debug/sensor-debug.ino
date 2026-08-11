@@ -253,14 +253,14 @@ void doSniff(std::vector<String>& args) {
 }
 
 void doBitscope(std::vector<String>& args) {
-  int ms = args.size() > 1 ? (int)parseNum(args[1]) : 500;
+  int ms = args.size() > 1 ? (int)parseNum(args[1]) : 6000;
   if (ms < 50) ms = 50;
-  if (ms > 5000) ms = 5000;
+  if (ms > 15000) ms = 15000;
 
   bool wasAutoOn = dbgAutoSniffGetEnabled();
   dbgAutoSniffSetEnabled(false);
 
-  Serial.printf("Bitscope: capturing raw edges on RX pin for %dms (make sure the sensor is transmitting during this window)...\n", ms);
+  Serial.printf("Bitscope: capturing raw edges on RX pin for %dms (make sure the sensor is transmitting during this window - if it auto-reports every few seconds, use a window longer than its period)...\n", ms);
   bitscopeCapture(ms);
   BitscopeResult r = bitscopeAnalyze();
 
@@ -408,9 +408,10 @@ void handleRoot() {
 
   h += "<h2>Bitscope (raw electrical capture, bypasses UART framing)</h2>"
        "<div class='row'>Measures the real bit period straight off the wire and brute-forces "
-       "every byte alignment against Modbus CRC. Use during a known auto-report burst.</div>"
+       "every byte alignment against Modbus CRC. Window must be longer than the sensor's "
+       "auto-report period or it may capture zero edges (nothing sent yet).</div>"
        "<form action='/bitscope' method='GET'><div class='row'>"
-       "Window (ms): <input type='number' name='ms' value='500' min='50' max='5000' style='width:70px'>"
+       "Window (ms): <input type='number' name='ms' value='6000' min='50' max='15000' style='width:70px'>"
        "<button type='submit'>Capture</button>"
        "</div></form>";
 
@@ -516,9 +517,9 @@ void handleSniff() {
 }
 
 void handleBitscopeWeb() {
-  int ms = server.hasArg("ms") ? server.arg("ms").toInt() : 500;
+  int ms = server.hasArg("ms") ? server.arg("ms").toInt() : 6000;
   if (ms < 50) ms = 50;
-  if (ms > 5000) ms = 5000;
+  if (ms > 15000) ms = 15000;
 
   bool wasAutoOn = dbgAutoSniffGetEnabled();
   dbgAutoSniffSetEnabled(false);
