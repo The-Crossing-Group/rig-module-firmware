@@ -1,11 +1,15 @@
 // =============================================================================
 // sensor-debug.ino — Standalone RS485/Modbus debugging tool
 //
-// No setup page, no login screen, no captive portal. It connects straight
-// to the bench-test hotspot (rig-test-ap) with hardcoded credentials and
-// serves a plain, no-auth web page at its IP — just open the IP in a
-// browser and click/type. Everything is also available over USB Serial
-// (115200 baud) if WiFi isn't available.
+// The board is its own WiFi access point — no router/hotspot needed,
+// nothing to join beforehand. On boot it broadcasts an open SSID
+// ("sensor-debug", no password) and the web page at 192.168.4.1 is
+// available immediately with zero login/setup screen — just connect
+// your phone/laptop to that WiFi network like any open AP, then open
+// http://192.168.4.1/ in a browser. No captive portal, no credentials
+// form, nothing gating the actual debugging tools. Everything is also
+// available over USB Serial (115200 baud) if you'd rather skip WiFi
+// entirely.
 //
 // Built after the SM7779 radar sensor got stuck outputting garbage
 // following experimental register writes. Separate sketch, doesn't
@@ -21,16 +25,16 @@
 //   Flash Size: 16MB, PSRAM: OPI PSRAM,
 //   Partition Scheme: 16M Flash (3MB APP/9.9MB FATFS)
 //
-// WiFi: connects to WIFI_SSID/WIFI_PASS below (defaults to the bench
-// rig-test-ap hotspot on drill-pi-1, 10.42.0.x). To point it at a
-// different network, edit the two #defines and re-flash — no runtime
-// config page, no login screen. Once connected, watch Serial at boot for
-// the IP, or check the Pi's DHCP leases (10.42.0.x) — then just open
-// that IP in a browser.
+// WiFi: SSID/password are set by the two #defines below (open network
+// by default — set AP_PASS to a real password if you want one, must be
+// 8+ chars or WiFi.softAP() silently falls back to open anyway). Edit
+// + re-flash to change. Once powered on, connect to the AP and open
+// http://192.168.4.1/ (the fixed default IP for ESP32 softAP) — no
+// login page in between.
 //
 // USB SERIAL COMMANDS (open Serial Monitor, 115200 baud, line ending
-// "Newline") — same functionality as the web page, useful if WiFi is
-// down or you don't know the IP yet:
+// "Newline") — same functionality as the web page, useful if you'd
+// rather skip WiFi entirely:
 //
 //   help                          — show this list
 //   baud <n>                      — set RS485 baud (e.g. baud 9600)
@@ -58,10 +62,10 @@
 #define RS485_RXD 18
 #define RS485_DE  21
 
-// Bench-test hotspot (drill-pi-1 / rig128), 10.42.0.1 gateway.
-// Edit + re-flash to point this at a different network — no config page.
-#define WIFI_SSID "rig-test-ap"
-#define WIFI_PASS "7804991970"
+// The board's own access point. Open network (no password) by default
+// so there's nothing to type before you can see the debugging tools.
+#define AP_SSID "sensor-debug"
+#define AP_PASS ""
 
 WebServer server(80);
 String inputLine = "";
@@ -314,7 +318,8 @@ void handleRoot() {
   SerialCfg sc = dbgGetSerialCfg();
   String h = PAGE_HEAD;
 
-  h += "<div>IP: " + WiFi.localIP().toString() + " &nbsp; RSSI: " + String(WiFi.RSSI()) + " dBm &nbsp; "
+  h += "<div>AP: " + String(AP_SSID) + " &nbsp; IP: " + WiFi.softAPIP().toString() + " &nbsp; "
+       "Clients: " + String(WiFi.softAPgetStationNum()) + " &nbsp; "
        "<a href='/log'>traffic log</a></div>";
 
   h += "<h2>Serial config: " + String(sc.baud) + " baud, 8" + String(sc.parity) + String(sc.stopBits) + "</h2>";
@@ -517,24 +522,18 @@ void setup() {
   printHelp();
 
   WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  Serial.printf("[WiFi] Connecting to \"%s\"...\n", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.mode(WIFI_AP);
+  bool apOk = strlen(AP_PASS) > 0
+    ? WiFi.softAP(AP_SSID, AP_PASS)
+    : WiFi.softAP(AP_SSID);
 
-  unsigned long deadline = millis() + 15000;
-  while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
-    delay(250);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("[WiFi] Connected. Open http://%s/ in a browser — no login needed.\n",
-      WiFi.localIP().toString().c_str());
+  if (apOk) {
+    IPAddress ip = WiFi.softAPIP();
+    Serial.printf("[WiFi] Access point \"%s\" up. Connect to it, then open http://%s/ — no login needed.\n",
+      AP_SSID, ip.toString().c_str());
     setupWebServer();
   } else {
-    Serial.println("[WiFi] Could not connect. Web page unavailable — USB serial commands still work.");
-    Serial.println("[WiFi] Edit WIFI_SSID/WIFI_PASS at the top of sensor-debug.ino and re-flash to change network.");
+    Serial.println("[WiFi] Access point failed to start. Web page unavailable — USB serial commands still work.");
   }
 
   Serial.print("> ");
@@ -542,5 +541,5 @@ void setup() {
 
 void loop() {
   pollSerial();
-  if (WiFi.status() == WL_CONNECTED) server.handleClient();
+  server.handleClient();
 }

@@ -5,11 +5,11 @@ sensor — built after the SM7779 radar sensor got stuck outputting garbage
 following some experimental register writes on the "real" firmware
 (`waveshare-s3-sensors/`).
 
-**No setup page, no login screen, no captive portal.** It connects
-straight to the bench-test hotspot with hardcoded credentials and serves
-a plain web page at its IP — open the IP in a browser, click/type,
-done. Everything is also available over USB Serial if you'd rather not
-use WiFi at all.
+**The board is its own WiFi access point — no login screen, no
+credentials form, nothing gating the tools.** Power it on, connect to
+its open WiFi network like any other AP, open its IP in a browser,
+done. Everything is also available over USB Serial if you'd rather
+skip WiFi entirely.
 
 **This does not touch or replace the production firmware.** It's a
 different sketch you flash to the same board (or a spare one) when you
@@ -27,35 +27,39 @@ Same hardware/board settings as `waveshare-s3-sensors/`:
 
 RS485 wiring is identical: TX=GPIO17, RX=GPIO18, DE/RE=GPIO21.
 
-## Connecting — no setup needed
+## Connecting — no login screen
 
-WiFi credentials are hardcoded at the top of `sensor-debug.ino`:
+On boot the board broadcasts its own open WiFi network:
 
 ```cpp
-#define WIFI_SSID "rig-test-ap"
-#define WIFI_PASS "7804991970"
+#define AP_SSID "sensor-debug"
+#define AP_PASS ""   // empty = open network, no password
 ```
 
-That's the bench-test hotspot on drill-pi-1 (10.42.0.x). On boot it
-connects automatically — no setup AP, no login page, nothing to
-configure. Watch the Serial Monitor at boot (115200 baud) for the line:
+Just connect your phone/laptop to **"sensor-debug"** like you would
+any open WiFi network — no captive portal, no credentials to enter on
+the ESP32 side. Then open **http://192.168.4.1/** in a browser (the
+standard ESP32 softAP default IP) and the tools are right there.
+
+Watch the Serial Monitor at boot (115200 baud) to confirm:
 
 ```
-[WiFi] Connected. Open http://10.42.0.xxx/ in a browser — no login needed.
+[WiFi] Access point "sensor-debug" up. Connect to it, then open http://192.168.4.1/ — no login needed.
 ```
 
-Open that IP in any browser on the same network. The page has no
-authentication at all — it's meant for quick bench debugging, not
-anything exposed beyond the test hotspot.
+If you want a password on the AP, set `AP_PASS` to something 8+
+characters and re-flash (WiFi.softAP() silently ignores anything
+shorter and stays open). There's no runtime WiFi config screen by
+design — this tool needs zero setup steps every time you grab it off
+the bench.
 
-If you need to point it at a different network (not rig-test-ap), edit
-those two `#define` lines and re-flash. There's no runtime WiFi config
-screen by design — this tool is meant to need zero setup steps every
-time you grab it off the bench.
+Every action taken from the web page (config apply, scan, sniff, read,
+write, raw send) also prints its result to the **Serial Monitor** with
+a `[Web]` prefix, so you get the same output whether you click it in
+the browser or type it over USB.
 
-If WiFi can't connect at all, the web page just won't come up — but
-every feature still works over **USB Serial** (open Serial Monitor,
-115200 baud, line ending "Newline"):
+If WiFi somehow doesn't come up, every feature still works over **USB
+Serial** (open Serial Monitor, 115200 baud, line ending "Newline"):
 
 ```
 help                          show the command list
