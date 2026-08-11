@@ -57,6 +57,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include "modbus_debug.h"
+#include "bitscope.h"
 
 #define RS485_TXD 17
 #define RS485_RXD 18
@@ -91,6 +92,10 @@ void printHelp() {
     "  log [n]                       show last n traffic log entries (default 15)\n"
     "  sniff <seconds>               listen passively for unsolicited bus traffic\n"
     "  autosniff <on|off>            toggle continuous background traffic capture\n"
+    "  bitscope [ms]                 raw electrical capture, bypasses UART framing\n"
+    "                                entirely - measures real bit period + brute-\n"
+    "                                forces every byte alignment against Modbus CRC\n"
+    "                                (default 500ms window, use during a known burst)\n"
   ));
 }
 
@@ -247,6 +252,30 @@ void doSniff(std::vector<String>& args) {
   dbgAutoSniffSetEnabled(wasAutoOn);
 }
 
+void doBitscope(std::vector<String>& args) {
+  int ms = args.size() > 1 ? (int)parseNum(args[1]) : 500;
+  if (ms < 50) ms = 50;
+  if (ms > 5000) ms = 5000;
+
+  bool wasAutoOn = dbgAutoSniffGetEnabled();
+  dbgAutoSniffSetEnabled(false);
+
+  Serial.printf("Bitscope: capturing raw edges on RX pin for %dms (make sure the sensor is transmitting during this window)...\n", ms);
+  bitscopeCapture(ms);
+  BitscopeResult r = bitscopeAnalyze();
+
+  Serial.printf("Edges captured: %d\n", r.edgeCount);
+  if (r.minPulseUs > 0) {
+    Serial.printf("Shortest pulse: %luus  ->  estimated real baud: %lu\n", (unsigned long)r.minPulseUs, (unsigned long)r.estimatedBaud);
+    Serial.println("Raw bitstream (first up to 400 bit-units):");
+    Serial.println("  " + r.bitstream);
+  }
+  Serial.println("Byte-alignment sweep (checked against Modbus CRC16 at every bit offset 0-10):");
+  Serial.print(r.bestDecodeReport);
+
+  dbgAutoSniffSetEnabled(wasAutoOn);
+}
+
 void doAutoSniff(std::vector<String>& args) {
   if (args.size() < 2) {
     Serial.println(String("Auto traffic capture is currently ") + (dbgAutoSniffGetEnabled() ? "ON" : "OFF") + ". Usage: autosniff <on|off>");
@@ -279,6 +308,7 @@ void handleCommand(String line) {
   else if (cmd == "log") doLog(args);
   else if (cmd == "sniff") doSniff(args);
   else if (cmd == "autosniff") doAutoSniff(args);
+  else if (cmd == "bitscope") doBitscope(args);
   else Serial.println("Unknown command '" + cmd + "'. Type 'help' for the list.");
 }
 
@@ -374,6 +404,14 @@ void handleRoot() {
        "<form action='/sniff' method='GET'><div class='row'>"
        "Seconds: <input type='number' name='secs' value='5' min='1' max='30' style='width:60px'>"
        "<button type='submit'>Sniff</button>"
+       "</div></form>";
+
+  h += "<h2>Bitscope (raw electrical capture, bypasses UART framing)</h2>"
+       "<div class='row'>Measures the real bit period straight off the wire and brute-forces "
+       "every byte alignment against Modbus CRC. Use during a known auto-report burst.</div>"
+       "<form action='/bitscope' method='GET'><div class='row'>"
+       "Window (ms): <input type='number' name='ms' value='500' min='50' max='5000' style='width:70px'>"
+       "<button type='submit'>Capture</button>"
        "</div></form>";
 
   h += "<h2>Read registers</h2>"
@@ -477,6 +515,32 @@ void handleSniff() {
   server.send(200, "text/html", h);
 }
 
+void handleBitscopeWeb() {
+  int ms = server.hasArg("ms") ? server.arg("ms").toInt() : 500;
+  if (ms < 50) ms = 50;
+  if (ms > 5000) ms = 5000;
+
+  bool wasAutoOn = dbgAutoSniffGetEnabled();
+  dbgAutoSniffSetEnabled(false);
+
+  String out = "Capturing raw edges for " + String(ms) + "ms...\n";
+  bitscopeCapture(ms);
+  BitscopeResult r = bitscopeAnalyze();
+
+  out += "Edges captured: " + String(r.edgeCount) + "\n";
+  if (r.minPulseUs > 0) {
+    out += "Shortest pulse: " + String(r.minPulseUs) + "us  ->  estimated real baud: " + String(r.estimatedBaud) + "\n";
+    out += "Raw bitstream (first up to 400 bit-units):\n  " + r.bitstream + "\n";
+  }
+  out += "Byte-alignment sweep (checked against Modbus CRC16 at every bit offset 0-10):\n" + r.bestDecodeReport;
+  Serial.println("[Web] Bitscope:\n" + out);
+
+  dbgAutoSniffSetEnabled(wasAutoOn);
+
+  String h = String(PAGE_HEAD) + "<h2>Bitscope result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
 void handleReadWeb() {
   uint8_t sid = server.hasArg("sid") ? (uint8_t)parseNum(server.arg("sid")) : 1;
   uint8_t fc = server.hasArg("fc") ? (uint8_t)parseNum(server.arg("fc")) : 3;
@@ -541,6 +605,7 @@ void setupWebServer() {
   server.on("/scan", handleScan);
   server.on("/sniff", handleSniff);
   server.on("/autosniff", handleAutosniff);
+  server.on("/bitscope", handleBitscopeWeb);
   server.on("/read", handleReadWeb);
   server.on("/write", handleWriteWeb);
   server.on("/raw", handleRawWeb);
@@ -557,6 +622,7 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   dbgSerialInit(RS485_RXD, RS485_TXD, RS485_DE, 9600, 'N', 1);
+  bitscopeInit(RS485_RXD);
   Serial.println("\n=== sensor-debug: RS485/Modbus debugging tool ===");
   printHelp();
 

@@ -76,6 +76,8 @@ raw <hex bytes>               e.g.: raw 01 03 00 00 00 01 84 0A
 log [n]                       last n traffic log entries
 sniff <seconds>                passive listen, no TX (catches auto-report sensors)
 autosniff <on|off>             toggle continuous background traffic capture
+bitscope [ms]                 raw electrical capture, bypasses UART framing entirely
+                               (default 500ms, use during a known burst)
 ```
 
 ## What's on the web page
@@ -103,6 +105,24 @@ autosniff <on|off>             toggle continuous background traffic capture
   bytes, they go out exactly as typed with DE toggled around the
   transmission, whatever comes back is shown as hex.
 - **Traffic log** — last 80 TX/RX pairs, newest first.
+- **Bitscope** — raw electrical capture that completely bypasses the
+  UART peripheral's framing assumptions. Every dial/setting above still
+  relies on the ESP32's hardware UART to decode bytes for you, which
+  means it's only ever testing framings you explicitly select. Bitscope
+  instead attaches a GPIO interrupt straight to the RX pin and
+  timestamps every voltage transition directly, then:
+  1. Measures the real bit period off the wire (from the shortest pulse
+     width) — this finds the sensor's actual current baud even if it's
+     some non-standard value no dropdown lists
+  2. Reconstructs the raw 0/1 bitstream with zero assumptions
+  3. Brute-forces every possible byte-alignment (bit offset 0-10) and
+     checks each one against the Modbus CRC16 — if the sensor is
+     actually sending valid Modbus RTU and we've just been misreading
+     the byte boundaries, this finds it and shows you exactly where
+  Use it during a known burst (auto-report sensors: just capture any
+  500ms window; polled sensors: trigger a read right after starting the
+  capture). Attaching the interrupt doesn't disturb the UART's own use
+  of the same pin — the ESP32's GPIO matrix lets both listen at once.
 
 Same tolerant reply parsing as the production firmware's v1.8.1 fix:
 accepts whatever function code/register count a sensor actually answers
@@ -130,10 +150,19 @@ Suggested order of attack:
    needed) — check the Serial Monitor for `[Auto]` lines or the traffic
    log to see if the sensor is spontaneously streaming data instead of
    waiting to be polled.
-5. Once *anything* answers to a scan, **Read** register 0x0000 (liquid
+5. If steps 1-4 keep coming back garbled/zeros no matter what you try,
+   stop guessing framing combos and run **Bitscope** during one of
+   those auto-report bursts instead. It sidesteps the UART entirely and
+   tells you the sensor's actual real bit period plus brute-forces
+   every byte alignment against the Modbus CRC — this either proves
+   it's genuinely valid Modbus data at some offset the dropdowns can't
+   reach, or proves it's actually just noise/corruption at the
+   electrical level (bad wiring, blown transceiver, etc.), which is
+   useful to know either way.
+6. Once *anything* answers to a scan, **Read** register 0x0000 (liquid
    level) and 0x0064 with count 6 (model code through protocol type) to
    see what state the sensor is actually in.
-6. If a valid reply comes back from a different slave address than
+7. If a valid reply comes back from a different slave address than
    expected, that's fine — the tool shows it and the data anyway, same
    as the production firmware's v1.8.1 broadcast fix.
 
