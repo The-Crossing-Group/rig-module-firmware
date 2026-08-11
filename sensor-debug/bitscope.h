@@ -100,6 +100,31 @@ static uint16_t _bsCRC16(const uint8_t* buf, int len) {
 // resulting bytes contain a valid Modbus CRC16 anywhere in them. This is
 // the brute-force "is this actually valid Modbus, just misaligned"
 // check - the whole reason this tool exists.
+// IMPORTANT CRC gotcha this function must guard against: Modbus CRC16's
+// update step for a 0x00 input byte is a pure function of the CURRENT
+// register value with no dependence on the byte itself (0x00 XORed in
+// changes nothing, then 8 shifts happen regardless). That means once
+// the running CRC register happens to hit exactly 0x0000, EVERY
+// following 0x00 byte leaves it at 0x0000 - so any run of idle/padding
+// zero bytes will falsely "validate" against itself at every possible
+// length. Since real UART idle time (silence between bursts, the tail
+// after capture ends) reconstructs as long runs of a single bit level
+// -> long runs of identical bytes (often 0x00 or 0xFF depending on
+// polarity), this is a real trap, not a hypothetical. Two defenses:
+//   1. Only report the SHORTEST match at each position (break after
+//      first hit) - a real frame has exactly one true length, hundreds
+//      of "valid" extensions of the same match is itself a tell that
+//      something degenerate is going on.
+//   2. Reject any candidate whose data portion (everything except the
+//      final 2 CRC bytes) is a degenerate run - all identical bytes,
+//      which idle/padding always is and real sensor register data
+//      essentially never is.
+static bool _bsIsDegenerate(const uint8_t* buf, int len) {
+  if (len < 1) return true;
+  for (int i = 1; i < len; i++) if (buf[i] != buf[0]) return false;
+  return true; // every byte identical - idle/padding signature, not real data
+}
+
 static String _bsTryDecodeAllOffsets(const std::vector<uint8_t>& bits) {
   String report;
   int n = bits.size();
@@ -117,16 +142,23 @@ static String _bsTryDecodeAllOffsets(const std::vector<uint8_t>& bits) {
     }
     if (bytes.size() < 4) continue;
 
-    // Scan this byte sequence for any valid Modbus CRC16 frame at any sub-offset/length.
+    // Scan this byte sequence for a valid Modbus CRC16 frame at any
+    // starting position. Shortest length first AND break immediately on
+    // the first genuine hit at a given start position - a real frame
+    // has exactly one true length; if we don't stop, a zero/idle tail
+    // reports as dozens of "valid" ever-longer matches, which is itself
+    // the tell that something's wrong (see _bsIsDegenerate above).
     for (size_t o = 0; o < bytes.size(); o++) {
       for (size_t flen = 4; o + flen <= bytes.size(); flen++) {
         uint16_t crc = _bsCRC16(&bytes[o], flen - 2);
         uint8_t lo = crc & 0xFF, hi = (crc >> 8) & 0xFF;
         if (bytes[o + flen - 2] == lo && bytes[o + flen - 1] == hi) {
+          if (_bsIsDegenerate(&bytes[o], flen - 2)) continue; // idle/padding false positive, keep looking
           report += "  *** VALID MODBUS CRC *** bit-offset=" + String(offset) + " byte-range=[" + String(o) + ".." + String(o + flen - 1) + "]: ";
           for (size_t k = 0; k < flen; k++) { char h[4]; snprintf(h, 4, "%02X ", bytes[o + k]); report += h; }
           report += "\n";
           anyCrcHit = true;
+          break; // stop at the shortest genuine hit for this start position
         }
       }
     }
