@@ -111,18 +111,23 @@ static void dbgLog(const String& label, const uint8_t* tx, int txLen,
   if (_dbgLogCount < DEBUG_LOG_SIZE) _dbgLogCount++;
 }
 
-// Prints the last maxCount log entries to Serial, newest first, in a
-// human-readable table (no JSON needed — this tool is USB-serial only).
-void dbgPrintLogHuman(int maxCount) {
+// Returns the last maxCount log entries, newest first, as a plain-text
+// table (used by both the Serial command and the web page — one code
+// path, two output surfaces).
+String dbgLogHumanText(int maxCount) {
   int n = min(maxCount, _dbgLogCount);
-  if (n == 0) { Serial.println("(no traffic logged yet)"); return; }
+  if (n == 0) return "(no traffic logged yet)\n";
+  String out;
   for (int i = 0; i < n; i++) {
     int idx = (_dbgLogHead - 1 - i + DEBUG_LOG_SIZE * 2) % DEBUG_LOG_SIZE;
     DebugLogEntry& e = _dbgLog[idx];
     float ageSec = (millis() - e.ms) / 1000.0f;
-    Serial.printf("[%6.1fs ago] %-12s TX: %-28s RX: %-28s %s\n",
+    char line[160];
+    snprintf(line, sizeof(line), "[%6.1fs ago] %-12s TX: %-28s RX: %-28s %s\n",
       ageSec, e.label.c_str(), e.tx.c_str(), e.rx.c_str(), e.result.c_str());
+    out += line;
   }
+  return out;
 }
 
 // Passthrough helpers so the .ino's passive sniff loop doesn't need to

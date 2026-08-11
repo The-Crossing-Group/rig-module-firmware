@@ -1,9 +1,11 @@
 // =============================================================================
-// sensor-debug.ino — Standalone RS485/Modbus debugging tool (USB SERIAL ONLY)
+// sensor-debug.ino — Standalone RS485/Modbus debugging tool
 //
-// No WiFi, no web server, no setup AP. Plug the board into USB, open the
-// Serial Monitor (115200 baud), type commands, read the results. That's
-// the whole tool.
+// No setup page, no login screen, no captive portal. It connects straight
+// to the bench-test hotspot (rig-test-ap) with hardcoded credentials and
+// serves a plain, no-auth web page at its IP — just open the IP in a
+// browser and click/type. Everything is also available over USB Serial
+// (115200 baud) if WiFi isn't available.
 //
 // Built after the SM7779 radar sensor got stuck outputting garbage
 // following experimental register writes. Separate sketch, doesn't
@@ -19,7 +21,16 @@
 //   Flash Size: 16MB, PSRAM: OPI PSRAM,
 //   Partition Scheme: 16M Flash (3MB APP/9.9MB FATFS)
 //
-// COMMANDS (type into Serial Monitor, press Enter, line ending "Newline"):
+// WiFi: connects to WIFI_SSID/WIFI_PASS below (defaults to the bench
+// rig-test-ap hotspot on drill-pi-1, 10.42.0.x). To point it at a
+// different network, edit the two #defines and re-flash — no runtime
+// config page, no login screen. Once connected, watch Serial at boot for
+// the IP, or check the Pi's DHCP leases (10.42.0.x) — then just open
+// that IP in a browser.
+//
+// USB SERIAL COMMANDS (open Serial Monitor, 115200 baud, line ending
+// "Newline") — same functionality as the web page, useful if WiFi is
+// down or you don't know the IP yet:
 //
 //   help                          — show this list
 //   baud <n>                      — set RS485 baud (e.g. baud 9600)
@@ -39,13 +50,25 @@
 // =============================================================================
 
 #include <vector>
+#include <WiFi.h>
+#include <WebServer.h>
 #include "modbus_debug.h"
 
 #define RS485_TXD 17
 #define RS485_RXD 18
 #define RS485_DE  21
 
+// Bench-test hotspot (drill-pi-1 / rig128), 10.42.0.1 gateway.
+// Edit + re-flash to point this at a different network — no config page.
+#define WIFI_SSID "rig-test-ap"
+#define WIFI_PASS "7804991970"
+
+WebServer server(80);
 String inputLine = "";
+
+// =============================================================================
+// SERIAL (USB) COMMAND INTERFACE
+// =============================================================================
 
 void printHelp() {
   Serial.println(F(
@@ -66,7 +89,6 @@ void printHelp() {
   ));
 }
 
-// --- small helpers ---
 std::vector<String> splitArgs(const String& s) {
   std::vector<String> out;
   int i = 0, len = s.length();
@@ -162,7 +184,7 @@ void doRaw(const String& fullLine) {
 void doLog(std::vector<String>& args) {
   int n = args.size() > 1 ? parseNum(args[1]) : 15;
   Serial.println("--- last " + String(n) + " log entries (newest first) ---");
-  dbgPrintLogHuman(n);
+  Serial.print(dbgLogHumanText(n));
 }
 
 void doStatus() {
@@ -239,17 +261,7 @@ void handleCommand(String line) {
   else Serial.println("Unknown command '" + cmd + "'. Type 'help' for the list.");
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(500);
-  dbgSerialInit(RS485_RXD, RS485_TXD, RS485_DE, 9600, 'N', 1);
-  Serial.println("\n=== sensor-debug: RS485/Modbus debugging tool ===");
-  Serial.println("USB serial only — no WiFi.");
-  printHelp();
-  Serial.print("> ");
-}
-
-void loop() {
+void pollSerial() {
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n') {
@@ -261,4 +273,268 @@ void loop() {
       inputLine += c;
     }
   }
+}
+
+// =============================================================================
+// WEB INTERFACE — plain HTTP, no login, no auth. Open the board's IP in
+// a browser and use it directly.
+// =============================================================================
+
+const char PAGE_HEAD[] =
+  "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+  "<title>sensor-debug</title><style>"
+  "body{font-family:monospace;background:#111;color:#ddd;margin:0;padding:12px;}"
+  "h1{color:#6cf;font-size:18px;margin:0 0 10px;}"
+  "h2{color:#6cf;font-size:14px;margin:16px 0 6px;border-bottom:1px solid #333;padding-bottom:4px;}"
+  "form{margin:0 0 10px;padding:8px;background:#1a1a1a;border-radius:6px;}"
+  "input,select{font-family:monospace;background:#222;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px 6px;margin:2px;}"
+  "button{font-family:monospace;background:#2a5;color:#fff;border:none;border-radius:4px;padding:6px 12px;margin:2px;cursor:pointer;}"
+  "button.danger{background:#a33;}"
+  "pre{background:#000;color:#8f8;padding:8px;border-radius:6px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;}"
+  "a{color:#6cf;}"
+  ".row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}"
+  "</style></head><body>"
+  "<h1>sensor-debug \xe2\x80\x94 RS485/Modbus tool</h1>";
+
+const char PAGE_FOOT[] = "</body></html>";
+
+String htmlEscape(const String& s) {
+  String out;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '<') out += "&lt;";
+    else if (c == '>') out += "&gt;";
+    else if (c == '&') out += "&amp;";
+    else out += c;
+  }
+  return out;
+}
+
+void handleRoot() {
+  SerialCfg sc = dbgGetSerialCfg();
+  String h = PAGE_HEAD;
+
+  h += "<div>IP: " + WiFi.localIP().toString() + " &nbsp; RSSI: " + String(WiFi.RSSI()) + " dBm &nbsp; "
+       "<a href='/log'>traffic log</a></div>";
+
+  h += "<h2>Serial config: " + String(sc.baud) + " baud, 8" + String(sc.parity) + String(sc.stopBits) + "</h2>";
+  h += "<form action='/config' method='GET'><div class='row'>"
+       "<select name='baud'>";
+  for (uint32_t b : {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200}) {
+    h += "<option value='" + String(b) + "'" + (b == sc.baud ? " selected" : "") + ">" + String(b) + "</option>";
+  }
+  h += "</select>"
+       "<select name='parity'>"
+       "<option value='N'" + String(sc.parity == 'N' ? " selected" : "") + ">None</option>"
+       "<option value='E'" + String(sc.parity == 'E' ? " selected" : "") + ">Even</option>"
+       "<option value='O'" + String(sc.parity == 'O' ? " selected" : "") + ">Odd</option>"
+       "</select>"
+       "<select name='stop'>"
+       "<option value='1'" + String(sc.stopBits == 1 ? " selected" : "") + ">1 stop</option>"
+       "<option value='2'" + String(sc.stopBits == 2 ? " selected" : "") + ">2 stop</option>"
+       "</select>"
+       "<button type='submit'>Apply</button>"
+       "</div></form>";
+
+  h += "<h2>Bus scan</h2>"
+       "<form action='/scan' method='GET'><div class='row'>"
+       "Max address: <input type='number' name='max' value='20' min='1' max='247' style='width:60px'>"
+       "<button type='submit'>Scan</button>"
+       "</div></form>";
+
+  h += "<h2>Passive sniff (no TX)</h2>"
+       "<form action='/sniff' method='GET'><div class='row'>"
+       "Seconds: <input type='number' name='secs' value='5' min='1' max='30' style='width:60px'>"
+       "<button type='submit'>Sniff</button>"
+       "</div></form>";
+
+  h += "<h2>Read registers</h2>"
+       "<form action='/read' method='GET'><div class='row'>"
+       "Slave: <input name='sid' value='1' style='width:50px'>"
+       "FC: <select name='fc'><option value='3'>03</option><option value='4'>04</option></select>"
+       "Reg: <input name='reg' value='0x0000' style='width:70px'>"
+       "Count: <input name='count' value='1' style='width:50px'>"
+       "<button type='submit'>Read</button>"
+       "</div></form>";
+
+  h += "<h2>Write register (FC06)</h2>"
+       "<form action='/write' method='GET'><div class='row'>"
+       "Slave: <input name='sid' value='1' style='width:50px'>"
+       "Reg: <input name='reg' value='0x0000' style='width:70px'>"
+       "Value: <input name='val' value='0' style='width:70px'>"
+       "<button type='submit' class='danger' onclick=\"return confirm('Write this register?');\">Write</button>"
+       "</div></form>";
+
+  h += "<h2>Raw hex send</h2>"
+       "<form action='/raw' method='GET'><div class='row'>"
+       "<input name='hex' value='01 03 00 00 00 01 84 0A' style='width:260px'>"
+       "<button type='submit'>Send</button>"
+       "</div></form>";
+
+  h += PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
+void handleConfig() {
+  SerialCfg sc = dbgGetSerialCfg();
+  uint32_t baud = server.hasArg("baud") ? server.arg("baud").toInt() : sc.baud;
+  char parity = server.hasArg("parity") ? server.arg("parity")[0] : sc.parity;
+  int stop = server.hasArg("stop") ? server.arg("stop").toInt() : sc.stopBits;
+  dbgSerialApply(baud, parity, stop);
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleScan() {
+  int maxAddr = server.hasArg("max") ? server.arg("max").toInt() : 20;
+  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr > 247) maxAddr = 247;
+
+  String out = "Scanning slave addresses 1-" + String(maxAddr) + "...\n";
+  int found = 0;
+  for (int addr = 1; addr <= maxAddr; addr++) {
+    ModbusResult r4 = dbgReadRegs((uint8_t)addr, 4, 0x0000, 1, 300);
+    if (r4.ok) { out += "  addr " + String(addr) + " responded to FC04\n"; found++; continue; }
+    ModbusResult r3 = dbgReadRegs((uint8_t)addr, 3, 0x0000, 1, 300);
+    if (r3.ok) { out += "  addr " + String(addr) + " responded to FC03\n"; found++; }
+  }
+  out += "Scan done. " + String(found) + " address(es) responded.";
+
+  String h = String(PAGE_HEAD) + "<h2>Scan result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
+void handleSniff() {
+  int secs = server.hasArg("secs") ? server.arg("secs").toInt() : 5;
+  if (secs < 1) secs = 1;
+  if (secs > 30) secs = 30;
+
+  String out = "Sniffing passively for " + String(secs) + "s (no TX)...\n";
+  unsigned long deadline = millis() + (unsigned long)secs * 1000;
+  uint8_t buf[64];
+  int n = 0;
+  unsigned long lastByte = 0;
+  while (millis() < deadline) {
+    if (dbgSerialAvailable()) {
+      if (n < (int)sizeof(buf)) buf[n++] = dbgSerialReadByte();
+      else dbgSerialReadByte();
+      lastByte = millis();
+    } else if (n > 0 && millis() - lastByte > 20) {
+      out += "  RX: " + bytesToHex(buf, n) + "\n";
+      n = 0;
+    }
+  }
+  if (n > 0) out += "  RX: " + bytesToHex(buf, n) + "\n";
+  out += "Sniff done.";
+
+  String h = String(PAGE_HEAD) + "<h2>Sniff result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
+void handleReadWeb() {
+  uint8_t sid = server.hasArg("sid") ? (uint8_t)parseNum(server.arg("sid")) : 1;
+  uint8_t fc = server.hasArg("fc") ? (uint8_t)parseNum(server.arg("fc")) : 3;
+  uint16_t reg = server.hasArg("reg") ? (uint16_t)parseNum(server.arg("reg")) : 0;
+  uint8_t count = server.hasArg("count") ? (uint8_t)parseNum(server.arg("count")) : 1;
+
+  String out = "Reading slave " + String(sid) + ", FC" + String(fc) + ", reg 0x" + String(reg, HEX) + ", count " + String(count) + "...\n";
+  ModbusResult r = dbgReadRegs(sid, fc, reg, count);
+  if (r.ok) {
+    out += "OK \xe2\x80\x94 reply from slave " + String(r.actualSlaveId) + ":\n";
+    for (int i = 0; i < r.regCount; i++) {
+      out += "  #" + String(i) + " = " + String(r.regs[i]) + " (0x" + String(r.regs[i], HEX) + ")\n";
+    }
+  } else {
+    out += "FAILED \xe2\x80\x94 " + r.error + "\n";
+  }
+  out += "TX: " + r.txHex + "\n";
+  if (r.rxHex.length()) out += "RX: " + r.rxHex;
+
+  String h = String(PAGE_HEAD) + "<h2>Read result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
+void handleWriteWeb() {
+  uint8_t sid = server.hasArg("sid") ? (uint8_t)parseNum(server.arg("sid")) : 1;
+  uint16_t reg = server.hasArg("reg") ? (uint16_t)parseNum(server.arg("reg")) : 0;
+  uint16_t val = server.hasArg("val") ? (uint16_t)parseNum(server.arg("val")) : 0;
+
+  String out = "Writing slave " + String(sid) + ", reg 0x" + String(reg, HEX) + " = " + String(val) + " (0x" + String(val, HEX) + ")...\n";
+  ModbusResult r = dbgWriteReg(sid, reg, val);
+  if (r.ok) out += "OK \xe2\x80\x94 " + (r.error.length() ? r.error : String("confirmed")) + "\n";
+  else out += "FAILED \xe2\x80\x94 " + r.error + "\n";
+  out += "TX: " + r.txHex + "\n";
+  if (r.rxHex.length()) out += "RX: " + r.rxHex;
+
+  String h = String(PAGE_HEAD) + "<h2>Write result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
+void handleRawWeb() {
+  String hex = server.hasArg("hex") ? server.arg("hex") : "";
+  String out = "Sending raw: " + hex + "\n";
+  String rx = dbgRawHexSend(hex, 800);
+  out += rx.length() ? ("Reply: " + rx) : String("No reply.");
+
+  String h = String(PAGE_HEAD) + "<h2>Raw send result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
+void handleLogWeb() {
+  String out = dbgLogHumanText(80);
+  String h = String(PAGE_HEAD) + "<h2>Traffic log (last 80, newest first)</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
+void setupWebServer() {
+  server.on("/", handleRoot);
+  server.on("/config", handleConfig);
+  server.on("/scan", handleScan);
+  server.on("/sniff", handleSniff);
+  server.on("/read", handleReadWeb);
+  server.on("/write", handleWriteWeb);
+  server.on("/raw", handleRawWeb);
+  server.on("/log", handleLogWeb);
+  server.begin();
+  Serial.println("[Web] Server started, no login required.");
+}
+
+// =============================================================================
+// SETUP / LOOP
+// =============================================================================
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  dbgSerialInit(RS485_RXD, RS485_TXD, RS485_DE, 9600, 'N', 1);
+  Serial.println("\n=== sensor-debug: RS485/Modbus debugging tool ===");
+  printHelp();
+
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  Serial.printf("[WiFi] Connecting to \"%s\"...\n", WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  unsigned long deadline = millis() + 15000;
+  while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("[WiFi] Connected. Open http://%s/ in a browser — no login needed.\n",
+      WiFi.localIP().toString().c_str());
+    setupWebServer();
+  } else {
+    Serial.println("[WiFi] Could not connect. Web page unavailable — USB serial commands still work.");
+    Serial.println("[WiFi] Edit WIFI_SSID/WIFI_PASS at the top of sensor-debug.ino and re-flash to change network.");
+  }
+
+  Serial.print("> ");
+}
+
+void loop() {
+  pollSerial();
+  if (WiFi.status() == WL_CONNECTED) server.handleClient();
 }
