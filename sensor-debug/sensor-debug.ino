@@ -96,9 +96,10 @@ void printHelp() {
     "                                entirely - measures real bit period + brute-\n"
     "                                forces every byte alignment against Modbus CRC\n"
     "                                (default 500ms window, use during a known burst)\n"
-    "  recover                       SM7779 recovery sweep: broadcasts 0x0068/0x0069\n"
-    "                                reset writes across all parity/stop combos at\n"
-    "                                9600, checking for a live response after each\n"
+    "  recover                       SM7779 recovery sweep: writes 0x0068/0x0069\n"
+    "                                reset values across all parity/stop combos at\n"
+    "                                9600, checking for a real ack after each. If\n"
+    "                                nothing acks anywhere, auto-runs a 10s sniff too\n"
   ));
 }
 
@@ -231,11 +232,14 @@ void doStop(std::vector<String>& args) {
   doStatus();
 }
 
-void doSniff(std::vector<String>& args) {
-  int secs = args.size() > 1 ? parseNum(args[1]) : 5;
+// Shared passive-listen implementation used by the USB command, the web
+// page, and appended automatically at the end of the recovery sweep -
+// one code path, three callers. Pure receive, no TX, so it's always
+// safe to call regardless of what mode the port is otherwise in.
+String dbgSniffCapture(int secs) {
   bool wasAutoOn = dbgAutoSniffGetEnabled();
   dbgAutoSniffSetEnabled(false);
-  Serial.printf("Sniffing bus passively for %d seconds (no TX)...\n", secs);
+  String out;
   unsigned long deadline = millis() + (unsigned long)secs * 1000;
   uint8_t buf[64];
   int n = 0;
@@ -246,13 +250,21 @@ void doSniff(std::vector<String>& args) {
       else dbgSerialReadByte();
       lastByte = millis();
     } else if (n > 0 && millis() - lastByte > 20) {
-      Serial.println("  RX: " + bytesToHex(buf, n));
+      out += "  RX: " + bytesToHex(buf, n) + "\n";
       n = 0;
     }
   }
-  if (n > 0) Serial.println("  RX: " + bytesToHex(buf, n));
-  Serial.println("Sniff done.");
+  if (n > 0) out += "  RX: " + bytesToHex(buf, n) + "\n";
+  if (out.length() == 0) out = "  (nothing captured)\n";
   dbgAutoSniffSetEnabled(wasAutoOn);
+  return out;
+}
+
+void doSniff(std::vector<String>& args) {
+  int secs = args.size() > 1 ? parseNum(args[1]) : 5;
+  Serial.printf("Sniffing bus passively for %d seconds (no TX)...\n", secs);
+  Serial.print(dbgSniffCapture(secs));
+  Serial.println("Sniff done.");
 }
 
 void doBitscope(std::vector<String>& args) {
@@ -389,10 +401,17 @@ String dbgRecoverySweep() {
       "  2. It needs a power cycle before register writes take effect\n"
       "  3. Those registers control something other than serial framing (comm mode may mean RS232\n"
       "     vs RS485, or half/full duplex, not parity/stop bits)\n"
-      "Next: run 'sniff 10' right after this to check if the ~5.2s auto-burst pattern changed at all "
-      "(even a byte-count or timing change would prove something landed). If the burst is byte-for-byte "
-      "identical to before, try a power cycle next - some sensors only apply config writes on boot.";
+      "Auto-sniff below shows whether the ~5.2s auto-burst pattern changed at all (even a byte-count or "
+      "timing change would prove something landed). If it's byte-for-byte identical to before, try a "
+      "power cycle next - some sensors only apply config writes on boot.\n";
+
+    report += "\n--- Auto-sniff (10s, no TX, checking the sensor's own auto-burst pattern) ---\n";
+    report += dbgSniffCapture(10);
   }
+  // If a working framing was already confirmed above, that report block
+  // says exactly where the port was left and why - don't touch serial
+  // config again here or we'd undo it.
+
   return report;
 }
 
@@ -429,7 +448,7 @@ void handleCommand(String line) {
   else if (cmd == "sniff") doSniff(args);
   else if (cmd == "autosniff") doAutoSniff(args);
   else if (cmd == "bitscope") doBitscope(args);
-  else if (cmd == "recover") { Serial.println("Starting recovery sweep (6 framing combos, ~3-4s)..."); Serial.print(dbgRecoverySweep()); }
+  else if (cmd == "recover") { Serial.println("Starting recovery sweep (6 framing combos + auto-sniff if nothing acks, ~4-15s)..."); Serial.print(dbgRecoverySweep()); }
   else Serial.println("Unknown command '" + cmd + "'. Type 'help' for the list.");
 }
 
@@ -538,9 +557,10 @@ void handleRoot() {
 
   h += "<h2>SM7779 Recovery Sweep</h2>"
        "<div class='row'>For a sensor stuck outputting garbage after writes to 0x0068/0x0069. "
-       "Cycles all 6 parity/stop combos at 9600 baud, broadcasting reset writes (1 -&gt; 0x0068, "
-       "1 -&gt; 0x0069) at each, then checks for a live response at standard 8N1. Stops at the "
-       "first combo that works and leaves the port there. Takes a few seconds.</div>"
+       "Cycles all 6 parity/stop combos at 9600 baud, writing reset values (1 -&gt; 0x0068, "
+       "1 -&gt; 0x0069) to address 1 at each and checking for a real ack. Stops at the first combo "
+       "that acks. If nothing acks anywhere, automatically runs a 10s passive sniff too so you can "
+       "see if the sensor's auto-burst changed at all. Takes up to ~15s.</div>"
        "<form action='/recover' method='GET'><div class='row'>"
        "<button type='submit' class='danger' onclick=\"return confirm('Broadcast reset writes across all framing combos?');\">Run Recovery Sweep</button>"
        "</div></form>";
