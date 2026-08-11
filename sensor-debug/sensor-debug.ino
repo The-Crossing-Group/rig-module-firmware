@@ -51,6 +51,11 @@
 //   log [n]                       — show last n traffic log entries (default 15)
 //   sniff <seconds>               — listen passively, print any unsolicited
 //                                    bytes seen on the bus (no TX at all)
+//   qdw90a [slaveId]              — labeled probe of all 7 QDW90A/QDY30A
+//                                    registers (address, baud, unit, decimals,
+//                                    value, zero point, full-scale), default
+//                                    slave 1, at whatever baud/parity/stop is
+//                                    currently active
 // =============================================================================
 
 #include <vector>
@@ -100,6 +105,8 @@ void printHelp() {
     "                                reset values across all parity/stop combos at\n"
     "                                9600, checking for a real ack after each. If\n"
     "                                nothing acks anywhere, auto-runs a 10s sniff too\n"
+    "  qdw90a [slaveId]              labeled read of all 7 QDW90A/QDY30A registers\n"
+    "                                (default slave 1)\n"
   ));
 }
 
@@ -137,6 +144,81 @@ void doScan(std::vector<String>& args) {
     if (r3.ok) { Serial.printf("  addr %d responded to FC03\n", addr); found++; }
   }
   Serial.printf("Scan done. %d address(es) responded.\n", found);
+}
+
+// =============================================================================
+// QDW90A / QDY30A PRESSURE SENSOR — labeled 7-register probe. Confirmed
+// register map (from the production waveshare-s3-sensors firmware's
+// Multi-Register Read preset, sourced from the HA community thread on
+// this OEM family): 7 holding registers (FC03) starting at 0x0000:
+//   0: slave address (1-255)
+//   1: baud code (0=1200 1=2400 2=4800 3=9600 4=19200 5=38400 6=57600 7=115200)
+//   2: pressure unit code (0=none 1=CM 2=MM 3=MPa 4=Pa 5=KPa 6=mA - labels
+//      sometimes unreliable per HA community reports, verify empirically)
+//   3: decimal places code (0=#### 1=###.# 2=##.## 3=#.###)
+//   4: measured value (signed, apply decimal code - e.g. code 2 + raw 123 = 1.23)
+//   5: range zero point
+//   6: range full-scale point
+// Same wire-format facts apply as the production preset: FC03 holding
+// registers, default slave ID 1, default baud 9600 8N1 (same family as
+// the SM7779, hence the address collision history when both are on the
+// bus at once with factory defaults).
+// =============================================================================
+static const char* QDW90A_LABELS[7] = {
+  "Slave address (1-255)",
+  "Baud code (0=1200 1=2400 2=4800 3=9600 4=19200 5=38400 6=57600 7=115200)",
+  "Pressure unit code (0=none 1=CM 2=MM 3=MPa 4=Pa 5=KPa 6=mA - verify empirically)",
+  "Decimal places code (0=#### 1=###.# 2=##.## 3=#.###)",
+  "Measured value (signed, apply decimal code)",
+  "Range zero point",
+  "Range full-scale point"
+};
+
+// Applies the decimal-places code (register 3) to the raw measured value
+// (register 4) so the printed output shows an actual number, not just
+// raw counts - e.g. decimals=2, raw=123 -> "1.23".
+String qdw90aScaledValue(uint16_t rawValue, uint16_t decimalsCode) {
+  int16_t signedVal = (int16_t)rawValue; // register 4 is documented signed
+  int decimals = (decimalsCode <= 3) ? (int)decimalsCode : 0;
+  char buf[24];
+  dtostrf(signedVal / pow(10, decimals), 0, decimals, buf);
+  return String(buf);
+}
+
+// Shared report builder used by both the USB command and the web page -
+// one code path, two output surfaces (same pattern as dbgSniffCapture).
+String qdw90aReport(uint8_t sid) {
+  SerialCfg sc = dbgGetSerialCfg();
+  String out = "Probing QDW90A/QDY30A at slave " + String(sid) + ", FC03, reg 0x0000, count 7 ("
+    + String(sc.baud) + " baud 8" + String(sc.parity) + String(sc.stopBits) + ")...\n";
+  ModbusResult r = dbgReadRegs(sid, 3, 0x0000, 7, 500);
+  if (!r.ok) {
+    out += "FAILED - " + r.error + "\n";
+    out += "  TX: " + r.txHex + "\n";
+    if (r.rxHex.length()) out += "  RX: " + r.rxHex + "\n";
+    out += "No reply at all usually means: wrong baud/framing, no 24V power to the sensor, "
+      "or A/B (data pair) wires swapped/miswired. A single stray byte back (not a full 7-register "
+      "reply) usually means power+wiring are close but framing/baud is still off.\n";
+    return out;
+  }
+  out += "OK - reply from slave " + String(r.actualSlaveId) + ":\n";
+  for (int i = 0; i < r.regCount && i < 7; i++) {
+    char line[160];
+    snprintf(line, sizeof(line), "  #%d = %u (0x%04X)  %s\n", i, r.regs[i], r.regs[i], QDW90A_LABELS[i]);
+    out += line;
+  }
+  if (r.regCount >= 5) {
+    String scaled = qdw90aScaledValue(r.regs[4], r.regs[3]);
+    out += "  -> Decoded pressure reading: " + scaled + " (unit per register #2's code above)\n";
+  }
+  out += "  TX: " + r.txHex + "\n";
+  out += "  RX: " + r.rxHex + "\n";
+  return out;
+}
+
+void doQdw90a(std::vector<String>& args) {
+  uint8_t sid = args.size() > 1 ? (uint8_t)parseNum(args[1]) : 1;
+  Serial.print(qdw90aReport(sid));
 }
 
 void doRead(std::vector<String>& args) {
@@ -449,6 +531,7 @@ void handleCommand(String line) {
   else if (cmd == "autosniff") doAutoSniff(args);
   else if (cmd == "bitscope") doBitscope(args);
   else if (cmd == "recover") { Serial.println("Starting recovery sweep (6 framing combos + auto-sniff if nothing acks, ~4-15s)..."); Serial.print(dbgRecoverySweep()); }
+  else if (cmd == "qdw90a") doQdw90a(args);
   else Serial.println("Unknown command '" + cmd + "'. Type 'help' for the list.");
 }
 
@@ -563,6 +646,16 @@ void handleRoot() {
        "see if the sensor's auto-burst changed at all. Takes up to ~15s.</div>"
        "<form action='/recover' method='GET'><div class='row'>"
        "<button type='submit' class='danger' onclick=\"return confirm('Broadcast reset writes across all framing combos?');\">Run Recovery Sweep</button>"
+       "</div></form>";
+
+  h += "<h2>QDW90A / QDY30A Pressure Sensor Probe</h2>"
+       "<div class='row'>Labeled read of all 7 registers (address, baud, unit, decimals, value, "
+       "zero point, full-scale) at whatever baud/parity/stop is set above. Same family/register map "
+       "as the production firmware's Multi-Register Read QDW90A preset. Needs genuine 24V power - "
+       "won't respond at 12V.</div>"
+       "<form action='/qdw90a' method='GET'><div class='row'>"
+       "Slave: <input name='sid' value='1' style='width:50px'>"
+       "<button type='submit'>Probe QDW90A</button>"
        "</div></form>";
 
   h += "<h2>Read registers</h2>"
@@ -701,6 +794,15 @@ void handleRecoverWeb() {
   server.send(200, "text/html", h);
 }
 
+void handleQdw90aWeb() {
+  uint8_t sid = server.hasArg("sid") ? (uint8_t)parseNum(server.arg("sid")) : 1;
+  String out = qdw90aReport(sid);
+  Serial.println("[Web] " + out);
+
+  String h = String(PAGE_HEAD) + "<h2>QDW90A probe result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
 void handleReadWeb() {
   uint8_t sid = server.hasArg("sid") ? (uint8_t)parseNum(server.arg("sid")) : 1;
   uint8_t fc = server.hasArg("fc") ? (uint8_t)parseNum(server.arg("fc")) : 3;
@@ -767,6 +869,7 @@ void setupWebServer() {
   server.on("/autosniff", handleAutosniff);
   server.on("/bitscope", handleBitscopeWeb);
   server.on("/recover", handleRecoverWeb);
+  server.on("/qdw90a", handleQdw90aWeb);
   server.on("/read", handleReadWeb);
   server.on("/write", handleWriteWeb);
   server.on("/raw", handleRawWeb);
