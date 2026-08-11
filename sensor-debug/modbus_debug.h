@@ -3,9 +3,10 @@
 //
 // Deliberately dumber and more permissive than the "real" firmware's
 // modbus.h: no config persistence, no auto-detect-and-enable, no per-
-// sensor scaling. Just: send bytes, read bytes, log everything, let the
-// human look at the raw wire data and decide what's going on. Built after
-// the SM7779 radar sensor ended up stuck outputting garbage following a
+// sensor scaling, no WiFi/web dependency at all. Just: send bytes, read
+// bytes, log everything, let the human look at the raw wire data and
+// decide what's going on via the USB Serial Monitor. Built after the
+// SM7779 radar sensor ended up stuck outputting garbage following a
 // couple of experimental register writes (0x0068 comm mode, 0x0069
 // protocol type) — the working theory is those writes may have changed
 // the sensor's own SERIAL framing (parity/stop bits), not just baud. The
@@ -110,23 +111,24 @@ static void dbgLog(const String& label, const uint8_t* tx, int txLen,
   if (_dbgLogCount < DEBUG_LOG_SIZE) _dbgLogCount++;
 }
 
-// Returns up to maxCount entries, newest first, as a JSON array string.
-String dbgGetLogJson(int maxCount) {
+// Prints the last maxCount log entries to Serial, newest first, in a
+// human-readable table (no JSON needed — this tool is USB-serial only).
+void dbgPrintLogHuman(int maxCount) {
   int n = min(maxCount, _dbgLogCount);
-  String out = "[";
+  if (n == 0) { Serial.println("(no traffic logged yet)"); return; }
   for (int i = 0; i < n; i++) {
     int idx = (_dbgLogHead - 1 - i + DEBUG_LOG_SIZE * 2) % DEBUG_LOG_SIZE;
     DebugLogEntry& e = _dbgLog[idx];
-    if (i) out += ",";
-    out += "{\"ageMs\":" + String(millis() - e.ms) +
-           ",\"label\":\"" + e.label + "\"" +
-           ",\"tx\":\"" + e.tx + "\"" +
-           ",\"rx\":\"" + e.rx + "\"" +
-           ",\"result\":\"" + e.result + "\"}";
+    float ageSec = (millis() - e.ms) / 1000.0f;
+    Serial.printf("[%6.1fs ago] %-12s TX: %-28s RX: %-28s %s\n",
+      ageSec, e.label.c_str(), e.tx.c_str(), e.rx.c_str(), e.result.c_str());
   }
-  out += "]";
-  return out;
 }
+
+// Passthrough helpers so the .ino's passive sniff loop doesn't need to
+// reach into the HardwareSerial pointer directly.
+bool dbgSerialAvailable() { return _dbgSerial && _dbgSerial->available(); }
+uint8_t dbgSerialReadByte() { return _dbgSerial ? (uint8_t)_dbgSerial->read() : 0; }
 
 // =============================================================================
 // RAW WIRE ACCESS — no Modbus framing assumed at all. Sends exactly the

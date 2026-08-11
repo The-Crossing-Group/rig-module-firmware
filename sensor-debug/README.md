@@ -1,34 +1,17 @@
-# sensor-debug — Standalone RS485/Modbus Debugging Tool
+# sensor-debug — Standalone RS485/Modbus Debugging Tool (USB serial only)
 
 A separate, minimal sketch for digging into a misbehaving RS485/Modbus
 sensor — built after the SM7779 radar sensor got stuck outputting garbage
 following some experimental register writes on the "real" firmware
 (`waveshare-s3-sensors/`).
 
-**This does not touch or replace that firmware.** It's a different sketch
-you flash to the same board (or a spare one) when you need low-level
-visibility, then flash the real firmware back when you're done.
+**No WiFi. No web page. No setup steps.** Plug the board into USB, open
+the Arduino Serial Monitor at 115200 baud (line ending: Newline), type
+commands, read results.
 
-## What it gives you (that the production firmware doesn't)
-
-- **Serial framing control** — baud rate, parity (N/E/O), stop bits (1/2),
-  changeable live from the web page. The production firmware only ever
-  varies baud; if an undocumented register write changed the sensor's
-  parity/stop-bit framing instead of (or in addition to) baud, this is
-  the only way to find that from software alone.
-- **Live traffic log** — every TX/RX, raw or framed, 80 entries, newest
-  first, auto-refreshing on the page. No need to watch Serial Monitor.
-- **Bus scan** — FC03/FC04 probe across a range of addresses.
-- **Register read** (FC03/FC04, any slave/register/count) and **register
-  write** (FC06, any slave/register/value) — same tolerant reply parsing
-  as the production firmware (accepts whatever function code/register
-  count a sensor actually answers with, treats 0/250 as broadcast
-  addresses whose reply legitimately comes back from a different
-  address).
-- **Raw hex send** — bypasses Modbus framing entirely. Type in exact
-  bytes, they go out exactly as typed with DE toggled around the
-  transmission, whatever comes back is shown as hex. Useful if you
-  suspect the sensor isn't speaking standard Modbus RTU at all anymore.
+**This does not touch or replace the production firmware.** It's a
+different sketch you flash to the same board (or a spare one) when you
+need low-level visibility, then flash the real firmware back when done.
 
 ## Flashing
 
@@ -42,21 +25,52 @@ Same hardware/board settings as `waveshare-s3-sensors/`:
 
 RS485 wiring is identical: TX=GPIO17, RX=GPIO18, DE/RE=GPIO21.
 
-## First boot / WiFi
+After flashing, open **Tools → Serial Monitor**, set baud to **115200**
+and line ending to **Newline**. You'll see a `> ` prompt.
 
-If it can't connect to a saved WiFi network (or none is saved yet), it
-starts a setup AP:
-- **SSID:** `sensor-debug-setup`
-- **Password:** `debug1234`
-- Connect and go to `192.168.4.1`, enter your real WiFi SSID/password,
-  save. It reboots and connects.
+## Commands
 
-Once online, check your router/AP client list (or the Pi's `rig-test-ap`
-hotspot if that's what you're using — see TOOLS.md) for its IP, or watch
-the Serial Monitor at boot — it prints its IP once connected.
+```
+help                          show the command list
+baud <n>                      set RS485 baud, e.g. baud 9600
+parity <n|e|o>                set parity: none/even/odd
+stop <1|2>                    set stop bits
+status                        show current serial config
+scan [maxAddr]                scan slave addresses 1..maxAddr (default 20)
+read <slaveId> <fc> <reg> [count]
+                               FC03/FC04 read, e.g.: read 1 3 0x0000 2
+write <slaveId> <reg> <value> FC06 write (asks "type y to confirm")
+write! <slaveId> <reg> <value> FC06 write, no confirmation prompt
+raw <hex bytes>               send exact bytes, e.g.: raw 01 03 00 00 00 01 84 0A
+log [n]                       show last n traffic log entries (default 15)
+sniff <seconds>               listen passively for unsolicited bus traffic (no TX)
+```
 
-To reconfigure WiFi later without re-flashing, visit `/wifi` on the
-running tool.
+## What it gives you (that the production firmware doesn't)
+
+- **Serial framing control** — baud, parity (N/E/O), stop bits (1/2),
+  changeable live with `baud`/`parity`/`stop` commands. The production
+  firmware only ever varies baud; if an undocumented register write
+  changed the sensor's parity/stop-bit framing instead of (or in
+  addition to) baud, this is the only way to find that from software
+  alone.
+- **Live traffic log** — every TX/RX, raw or framed, 80 entries. `log`
+  prints them straight to Serial Monitor.
+- **Passive sniff** — `sniff 10` listens for 10 seconds without
+  transmitting anything, in case the sensor is spontaneously streaming
+  data (some sensors have an "auto-report" mode) rather than waiting to
+  be polled.
+- **Bus scan** — FC03/FC04 probe across a range of addresses.
+- **Register read** (FC03/FC04, any slave/register/count) and **register
+  write** (FC06, any slave/register/value) — same tolerant reply parsing
+  as the production firmware (accepts whatever function code/register
+  count a sensor actually answers with, treats 0/250 as broadcast
+  addresses whose reply legitimately comes back from a different
+  address).
+- **Raw hex send** — bypasses Modbus framing entirely. Type in exact
+  bytes, they go out exactly as typed with DE toggled around the
+  transmission, whatever comes back is shown as hex. Useful if you
+  suspect the sensor isn't speaking standard Modbus RTU at all anymore.
 
 ## Using it on the SM7779 recovery
 
@@ -67,20 +81,22 @@ which would explain why standard 8N1 reads at every baud still come back
 as garbage/zeros.
 
 Suggested order of attack:
-1. **Bus scan** at 9600 8N1 (the sensor's documented default) — see if
-   anything answers at all.
-2. If nothing, sweep baud (2400/4800/9600/19200/38400/57600/115200) at
-   8N1 via the Serial Config panel + Bus Scan again at each.
-3. If still nothing, sweep parity (8E1, 8O1) and stop bits (8N2, 8E2,
-   8O2) at each baud — this is the framing possibility the production
-   firmware can't test at all.
-4. Once *anything* answers to a scan, use Register Read against register
-   0x0000 (liquid level) and 0x0064-0x0069 (model code through protocol
-   type) to see what state the sensor is actually in.
-5. If a valid reply comes back from a DIFFERENT slave address than
-   expected (the "actualSlaveId" shown in the read result), that's fine
-   — broadcast/mismatched replies are handled, same as the production
-   firmware's v1.8.1 fix.
+1. `status` to confirm you're starting at 9600 8N1 (the sensor's
+   documented default), then `scan` — see if anything answers at all.
+2. If nothing, `baud 4800` (or 2400/19200/38400/57600/115200) and `scan`
+   again at each.
+3. If still nothing, sweep parity (`parity e`, `parity o`) and stop bits
+   (`stop 2`) at each baud — this is the framing possibility the
+   production firmware can't test at all.
+4. `sniff 10` at any point to check if the sensor is spontaneously
+   streaming data instead of waiting to be polled.
+5. Once *anything* answers to a `scan`, use `read <addr> 3 0x0000 1`
+   (liquid level) and `read <addr> 3 0x0064 6` (model code through
+   protocol type) to see what state the sensor is actually in.
+6. If a valid reply comes back from a DIFFERENT slave address than
+   expected, that's fine — the tool reports it and shows the data
+   anyway, same as the production firmware's v1.8.1 broadcast fix.
 
-No feature of this tool writes anything to the sensor automatically —
-every write (register write, raw hex) is a manual, confirmed action.
+No command writes anything to the sensor without you typing it —
+`write` asks you to confirm with `y`; `write!` skips the prompt only if
+you use it explicitly. `raw` sends exactly what you type, nothing more.

@@ -1,372 +1,264 @@
 // =============================================================================
-// sensor-debug.ino — Standalone RS485/Modbus debugging tool
+// sensor-debug.ino — Standalone RS485/Modbus debugging tool (USB SERIAL ONLY)
+//
+// No WiFi, no web server, no setup AP. Plug the board into USB, open the
+// Serial Monitor (115200 baud), type commands, read the results. That's
+// the whole tool.
 //
 // Built after the SM7779 radar sensor got stuck outputting garbage
-// following experimental register writes. Rather than keep iterating on
-// the "real" firmware (waveshare-s3-sensors/) blind, this is a minimal,
-// separate sketch focused entirely on raw visibility into what's
-// actually happening on the RS485 bus — no config persistence, no
-// per-sensor scaling/polling loop, no telemetry POST. Just: connect to
-// WiFi, serve a web page with live traffic log + every debugging tool
-// you'd want, and get out of the way.
-//
-// Does NOT touch or depend on waveshare-s3-sensors/ at all — separate
-// sketch, separate folder, flash it to the SAME board (or a spare) when
-// you need to dig into a sensor that's misbehaving. Flash the real
-// firmware back when you're done.
+// following experimental register writes. Separate sketch, doesn't
+// touch or depend on the "real" firmware (waveshare-s3-sensors/) at all
+// — flash this to the same board (or a spare) when you need to dig into
+// a misbehaving sensor, flash the real firmware back when done.
 //
 // Hardware: Waveshare ESP32-S3-RS485-CAN
 //   RS485: TX=GPIO17, RX=GPIO18, DE/RE=GPIO21 (SP3485, HIGH=transmit)
-//   (CAN not wired up in this tool — RS485/Modbus debugging only)
 //
 // Arduino IDE board settings: same as waveshare-s3-sensors/
 //   Board: "ESP32S3 Dev Module", USB CDC On Boot: Enabled,
 //   Flash Size: 16MB, PSRAM: OPI PSRAM,
 //   Partition Scheme: 16M Flash (3MB APP/9.9MB FATFS)
 //
-// WiFi: on first boot (or if it can't connect), starts a setup AP named
-// "sensor-debug-setup" (password "debug1234") serving a captive-ish
-// config page at 192.168.4.1 to enter your WiFi SSID/password. Saved to
-// NVS (namespace "dbgwifi") so it reconnects automatically after that.
+// COMMANDS (type into Serial Monitor, press Enter, line ending "Newline"):
+//
+//   help                          — show this list
+//   baud <n>                      — set RS485 baud (e.g. baud 9600)
+//   parity <n|e|o>                — set parity: none/even/odd
+//   stop <1|2>                    — set stop bits
+//   status                        — show current serial config
+//   scan [maxAddr]                — scan slave addresses 1..maxAddr (default 20)
+//   read <slaveId> <fc> <reg> [count]
+//                                 — FC03/FC04 read, e.g.: read 1 3 0x0000 2
+//   write <slaveId> <reg> <value> — FC06 write single register (asks to confirm)
+//   write! <slaveId> <reg> <value>— FC06 write, no confirmation
+//   raw <hex bytes>               — send exact bytes, show exact reply
+//                                    e.g.: raw 01 03 00 00 00 01 84 0A
+//   log [n]                       — show last n traffic log entries (default 15)
+//   sniff <seconds>               — listen passively, print any unsolicited
+//                                    bytes seen on the bus (no TX at all)
 // =============================================================================
 
-#include <WiFi.h>
-#include <WebServer.h>
-#include <Preferences.h>
+#include <vector>
 #include "modbus_debug.h"
 
 #define RS485_TXD 17
 #define RS485_RXD 18
 #define RS485_DE  21
 
-WebServer server(80);
-Preferences wifiPrefs;
+String inputLine = "";
 
-String wifiSSID = "";
-String wifiPass = "";
-bool apMode = false;
-
-// -----------------------------------------------------------------------------
-// WIFI SETUP (minimal — this tool doesn't need the full self-heal logic
-// the production firmware has, just needs to reliably get online or fall
-// back to a setup AP)
-// -----------------------------------------------------------------------------
-void loadWifiCreds() {
-  wifiPrefs.begin("dbgwifi", true);
-  wifiSSID = wifiPrefs.getString("ssid", "");
-  wifiPass = wifiPrefs.getString("pass", "");
-  wifiPrefs.end();
+void printHelp() {
+  Serial.println(F(
+    "\n--- sensor-debug commands ---\n"
+    "  help                          show this list\n"
+    "  baud <n>                      set RS485 baud, e.g. baud 9600\n"
+    "  parity <n|e|o>                set parity: none/even/odd\n"
+    "  stop <1|2>                    set stop bits\n"
+    "  status                        show current serial config\n"
+    "  scan [maxAddr]                scan slave addresses 1..maxAddr (default 20)\n"
+    "  read <slaveId> <fc> <reg> [count]\n"
+    "                                FC03/FC04 read, e.g.: read 1 3 0x0000 2\n"
+    "  write <slaveId> <reg> <value> FC06 write (asks to confirm with 'y')\n"
+    "  write! <slaveId> <reg> <value> FC06 write, no confirmation\n"
+    "  raw <hex bytes>               send exact bytes, e.g.: raw 01 03 00 00 00 01 84 0A\n"
+    "  log [n]                       show last n traffic log entries (default 15)\n"
+    "  sniff <seconds>               listen passively for unsolicited bus traffic\n"
+  ));
 }
 
-void saveWifiCreds(const String& ssid, const String& pass) {
-  wifiPrefs.begin("dbgwifi", false);
-  wifiPrefs.putString("ssid", ssid);
-  wifiPrefs.putString("pass", pass);
-  wifiPrefs.end();
-}
-
-void startSetupAP() {
-  apMode = true;
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP("sensor-debug-setup", "debug1234");
-  Serial.println("[WiFi] Setup AP started: sensor-debug-setup / debug1234 @ 192.168.4.1");
-}
-
-bool tryConnectWifi(int timeoutMs = 10000) {
-  if (wifiSSID.length() == 0) return false;
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(wifiSSID.c_str(), wifiPass.c_str());
-  unsigned long deadline = millis() + timeoutMs;
-  while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
-    delay250();
+// --- small helpers ---
+std::vector<String> splitArgs(const String& s) {
+  std::vector<String> out;
+  int i = 0, len = s.length();
+  while (i < len) {
+    while (i < len && s[i] == ' ') i++;
+    int start = i;
+    while (i < len && s[i] != ' ') i++;
+    if (i > start) out.push_back(s.substring(start, i));
   }
-  return WiFi.status() == WL_CONNECTED;
+  return out;
 }
 
-void delay250() { delay(250); Serial.print("."); }
+uint32_t parseNum(const String& s) { return strtoul(s.c_str(), nullptr, 0); }
 
-// -----------------------------------------------------------------------------
-// WEB UI — single page, everything inline. Deliberately plain (no theme
-// switcher, no shared nav — this is a standalone tool, not part of the
-// dashboard family).
-// -----------------------------------------------------------------------------
-String htmlHeader(const String& title) {
-  String h = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
-  h += "<title>" + title + "</title><style>";
-  h += "body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#eee;margin:0;padding:16px;max-width:900px;margin:0 auto}";
-  h += "h1{font-size:20px}h3{border-bottom:2px solid #667eea;padding-bottom:4px;margin-top:24px}";
-  h += ".card{background:#252540;border-radius:8px;padding:12px;margin:8px 0;box-shadow:0 2px 10px rgba(0,0,0,0.3)}";
-  h += "input,select{background:#1a1a2e;color:#eee;border:1px solid #444;border-radius:4px;padding:6px;margin:2px}";
-  h += "button{background:#667eea;color:#fff;border:none;border-radius:4px;padding:8px 14px;margin:4px 2px;cursor:pointer}";
-  h += "button:hover{background:#5568d3}";
-  h += "table{width:100%;border-collapse:collapse;font-size:13px}";
-  h += "th,td{text-align:left;padding:4px 8px;border-bottom:1px solid #333}";
-  h += ".mono{font-family:monospace;font-size:12px}";
-  h += ".ok{color:#4ade80}.err{color:#f87171}.small{font-size:12px;color:#aaa}";
-  h += "label{display:inline-block;min-width:110px;font-size:13px}";
-  h += "</style></head><body>";
-  h += "<h1>&#128295; RS485/Modbus Sensor Debug Tool</h1>";
-  h += "<p class='small'>Standalone diagnostics — not connected to any rig telemetry. IP: " + WiFi.localIP().toString() + "</p>";
-  return h;
-}
-String htmlFooter() { return "</body></html>"; }
-
-void handleRoot() {
-  String h = htmlHeader("Sensor Debug");
-
-  SerialCfg sc = dbgGetSerialCfg();
-  h += "<h3>Serial Config</h3><div class='card'>";
-  h += "<div><label>Baud</label><select id='baud'>";
-  for (uint32_t b : {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200}) {
-    h += "<option value='" + String(b) + "'" + (b == sc.baud ? " selected" : "") + ">" + String(b) + "</option>";
+void printRegs(ModbusResult& r) {
+  for (int i = 0; i < r.regCount; i++) {
+    uint16_t v = r.regs[i];
+    Serial.printf("  #%d = %u (0x%04X)\n", i, v, v);
   }
-  h += "</select></div>";
-  h += "<div><label>Parity</label><select id='parity'>";
-  for (char p : {'N', 'E', 'O'}) {
-    h += "<option value='" + String(p) + "'" + (p == sc.parity ? " selected" : "") + ">" + String(p) +
-         (p == 'N' ? " (none)" : p == 'E' ? " (even)" : " (odd)") + "</option>";
+}
+
+void doScan(std::vector<String>& args) {
+  int maxAddr = args.size() > 1 ? parseNum(args[1]) : 20;
+  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr > 247) maxAddr = 247;
+  Serial.printf("Scanning slave addresses 1-%d at current serial config...\n", maxAddr);
+  int found = 0;
+  for (int addr = 1; addr <= maxAddr; addr++) {
+    ModbusResult r4 = dbgReadRegs((uint8_t)addr, 4, 0x0000, 1, 300);
+    if (r4.ok) { Serial.printf("  addr %d responded to FC04\n", addr); found++; continue; }
+    ModbusResult r3 = dbgReadRegs((uint8_t)addr, 3, 0x0000, 1, 300);
+    if (r3.ok) { Serial.printf("  addr %d responded to FC03\n", addr); found++; }
   }
-  h += "</select></div>";
-  h += "<div><label>Stop bits</label><select id='stopbits'>";
-  for (int s : {1, 2}) {
-    h += "<option value='" + String(s) + "'" + (s == sc.stopBits ? " selected" : "") + ">" + String(s) + "</option>";
-  }
-  h += "</select></div>";
-  h += "<button onclick='applySerial()'>Apply (live, not saved)</button>";
-  h += "<p class='small'>Current: " + String(sc.baud) + " 8" + String(sc.parity) + String(sc.stopBits) +
-       ". If a sensor went silent after register writes, try every parity/stopbit combo here at a few bauds — "
-       "an accidental framing change (not just baud) is a real possibility with undocumented config registers.</p>";
-  h += "<div id='serialResult' class='small'></div></div>";
-
-  h += "<h3>Bus Scan</h3><div class='card'>";
-  h += "<div><label>Max address</label><input id='scanMax' type='number' value='20' min='1' max='247' style='width:70px'></div>";
-  h += "<button onclick='runScan()'>Scan Bus</button>";
-  h += "<div id='scanResult' class='small' style='margin-top:8px'></div></div>";
-
-  h += "<h3>Register Read (FC03/FC04)</h3><div class='card'>";
-  h += "<div class='row'>";
-  h += "<label>Slave ID</label><input id='rdSid' type='number' value='1' min='0' max='250' style='width:60px'> ";
-  h += "<label>Func code</label><select id='rdFc'><option value='3'>03 (holding)</option><option value='4'>04 (input)</option></select> ";
-  h += "<label>Register</label><input id='rdReg' value='0x0000' style='width:80px'> ";
-  h += "<label>Count</label><input id='rdCount' type='number' value='1' min='1' max='16' style='width:50px'>";
-  h += "</div><button onclick='runRead()'>Read</button>";
-  h += "<p class='small'>Slave ID 0 or 250 = broadcast (some sensors, e.g. SM7779, use 250). Reply comes from the sensor's real address, shown below.</p>";
-  h += "<div id='readResult' class='small' style='margin-top:8px'></div></div>";
-
-  h += "<h3>Register Write (FC06)</h3><div class='card'>";
-  h += "<p class='small'><b>Caution:</b> writes directly to sensor flash/registers.</p>";
-  h += "<label>Slave ID</label><input id='wrSid' type='number' value='1' min='0' max='250' style='width:60px'> ";
-  h += "<label>Register</label><input id='wrReg' value='0x0000' style='width:80px'> ";
-  h += "<label>Value</label><input id='wrVal' value='0' style='width:80px'>";
-  h += "<br><button onclick='runWrite()'>&#9888; Write</button>";
-  h += "<div id='writeResult' class='small' style='margin-top:8px'></div></div>";
-
-  h += "<h3>Raw Hex Send</h3><div class='card'>";
-  h += "<p class='small'>No Modbus framing assumed — sends exactly these bytes, DE toggled around TX. Space or comma separated hex, e.g. <code>01 03 00 00 00 01 84 0A</code></p>";
-  h += "<input id='rawHex' style='width:70%' placeholder='01 03 00 00 00 01 84 0A'>";
-  h += "<button onclick='runRaw()'>Send</button>";
-  h += "<div id='rawResult' class='small' style='margin-top:8px'></div></div>";
-
-  h += "<h3>Live Traffic Log</h3><div class='card'>";
-  h += "<label><input type='checkbox' id='logPause'> Pause</label>";
-  h += "<div style='max-height:400px;overflow-y:auto;margin-top:8px'><table class='mono'><thead><tr>";
-  h += "<th>Age (s)</th><th>Type</th><th>TX</th><th>RX</th><th>Result</th></tr></thead><tbody id='logBody'></tbody></table></div></div>";
-
-  h += R"(
-<script>
-function j(url, opts){ return fetch(url, opts).then(r=>r.json()); }
-function applySerial(){
-  let b=document.getElementById('baud').value, p=document.getElementById('parity').value, s=document.getElementById('stopbits').value;
-  let box=document.getElementById('serialResult'); box.textContent='Applying...';
-  fetch('/api/serial?baud='+b+'&parity='+p+'&stopbits='+s,{method:'POST'}).then(r=>r.json()).then(d=>{
-    box.innerHTML = '<span class="ok">Applied</span> — now ' + d.baud + ' 8' + d.parity + d.stopBits;
-  }).catch(e=>{ box.textContent='Failed: '+e; });
-}
-function runScan(){
-  let max=document.getElementById('scanMax').value;
-  let box=document.getElementById('scanResult'); box.textContent='Scanning 1-'+max+'...';
-  j('/api/scan?max='+max).then(d=>{
-    if(d.found.length===0){ box.textContent='No slaves responded.'; return; }
-    box.innerHTML = 'Found: <b>' + d.found.map(f=>f.addr+' (FC'+f.fc+')').join(', ') + '</b>';
-  }).catch(e=>{ box.textContent='Failed: '+e; });
-}
-function runRead(){
-  let sid=document.getElementById('rdSid').value, fc=document.getElementById('rdFc').value;
-  let reg=document.getElementById('rdReg').value, cnt=document.getElementById('rdCount').value;
-  let box=document.getElementById('readResult'); box.textContent='Reading...';
-  j('/api/read?slaveId='+sid+'&fc='+fc+'&reg='+reg+'&count='+cnt).then(d=>{
-    if(d.ok){
-      let regs = d.regs.map((v,i)=>'#'+i+'='+v+' (0x'+v.toString(16).toUpperCase().padStart(4,'0')+')').join(', ');
-      box.innerHTML = '<span class="ok">OK</span> from slave ' + d.actualSlaveId + ': ' + regs +
-        '<br>TX: ' + d.tx + '<br>RX: ' + d.rx;
-    } else {
-      box.innerHTML = '<span class="err">FAILED</span> — ' + d.error + '<br>TX: ' + d.tx + (d.rx?'<br>RX: '+d.rx:'');
-    }
-  }).catch(e=>{ box.textContent='Request failed: '+e; });
-}
-function runWrite(){
-  let sid=document.getElementById('wrSid').value, reg=document.getElementById('wrReg').value, val=document.getElementById('wrVal').value;
-  if(!confirm('Write '+val+' to register '+reg+' on slave '+sid+'?')) return;
-  let box=document.getElementById('writeResult'); box.textContent='Writing...';
-  fetch('/api/write?slaveId='+sid+'&reg='+reg+'&value='+val,{method:'POST'}).then(r=>r.json()).then(d=>{
-    if(d.ok) box.innerHTML = '<span class="ok">OK</span> — ' + (d.error||'confirmed') + '<br>TX: '+d.tx+'<br>RX: '+d.rx;
-    else box.innerHTML = '<span class="err">FAILED</span> — ' + d.error + '<br>TX: '+d.tx+(d.rx?'<br>RX: '+d.rx:'');
-  }).catch(e=>{ box.textContent='Request failed: '+e; });
-}
-function runRaw(){
-  let hex=document.getElementById('rawHex').value;
-  let box=document.getElementById('rawResult'); box.textContent='Sending...';
-  fetch('/api/raw?hex='+encodeURIComponent(hex),{method:'POST'}).then(r=>r.json()).then(d=>{
-    box.innerHTML = 'RX (' + (d.rxLen||0) + ' bytes): <b>' + (d.rx||'(nothing)') + '</b>';
-  }).catch(e=>{ box.textContent='Request failed: '+e; });
-}
-function fetchLog(){
-  if(document.getElementById('logPause').checked) return;
-  j('/api/log').then(d=>{
-    let s='';
-    d.forEach(e=>{
-      s+='<tr><td>'+(e.ageMs/1000).toFixed(1)+'</td><td>'+e.label+'</td><td class="mono">'+e.tx+'</td>'+
-         '<td class="mono">'+e.rx+'</td><td>'+e.result+'</td></tr>';
-    });
-    document.getElementById('logBody').innerHTML = s || '<tr><td colspan=5>No traffic yet.</td></tr>';
-  });
-}
-setInterval(fetchLog, 1500); fetchLog();
-</script>
-)";
-  h += htmlFooter();
-  server.send(200, "text/html", h);
+  Serial.printf("Scan done. %d address(es) responded.\n", found);
 }
 
-void handleWifiSetupPage() {
-  String h = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
-  h += "<title>Sensor Debug Setup</title><style>body{font-family:system-ui,sans-serif;padding:20px;max-width:400px;margin:0 auto}";
-  h += "input{width:100%;padding:8px;margin:4px 0;box-sizing:border-box}button{width:100%;padding:10px;margin-top:10px}</style></head><body>";
-  h += "<h2>Sensor Debug Tool — WiFi Setup</h2>";
-  h += "<form action='/wifi-save' method='POST'>";
-  h += "<label>SSID</label><input name='ssid' required>";
-  h += "<label>Password</label><input name='pass' type='password'>";
-  h += "<button type='submit'>Save & Reboot</button>";
-  h += "</form></body></html>";
-  server.send(200, "text/html", h);
-}
-
-void handleWifiSave() {
-  String ssid = server.arg("ssid");
-  String pass = server.arg("pass");
-  saveWifiCreds(ssid, pass);
-  server.send(200, "text/html", "<html><body><h2>Saved. Rebooting...</h2></body></html>");
-  delay(500);
-  ESP.restart();
-}
-
-// --- API handlers ---
-static uint16_t parseHexOrDec(const String& s) { return (uint16_t)strtol(s.c_str(), nullptr, 0); }
-
-void handleApiSerial() {
-  uint32_t baud = server.arg("baud").toInt();
-  char parity = server.arg("parity").length() ? server.arg("parity")[0] : 'N';
-  int stopBits = server.arg("stopbits").toInt();
-  if (stopBits != 2) stopBits = 1;
-  if (baud == 0) baud = 9600;
-  dbgSerialApply(baud, parity, stopBits);
-  String out = "{\"baud\":" + String(baud) + ",\"parity\":\"" + String(parity) + "\",\"stopBits\":" + String(stopBits) + "}";
-  server.send(200, "application/json", out);
-}
-
-void handleApiScan() {
-  int max = server.arg("max").toInt();
-  if (max < 1) max = 20;
-  if (max > 247) max = 247;
-  String hits = dbgScanBus(max);
-  server.send(200, "application/json", "{\"found\":" + hits + "}");
-}
-
-void handleApiRead() {
-  uint8_t sid = (uint8_t)server.arg("slaveId").toInt();
-  uint8_t fc = (uint8_t)server.arg("fc").toInt();
-  uint16_t reg = parseHexOrDec(server.arg("reg"));
-  uint8_t count = (uint8_t)server.arg("count").toInt();
-  if (count < 1) count = 1;
+void doRead(std::vector<String>& args) {
+  if (args.size() < 4) { Serial.println("Usage: read <slaveId> <fc> <reg> [count]"); return; }
+  uint8_t sid = (uint8_t)parseNum(args[1]);
+  uint8_t fc = (uint8_t)parseNum(args[2]);
+  uint16_t reg = (uint16_t)parseNum(args[3]);
+  uint8_t count = args.size() > 4 ? (uint8_t)parseNum(args[4]) : 1;
+  Serial.printf("Reading slave %d, FC%02d, reg 0x%04X, count %d...\n", sid, fc, reg, count);
   ModbusResult r = dbgReadRegs(sid, fc, reg, count);
-  String out = "{\"ok\":" + String(r.ok ? "true" : "false");
-  out += ",\"actualSlaveId\":" + String(r.actualSlaveId);
-  out += ",\"tx\":\"" + r.txHex + "\",\"rx\":\"" + r.rxHex + "\"";
   if (r.ok) {
-    out += ",\"regs\":[";
-    for (int i = 0; i < r.regCount; i++) { if (i) out += ","; out += String(r.regs[i]); }
-    out += "]";
+    Serial.printf("OK — reply from slave %d:\n", r.actualSlaveId);
+    printRegs(r);
   } else {
-    out += ",\"error\":\"" + r.error + "\"";
+    Serial.println("FAILED — " + r.error);
   }
-  out += "}";
-  server.send(200, "application/json", out);
+  Serial.println("  TX: " + r.txHex);
+  if (r.rxHex.length()) Serial.println("  RX: " + r.rxHex);
 }
 
-void handleApiWrite() {
-  uint8_t sid = (uint8_t)server.arg("slaveId").toInt();
-  uint16_t reg = parseHexOrDec(server.arg("reg"));
-  uint16_t val = parseHexOrDec(server.arg("value"));
+void doWriteReg(std::vector<String>& args, bool skipConfirm) {
+  if (args.size() < 4) { Serial.println("Usage: write <slaveId> <reg> <value>"); return; }
+  uint8_t sid = (uint8_t)parseNum(args[1]);
+  uint16_t reg = (uint16_t)parseNum(args[2]);
+  uint16_t val = (uint16_t)parseNum(args[3]);
+
+  if (!skipConfirm) {
+    Serial.printf("About to write reg 0x%04X = %u (0x%04X) on slave %d.\n", reg, val, val, sid);
+    Serial.println("Type 'y' + Enter within 10s to confirm, anything else cancels.");
+    unsigned long deadline = millis() + 10000;
+    String confirm = "";
+    while (millis() < deadline) {
+      if (Serial.available()) {
+        char c = Serial.read();
+        if (c == '\n') break;
+        if (c != '\r') confirm += c;
+      }
+    }
+    if (confirm != "y") { Serial.println("Cancelled."); return; }
+  }
+
   ModbusResult r = dbgWriteReg(sid, reg, val);
-  String out = "{\"ok\":" + String(r.ok ? "true" : "false");
-  out += ",\"tx\":\"" + r.txHex + "\",\"rx\":\"" + r.rxHex + "\"";
-  out += ",\"error\":\"" + r.error + "\"}";
-  server.send(200, "application/json", out);
+  if (r.ok) Serial.println("OK — " + (r.error.length() ? r.error : String("confirmed")));
+  else Serial.println("FAILED — " + r.error);
+  Serial.println("  TX: " + r.txHex);
+  if (r.rxHex.length()) Serial.println("  RX: " + r.rxHex);
 }
 
-void handleApiRaw() {
-  String hex = server.arg("hex");
+void doRaw(const String& fullLine) {
+  int sp = fullLine.indexOf(' ');
+  if (sp < 0) { Serial.println("Usage: raw <hex bytes>, e.g. raw 01 03 00 00 00 01 84 0A"); return; }
+  String hex = fullLine.substring(sp + 1);
+  Serial.println("Sending raw: " + hex);
   String rx = dbgRawHexSend(hex, 800);
-  int rxLen = rx.length() ? (rx.length() + 1) / 3 : 0;
-  server.send(200, "application/json", "{\"rx\":\"" + rx + "\",\"rxLen\":" + String(rxLen) + "}");
+  if (rx.length()) Serial.println("Reply: " + rx);
+  else Serial.println("No reply.");
 }
 
-void handleApiLog() {
-  server.send(200, "application/json", dbgGetLogJson(40));
+void doLog(std::vector<String>& args) {
+  int n = args.size() > 1 ? parseNum(args[1]) : 15;
+  Serial.println("--- last " + String(n) + " log entries (newest first) ---");
+  dbgPrintLogHuman(n);
 }
 
-// -----------------------------------------------------------------------------
+void doStatus() {
+  SerialCfg sc = dbgGetSerialCfg();
+  Serial.printf("Current RS485 config: %u baud, 8%c%d\n", sc.baud, sc.parity, sc.stopBits);
+}
+
+void doBaud(std::vector<String>& args) {
+  if (args.size() < 2) { Serial.println("Usage: baud <n>"); return; }
+  uint32_t b = parseNum(args[1]);
+  SerialCfg sc = dbgGetSerialCfg();
+  dbgSerialApply(b, sc.parity, sc.stopBits);
+  doStatus();
+}
+
+void doParity(std::vector<String>& args) {
+  if (args.size() < 2) { Serial.println("Usage: parity <n|e|o>"); return; }
+  char p = toupper(args[1][0]);
+  if (p != 'N' && p != 'E' && p != 'O') { Serial.println("Parity must be n, e, or o"); return; }
+  SerialCfg sc = dbgGetSerialCfg();
+  dbgSerialApply(sc.baud, p, sc.stopBits);
+  doStatus();
+}
+
+void doStop(std::vector<String>& args) {
+  if (args.size() < 2) { Serial.println("Usage: stop <1|2>"); return; }
+  int s = parseNum(args[1]);
+  if (s != 1 && s != 2) { Serial.println("Stop bits must be 1 or 2"); return; }
+  SerialCfg sc = dbgGetSerialCfg();
+  dbgSerialApply(sc.baud, sc.parity, s);
+  doStatus();
+}
+
+void doSniff(std::vector<String>& args) {
+  int secs = args.size() > 1 ? parseNum(args[1]) : 5;
+  Serial.printf("Sniffing bus passively for %d seconds (no TX)...\n", secs);
+  unsigned long deadline = millis() + (unsigned long)secs * 1000;
+  uint8_t buf[64];
+  int n = 0;
+  unsigned long lastByte = 0;
+  while (millis() < deadline) {
+    if (dbgSerialAvailable()) {
+      if (n < (int)sizeof(buf)) buf[n++] = dbgSerialReadByte();
+      else dbgSerialReadByte();
+      lastByte = millis();
+    } else if (n > 0 && millis() - lastByte > 20) {
+      Serial.println("  RX: " + bytesToHex(buf, n));
+      n = 0;
+    }
+  }
+  if (n > 0) Serial.println("  RX: " + bytesToHex(buf, n));
+  Serial.println("Sniff done.");
+}
+
+void handleCommand(String line) {
+  line.trim();
+  if (line.length() == 0) return;
+  std::vector<String> args = splitArgs(line);
+  String cmd = args[0];
+  cmd.toLowerCase();
+
+  if (cmd == "help" || cmd == "?") printHelp();
+  else if (cmd == "status") doStatus();
+  else if (cmd == "baud") doBaud(args);
+  else if (cmd == "parity") doParity(args);
+  else if (cmd == "stop") doStop(args);
+  else if (cmd == "scan") doScan(args);
+  else if (cmd == "read") doRead(args);
+  else if (cmd == "write") doWriteReg(args, false);
+  else if (cmd == "write!") doWriteReg(args, true);
+  else if (cmd == "raw") doRaw(line);
+  else if (cmd == "log") doLog(args);
+  else if (cmd == "sniff") doSniff(args);
+  else Serial.println("Unknown command '" + cmd + "'. Type 'help' for the list.");
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n[SensorDebug] Booting...");
-
-  WiFi.persistent(false); // same NVS-corruption defense as the production firmware
-
   dbgSerialInit(RS485_RXD, RS485_TXD, RS485_DE, 9600, 'N', 1);
-
-  loadWifiCreds();
-  bool connected = tryConnectWifi();
-  if (!connected) {
-    Serial.println("\n[WiFi] Could not connect — starting setup AP");
-    startSetupAP();
-  } else {
-    Serial.println("\n[WiFi] Connected: " + WiFi.localIP().toString());
-  }
-
-  if (apMode) {
-    server.on("/", handleWifiSetupPage);
-    server.on("/wifi-save", HTTP_POST, handleWifiSave);
-  } else {
-    server.on("/", handleRoot);
-    server.on("/api/serial", HTTP_POST, handleApiSerial);
-    server.on("/api/scan", HTTP_GET, handleApiScan);
-    server.on("/api/read", HTTP_GET, handleApiRead);
-    server.on("/api/write", HTTP_POST, handleApiWrite);
-    server.on("/api/raw", HTTP_POST, handleApiRaw);
-    server.on("/api/log", HTTP_GET, handleApiLog);
-    // Also allow reconfiguring WiFi from the main tool if needed
-    server.on("/wifi", handleWifiSetupPage);
-    server.on("/wifi-save", HTTP_POST, handleWifiSave);
-  }
-  server.begin();
-  if (apMode) {
-    Serial.println("[Web] Server started (setup mode, 192.168.4.1)");
-  } else {
-    Serial.println("[Web] Server started at http://" + WiFi.localIP().toString() + "/");
-  }
+  Serial.println("\n=== sensor-debug: RS485/Modbus debugging tool ===");
+  Serial.println("USB serial only — no WiFi.");
+  printHelp();
+  Serial.print("> ");
 }
 
 void loop() {
-  server.handleClient();
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      Serial.println();
+      handleCommand(inputLine);
+      inputLine = "";
+      Serial.print("> ");
+    } else if (c != '\r') {
+      inputLine += c;
+    }
+  }
 }
