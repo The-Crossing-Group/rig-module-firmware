@@ -855,9 +855,33 @@ void handleRawWeb() {
   server.send(200, "text/html", h);
 }
 
+// Plain-text endpoint the /log page polls via JS fetch() so it can
+// live-update in place - no full page reload, no manual F5 needed.
+void handleLogText() {
+  server.send(200, "text/plain", dbgLogHumanText(80));
+}
+
 void handleLogWeb() {
   String out = dbgLogHumanText(80);
-  String h = String(PAGE_HEAD) + "<h2>Traffic log (last 80, newest first)</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  String h = String(PAGE_HEAD) +
+    "<h2>Traffic log (last 80, newest first) - live, updates every second</h2>"
+    "<div class='row'>"
+    "<button type='button' onclick='toggleLogPoll()' id='logPollBtn'>Pause</button> "
+    "<a href='/'>&larr; back</a>"
+    "</div>"
+    "<pre id='logbox'>" + htmlEscape(out) + "</pre>"
+    "<script>"
+    "let logPolling=true;"
+    "function toggleLogPoll(){logPolling=!logPolling;document.getElementById('logPollBtn').textContent=logPolling?'Pause':'Resume';}"
+    "function pollLog(){"
+      "if(logPolling){"
+        "fetch('/log.txt').then(r=>r.text()).then(t=>{document.getElementById('logbox').textContent=t;});"
+      "}"
+      "setTimeout(pollLog,1000);"
+    "}"
+    "pollLog();"
+    "</script>"
+    + PAGE_FOOT;
   server.send(200, "text/html", h);
 }
 
@@ -874,6 +898,7 @@ void setupWebServer() {
   server.on("/write", handleWriteWeb);
   server.on("/raw", handleRawWeb);
   server.on("/log", handleLogWeb);
+  server.on("/log.txt", handleLogText);
   server.begin();
   Serial.println("[Web] Server started, no login required.");
 }
