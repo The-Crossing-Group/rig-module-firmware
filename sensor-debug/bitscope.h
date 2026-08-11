@@ -141,12 +141,39 @@ static String _bsTryDecodeAllOffsets(const std::vector<uint8_t>& bits) {
   return report;
 }
 
+// Reconstructs the bit sequence for an ASSUMED bit period, anchoring
+// every edge's bit-index to elapsed time since the FIRST edge (not to
+// the previous edge). This matters a lot: naive per-interval rounding
+// (round each gap independently, divide by period) accumulates error
+// every single edge - if the period is off by even 4%, a 90-bit frame
+// drifts by ~3.6 bit-widths by the end, which silently corrupts bytes
+// partway through a frame while the first byte or two still happen to
+// look right (exactly the "matches for 2 bytes then garbage" pattern
+// this tool exists to catch). Anchoring to absolute elapsed time makes
+// each bit-boundary decision independent, so errors don't compound.
+static std::vector<uint8_t> _bsReconstructBits(const std::vector<uint32_t>& times, const std::vector<uint8_t>& levels, double periodUs) {
+  std::vector<uint8_t> bits;
+  int n = times.size();
+  bits.reserve(n * 4);
+  long cumulativeBits = 0;
+  for (int i = 1; i < n; i++) {
+    double elapsed = (double)(times[i] - times[0]);
+    long expected = (long)round(elapsed / periodUs);
+    long count = expected - cumulativeBits;
+    if (count < 1) count = 1;          // guarantee forward progress even if noise briefly puts us behind
+    if (count > 200) count = 200;      // cap one trailing idle gap from blowing up the buffer
+    for (long u = 0; u < count; u++) bits.push_back(levels[i - 1]);
+    cumulativeBits += count;
+  }
+  return bits;
+}
+
 BitscopeResult bitscopeAnalyze() {
   BitscopeResult r;
   int n = _bsEdgeCount;
   r.edgeCount = n;
   if (n < 4) {
-    r.bestDecodeReport = "Not enough edges captured (" + String(n) + ") - is the sensor actually transmitting right now?";
+    r.bestDecodeReport = "Not enough edges captured (" + String(n) + ") - is the sensor actually transmitting right now? If it auto-reports periodically, make sure the capture window is longer than its report interval.";
     return r;
   }
 
@@ -156,12 +183,11 @@ BitscopeResult bitscopeAnalyze() {
   for (int i = 0; i < n; i++) { times[i] = _bsEdgeTimeUs[i]; levels[i] = _bsEdgeLevel[i]; }
 
   // Find the shortest pulse width above a noise floor (20us - filters
-  // electrical glitches/reflections, well below any real UART bit at
-  // even 115200 baud which is ~8.7us... note: if the real baud is above
-  // ~115200 this floor would clip it, but that's not realistic for an
-  // RS485 sensor). This shortest pulse is our best estimate of one bit
-  // period, since a single-bit pulse is by definition the smallest
-  // interval the signal can hold before the next transition.
+  // electrical glitches/reflections). This is our rough baud estimate,
+  // but it's noisy (ISR/digitalRead latency, timer granularity) - good
+  // enough to report, NOT good enough to reconstruct a whole frame
+  // against without drift. The real decode below tests exact standard
+  // baud periods instead of trusting this measurement directly.
   uint32_t minPulse = UINT32_MAX;
   for (int i = 1; i < n; i++) {
     uint32_t d = times[i] - times[i - 1];
@@ -174,27 +200,58 @@ BitscopeResult bitscopeAnalyze() {
   r.minPulseUs = minPulse;
   r.estimatedBaud = 1000000UL / minPulse;
 
-  // Reconstruct the bitstream: between edge i-1 and edge i, the line
-  // held at levels[i-1] for (times[i]-times[i-1]) us, which is
-  // round(duration/minPulse) bit-units of that level.
-  std::vector<uint8_t> bits;
-  bits.reserve(n * 4);
-  for (int i = 1; i < n; i++) {
-    uint32_t d = times[i] - times[i - 1];
-    int units = (int)((d + minPulse / 2) / minPulse);  // round to nearest
-    if (units < 1) units = 1;
-    if (units > 200) units = 200; // cap a single idle gap from blowing up the buffer
-    for (int u = 0; u < units; u++) bits.push_back(levels[i - 1]);
-  }
-
-  // Build a compact bitstream string for manual inspection (cap length
-  // for readability - full detail available via the offset decode below).
+  // Build a compact raw bitstream string (quantized against the noisy
+  // measured period, just for eyeballing) - cap length for readability.
+  std::vector<uint8_t> roughBits = _bsReconstructBits(times, levels, (double)minPulse);
   String bs;
-  int showBits = min((int)bits.size(), 400);
-  for (int i = 0; i < showBits; i++) bs += bits[i] ? '1' : '0';
-  if ((int)bits.size() > showBits) bs += "...";
+  int showBits = min((int)roughBits.size(), 400);
+  for (int i = 0; i < showBits; i++) bs += roughBits[i] ? '1' : '0';
+  if ((int)roughBits.size() > showBits) bs += "...";
   r.bitstream = bs;
 
-  r.bestDecodeReport = _bsTryDecodeAllOffsets(bits);
+  // Now the real test: reconstruct against every EXACT standard baud
+  // period (not the noisy measurement) using drift-free anchoring, and
+  // CRC-sweep each one. If the sensor is really running one of these
+  // standard bauds, this finds a clean decode even though the measured
+  // minPulse was off by a few percent.
+  struct BaudCandidate { const char* name; double periodUs; };
+  BaudCandidate candidates[] = {
+    {"2400",   1000000.0 / 2400.0},
+    {"4800",   1000000.0 / 4800.0},
+    {"9600",   1000000.0 / 9600.0},
+    {"19200",  1000000.0 / 19200.0},
+    {"38400",  1000000.0 / 38400.0},
+    {"57600",  1000000.0 / 57600.0},
+    {"115200", 1000000.0 / 115200.0},
+  };
+
+  String report = "Measured (noisy) estimate: " + String(r.estimatedBaud) + " baud - testing exact standard bauds with drift-free reconstruction instead:\n\n";
+  bool anyWin = false;
+  for (auto& c : candidates) {
+    std::vector<uint8_t> bits = _bsReconstructBits(times, levels, c.periodUs);
+    String sub = _bsTryDecodeAllOffsets(bits);
+    bool hit = sub.indexOf("VALID MODBUS CRC") >= 0;
+    if (hit) anyWin = true;
+    report += String(hit ? "  [BAUD " : "  [baud ") + c.name + (hit ? " *** HIT ***]\n" : "]\n");
+    if (hit) report += sub + "\n";
+  }
+  if (!anyWin) {
+    report += "\nNo standard baud produced a valid CRC anywhere. Full decode at each standard baud (bit offset 0, for eyeballing):\n";
+    for (auto& c : candidates) {
+      std::vector<uint8_t> bits = _bsReconstructBits(times, levels, c.periodUs);
+      String line = "  " + String(c.name) + ": ";
+      int i = 0, shown = 0;
+      while (i + 9 < (int)bits.size() && shown < 16) {
+        uint8_t val = 0;
+        for (int k = 0; k < 8; k++) val |= (bits[i + 1 + k] << k);
+        char h[4]; snprintf(h, 4, "%02X ", val); line += h;
+        i += 10;
+        shown++;
+      }
+      report += line + "\n";
+    }
+  }
+
+  r.bestDecodeReport = report;
   return r;
 }
