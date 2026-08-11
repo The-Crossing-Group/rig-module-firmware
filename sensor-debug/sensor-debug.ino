@@ -96,6 +96,9 @@ void printHelp() {
     "                                entirely - measures real bit period + brute-\n"
     "                                forces every byte alignment against Modbus CRC\n"
     "                                (default 500ms window, use during a known burst)\n"
+    "  recover                       SM7779 recovery sweep: broadcasts 0x0068/0x0069\n"
+    "                                reset writes across all parity/stop combos at\n"
+    "                                9600, checking for a live response after each\n"
   ));
 }
 
@@ -276,6 +279,77 @@ void doBitscope(std::vector<String>& args) {
   dbgAutoSniffSetEnabled(wasAutoOn);
 }
 
+// =============================================================================
+// RECOVERY SWEEP — built specifically for the SM7779 "stuck outputting
+// garbage after writes to 0x0068/0x0069" scenario. Baud is left alone
+// (that register was never touched, so 9600 almost certainly still
+// applies) - only parity/stop bits are swept, since a "comm mode" write
+// is a plausible way to have changed the sensor's own serial framing.
+// At each of the 6 combos: broadcast (slave 250, no reply expected)
+// FC06 writes of 1 -> 0x0068 and 1 -> 0x0069 (the documented defaults),
+// then switch back to standard 9600 8N1 and check whether slave 1 (or
+// anything on 1-5) responds normally. First combo that produces a live
+// response wins and the sweep stops there, leaving the port at 9600 8N1
+// so the sensor can be read/used immediately.
+// =============================================================================
+String dbgRecoverySweep() {
+  String report;
+  SerialCfg orig = dbgGetSerialCfg();
+  const char parities[] = {'N', 'E', 'O'};
+  const int stops[] = {1, 2};
+  bool found = false;
+
+  for (int s = 0; s < 2 && !found; s++) {
+    for (int p = 0; p < 3 && !found; p++) {
+      char parity = parities[p];
+      int stopBits = stops[s];
+      dbgSerialApply(9600, parity, stopBits);
+      delay(30);
+
+      ModbusResult w1 = dbgWriteReg(250, 0x0068, 1, 300); // comm mode -> default
+      delay(80);
+      ModbusResult w2 = dbgWriteReg(250, 0x0069, 1, 300); // protocol type -> default
+      delay(300); // give the sensor a moment to apply a mode change before we probe it
+
+      dbgSerialApply(9600, 'N', 1); // Modbus RTU standard framing to test with
+      delay(30);
+
+      report += "9600 8" + String(parity) + String(stopBits) + ": reset writes sent (0x68 "
+        + (w1.ok ? "ok" : "no-ack") + ", 0x69 " + (w2.ok ? "ok" : "no-ack") + "). Checking for a response at 8N1... ";
+
+      ModbusResult r = dbgReadRegs(1, 3, 0x0000, 3, 400);
+      if (r.ok) {
+        report += "RESPONSE from slave " + String(r.actualSlaveId) + ": ";
+        for (int i = 0; i < r.regCount; i++) report += String(r.regs[i]) + " ";
+        report += "\n\n*** Sensor is back! Left at 9600 8N1 - it should work normally now. ***\n";
+        found = true;
+        break;
+      }
+      // Slave ID register (0x0066) was never touched, but check a small
+      // range anyway in case something else shifted it.
+      bool anyHit = false;
+      for (int addr = 1; addr <= 5 && !anyHit; addr++) {
+        ModbusResult rr = dbgReadRegs((uint8_t)addr, 3, 0x0000, 1, 300);
+        if (rr.ok) {
+          report += "no reply from addr 1, but addr " + String(addr) + " responded!\n\n*** Sensor is back, now at address " + String(addr) + ", left at 9600 8N1. ***\n";
+          anyHit = true;
+          found = true;
+        }
+      }
+      if (!anyHit) report += "no response.\n";
+    }
+  }
+
+  if (!found) {
+    dbgSerialApply(orig.baud, orig.parity, orig.stopBits);
+    report += "\nNo framing combo produced a response after the reset writes. Possible next steps: "
+      "the writes may not have landed in ANY of these framings (try 'sniff 10' right after this to "
+      "see if the sensor's auto-report burst changed at all), a baud change may be needed too even "
+      "though 0x0067 wasn't touched, or the sensor may need a hardware/power-cycle reset.";
+  }
+  return report;
+}
+
 void doAutoSniff(std::vector<String>& args) {
   if (args.size() < 2) {
     Serial.println(String("Auto traffic capture is currently ") + (dbgAutoSniffGetEnabled() ? "ON" : "OFF") + ". Usage: autosniff <on|off>");
@@ -309,6 +383,7 @@ void handleCommand(String line) {
   else if (cmd == "sniff") doSniff(args);
   else if (cmd == "autosniff") doAutoSniff(args);
   else if (cmd == "bitscope") doBitscope(args);
+  else if (cmd == "recover") { Serial.println("Starting recovery sweep (6 framing combos, ~3-4s)..."); Serial.print(dbgRecoverySweep()); }
   else Serial.println("Unknown command '" + cmd + "'. Type 'help' for the list.");
 }
 
@@ -413,6 +488,15 @@ void handleRoot() {
        "<form action='/bitscope' method='GET'><div class='row'>"
        "Window (ms): <input type='number' name='ms' value='6000' min='50' max='15000' style='width:70px'>"
        "<button type='submit'>Capture</button>"
+       "</div></form>";
+
+  h += "<h2>SM7779 Recovery Sweep</h2>"
+       "<div class='row'>For a sensor stuck outputting garbage after writes to 0x0068/0x0069. "
+       "Cycles all 6 parity/stop combos at 9600 baud, broadcasting reset writes (1 -&gt; 0x0068, "
+       "1 -&gt; 0x0069) at each, then checks for a live response at standard 8N1. Stops at the "
+       "first combo that works and leaves the port there. Takes a few seconds.</div>"
+       "<form action='/recover' method='GET'><div class='row'>"
+       "<button type='submit' class='danger' onclick=\"return confirm('Broadcast reset writes across all framing combos?');\">Run Recovery Sweep</button>"
        "</div></form>";
 
   h += "<h2>Read registers</h2>"
@@ -542,6 +626,15 @@ void handleBitscopeWeb() {
   server.send(200, "text/html", h);
 }
 
+void handleRecoverWeb() {
+  String out = "Running SM7779 recovery sweep (6 framing combos)...\n\n";
+  out += dbgRecoverySweep();
+  Serial.println("[Web] Recovery sweep:\n" + out);
+
+  String h = String(PAGE_HEAD) + "<h2>Recovery sweep result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
 void handleReadWeb() {
   uint8_t sid = server.hasArg("sid") ? (uint8_t)parseNum(server.arg("sid")) : 1;
   uint8_t fc = server.hasArg("fc") ? (uint8_t)parseNum(server.arg("fc")) : 3;
@@ -607,6 +700,7 @@ void setupWebServer() {
   server.on("/sniff", handleSniff);
   server.on("/autosniff", handleAutosniff);
   server.on("/bitscope", handleBitscopeWeb);
+  server.on("/recover", handleRecoverWeb);
   server.on("/read", handleReadWeb);
   server.on("/write", handleWriteWeb);
   server.on("/raw", handleRawWeb);
