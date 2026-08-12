@@ -421,12 +421,13 @@ long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud) {
 // detections (sensor's real answer arrives after we've already given up
 // and moved to the next address) — worth the extra time per address.
 template<typename FoundFn>
-void modbusScanSlaves(int maxAddr, FoundFn onFound, int timeoutMs = 400) {
+void modbusScanSlaves(int maxAddr, FoundFn onFound, int timeoutMs = 400, bool verbose = true) {
   uint16_t regs[1];
   for (int addr = 1; addr <= maxAddr; addr++) {
-    if (modbusReadRegs((uint8_t)addr, 4, 0x0000, 1, regs, false, timeoutMs) == MB_OK) {
+    if (verbose) Serial.printf("[Scan] Probing addr %d...\n", addr);
+    if (modbusReadRegs((uint8_t)addr, 4, 0x0000, 1, regs, verbose, timeoutMs) == MB_OK) {
       onFound(addr, 4);
-    } else if (modbusReadRegs((uint8_t)addr, 3, 0x0000, 1, regs, false, timeoutMs) == MB_OK) {
+    } else if (modbusReadRegs((uint8_t)addr, 3, 0x0000, 1, regs, verbose, timeoutMs) == MB_OK) {
       onFound(addr, 3);
     }
   }
