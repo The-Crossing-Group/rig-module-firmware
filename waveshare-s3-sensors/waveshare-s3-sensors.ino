@@ -630,8 +630,8 @@ void pollTask(void* param) {
             // Some sensors (slow measurement cycle) only answer on a
             // fraction of polls by design — don't flap the /sensors and
             // /live pages to "timeout" over a short run of these if the
-            // sensor has reported a real value before. /diag always sees
-            // every raw timeout via `status` regardless of this.
+            // sensor has reported a real value before. The raw `status`
+            // field always reflects every real timeout regardless of this.
             bool hasReportedBefore = r.hasValue;
             if (!hasReportedBefore || r.consecutiveTimeouts >= TIMEOUT_DISPLAY_THRESHOLD) {
               r.displayStatus = "timeout";

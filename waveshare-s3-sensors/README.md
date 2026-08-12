@@ -16,17 +16,26 @@ This variant is a genuine **Modbus RTU master**: instead of one adapter
 board, you configure a list of up to **16 independent RS485 sensors**, each
 its own Modbus slave with its own slave ID, register address, function
 code, data type (uint16/int16/uint32/int32/float32), word order, and
-scale/offset. Any Modbus RTU sensor works as long as you know (or can
-figure out via the Diagnostics page) those four things.
+scale/offset. Any Modbus RTU sensor works as long as you know those four
+things (check the sensor's datasheet, or use the per-sensor "Probe Now"
+button on /sensors to try a register/type combo before saving).
 
 **CAN is also enabled here** (wired but unused on `waveshare-s3/`) — the
 ESP32-S3's native TWAI controller runs in **listen-only mode** (this module
-never transmits on the CAN bus, only reads) with:
-- A raw frame sniffer (Diagnostics page) — see actual bus traffic before
-  you know what's on it.
+never transmits on the CAN bus, only reads):
 - A configurable list of up to 16 "CAN signals" — byte range + decode rule
   extracted from frames matching a given CAN ID, same idea as an RS485
   sensor but sourced from CAN.
+
+**No diagnostics/debugging page in this build.** There is no register
+write, raw-traffic log, bus-scan report, or CAN frame sniffer here — only
+read-only sensor setup helpers (per-sensor Probe Now / Auto-Detect Baud,
+bus-wide Auto-Detect & Enable). This is deliberate: writing to a sensor's
+own config registers is what corrupted an SM7779 radar sensor's internal
+state during earlier field debugging. For deep debugging (raw sniffing,
+register writes, framing experiments) use the LilyGo `sensor-debug` tool
+in isolation, on one sensor at a time, before wiring it onto a shared
+production bus.
 
 Use `waveshare-s3/` for adapter-board deployments already in the field;
 use this (`waveshare-s3-sensors/`) for new direct-Modbus-sensor + CAN work.
@@ -37,24 +46,21 @@ use this (`waveshare-s3-sensors/`) for new direct-Modbus-sensor + CAN work.
 - **/sensors** — Add/edit/remove RS485 Modbus sensors (16 slots)
 - **/can** — Add/edit/remove CAN signals (16 slots)
 - **/live** — Live values table (sensors + CAN signals + system status)
-- **/diag** — Debugging diagnostics:
-  - RS485 bus scan (probes every slave address, reports which respond)
-  - Register probe (read any slave/register/type combo right now, no save)
-  - Sensor comms health (poll/error counters per sensor)
-  - CAN raw frame sniffer (live table of most recent frames)
 - **/system** — Firmware info, OTA, buffer, reboot/factory-reset
 
 ## Workflow for a new sensor
 
-1. Wire it to the RS485 bus (A+/B-, same terminals as always).
-2. Go to **/diag**, run a **Bus Scan** to find its slave ID (or check the
-   sensor's own datasheet/DIP switches if it has them).
-3. Use **Register Probe** to try reading register 0 (or whatever the
-   datasheet says) as different data types until you get a sane-looking
-   number.
-4. Go to **/sensors**, fill in that slave ID / register / data type, set
-   scale/offset if the raw value isn't already in the right engineering
-   units, name it, save.
+1. Wire it to the RS485 bus (A+/B-, same terminals as always). If it ships
+   with a default slave address that collides with a sensor already on
+   the bus, give it a unique address **in isolation** first (e.g. via the
+   LilyGo `sensor-debug` tool's register-write support) before wiring it
+   onto the shared bus.
+2. Go to **/sensors**, click **&#9889; Auto-Detect & Enable Now** to find it
+   and fill in a starter slot, or add it manually with its slave ID.
+3. Use **Probe Now** on that sensor's card to try reading its value
+   register as different data types until you get a sane-looking number.
+   Use **Auto-Detect Baud** if you're not sure what baud rate it's using.
+4. Fill in the register / data type / scale/offset, name it, save.
 5. Check **/live** or the sensor's own live readout on **/sensors** to
    confirm it's reporting correctly.
 
@@ -62,14 +68,10 @@ use this (`waveshare-s3-sensors/`) for new direct-Modbus-sensor + CAN work.
 
 1. Enable CAN on **/** (pick the right bitrate — 250 kbit/s is the most
    common default for drill/J1939-style CAN).
-2. Go to **/diag** and watch the raw frame sniffer. If nothing shows up,
-   check bitrate and wiring (CAN H/L) before assuming there's no traffic.
-3. Once you spot a consistent pattern (a specific CAN ID whose bytes
-   correlate with something you can independently verify, e.g. RPM or
-   pressure), note the ID, byte offset, and length.
-4. Go to **/can**, add a signal with that ID/offset/length, set
-   endianness/signedness/scale as needed, save.
-5. Confirm on **/live** or the signal's own live readout on **/can**.
+2. Go to **/can**, add a signal with the CAN ID/byte offset/length you
+   already know (identify unknown frames with the LilyGo `sensor-debug`
+   tool's sniffer if needed), set endianness/signedness/scale, save.
+3. Confirm on **/live** or the signal's own live readout on **/can**.
 
 ## Wire format (Pi ingest)
 

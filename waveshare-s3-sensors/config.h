@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.8.2"
+#define FW_VERSION "rig-module-sensors-1.9.0"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -85,9 +85,9 @@ struct SensorConfig {
 // the /sensors and /live pages. Some sensors (e.g. a radar level unit
 // with a slow measurement cycle) only have fresh data ready on 1 out of
 // every 2-3 polls by design — that's not a fault, but it looked like one
-// on those two pages every single poll cycle. /diag's comms health table
-// and raw traffic log always show every raw timeout regardless of this,
-// since those pages exist specifically to see what's really happening.
+// on those two pages every single poll cycle. The raw "status" field
+// (see handleSensorsLive in webui.h) always shows every raw timeout
+// regardless of this debounce.
 #define TIMEOUT_DISPLAY_THRESHOLD 6
 
 struct SensorReading {

@@ -1,14 +1,21 @@
 // =============================================================================
-// webui.h — WebServer routes: config + diagnostics UI + REST API
+// webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
 //   /            Config (module info, RS485 baud, CAN enable/bitrate, WiFi)
-//   /sensors     Add/edit/remove RS485 Modbus sensors (list, not fixed 8)
-//   /can         Add/edit/remove CAN signals + live raw frame sniffer
+//   /sensors     Add/edit/remove RS485 Modbus sensors (list, not fixed 8),
+//                includes per-sensor "Probe Now" + "Auto-Detect Baud" and
+//                bus-wide "Auto-Detect & Enable"
+//   /can         Add/edit/remove CAN signals
 //   /live        Live values table (sensors + CAN signals)
-//   /diag        Debugging diagnostics: bus scan, register probe, CAN
-//                frame log, comms error counters — the "figure out what's
-//                actually on the bus" toolbox
 //   /system      Firmware info, OTA, buffer, reboot/factory-reset
+//
+// No standalone diagnostics/debugging page in this build — register
+// read-back is still available via per-sensor Probe Now (read-only), but
+// there is no register-write, raw-traffic-log, bus-scan-report, or CAN
+// frame sniffer UI/API here. For deeper debugging (raw sniffing, register
+// writes, framing experiments) use the LilyGo sensor-debug tool instead —
+// keeps anything that can write to a sensor's own registers off the
+// production firmware entirely.
 // =============================================================================
 #pragma once
 #include <WebServer.h>
@@ -31,11 +38,11 @@ extern CanSignalReading canReadings[MAX_CAN_SIGNALS];
 extern SemaphoreHandle_t stateMutex;
 extern SemaphoreHandle_t modbusBusMutex;
 // modbusAutoDetectBaud(), modbusReadRegs(), modbusRegCount(),
-// modbusDecodeValue(), modbusScanSlaves(), modbusGetRecentLog() are all
-// already declared+defined in modbus.h, included before this file in the
-// .ino — no forward decls here. (Previously duplicated declarations here
-// caused "ambiguous overload" compile errors once modbus.h's real
-// signatures grew default parameters that these stale copies didn't have.)
+// modbusDecodeValue(), modbusScanSlaves() are all already declared+defined
+// in modbus.h, included before this file in the .ino — no forward decls
+// here. (Previously duplicated declarations here caused "ambiguous
+// overload" compile errors once modbus.h's real signatures grew default
+// parameters that these stale copies didn't have.)
 bool canStart(int txPin, int rxPin, long bitrate); // can.h
 void canStop(); // can.h
 bool canIsRunning(); // can.h
@@ -99,7 +106,6 @@ static const char NAV[] PROGMEM = R"(
   <a href='/sensors'>&#128225; Sensors</a>
   <a href='/can'>&#128225; CAN</a>
   <a href='/live'>&#128202; Live</a>
-  <a href='/diag'>&#128269; Diagnostics</a>
   <a href='/system'>&#128295; System</a>
 </div>
 )";
@@ -199,7 +205,7 @@ static String cfgPage(ModuleConfig& cfg) {
     }
   }
   h += "</select>";
-  h += "<div class='small'>Listen-only. See raw traffic on <a href='/diag'>Diagnostics</a>.</div>";
+  h += "<div class='small'>Listen-only.</div>";
 
   h += "<h3>Pi Logger</h3>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
@@ -255,7 +261,7 @@ static String sensorsPage(ModuleConfig& cfg) {
   String h = FPSTR(NAV);
   h += "<div class='page'><h2>&#128225; RS485 Sensors</h2>";
   h += "<p class='small'>Any Modbus RTU sensor on the RS485 bus. Don't know its slave ID/register? Use "
-       "<a href='/diag'>Diagnostics</a> first.</p>";
+       "\"Probe Now\" below to check, or \"Auto-Detect &amp; Enable\" to find new sensors.</p>";
   h += "<div class='card' style='border-color:#27ae60'><b>&#9889; Auto-Detect &amp; Enable</b><br>"
        "<span class='small'>Scans addresses 1-16, auto-enables new sensors with starter defaults. Also runs "
        "on boot and every few minutes.</span><br><br>"
@@ -412,15 +418,12 @@ static String canPage(ModuleConfig& cfg) {
   h += "<div class='page'><h2>&#128225; CAN Signals</h2>";
   if (!cfg.canEnabled) {
     h += "<div class='card' style='border-color:#f39c12'>CAN is currently <b>disabled</b>. Enable it on the "
-         "<a href='/'>Config</a> page first, then use the <a href='/diag'>Diagnostics</a> page's raw frame "
-         "sniffer to see what's actually on the bus before defining signals below.</div>";
+         "<a href='/'>Config</a> page first.</div>";
   } else {
     h += "<div class='card'>CAN running at " + String(cfg.canBitrate) + " bit/s, listen-only. "
-         "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps. "
-         "See raw frames on the <a href='/diag'>Diagnostics</a> page.</div>";
+         "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps.</div>";
   }
-  h += "<p class='small'>Decodes a byte range from a specific CAN ID into a value. Identify the pattern on "
-       "<a href='/diag'>Diagnostics</a> first.</p>";
+  h += "<p class='small'>Decodes a byte range from a specific CAN ID into a value.</p>";
   h += "<form method='POST' action='/api/can/save'>";
   h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save All Signals</button>";
 
@@ -476,257 +479,6 @@ function fetchCanLive(){
   });
 }
 setInterval(fetchCanLive,1500); fetchCanLive();
-</script>)";
-  h += "</div>";
-  return h;
-}
-
-// ─── /diag  DEBUGGING DIAGNOSTICS ───────────────────────────────────────────
-static String diagPage(ModuleConfig& cfg) {
-  String h = FPSTR(NAV);
-  h += "<div class='page'><h2>&#128269; Diagnostics</h2>";
-
-  h += "<h3>Test Baud (temporary)</h3><div class='card'>";
-  h += "<p class='small'>Try a baud rate against the bus right now — no save, no reboot. "
-       "Reverts to the saved baud (" + String(cfg.modbusBaud) + ") on next reboot or config save. "
-       "Found the right one? Go set it for real on <a href='/'>Config</a>.</p>";
-  h += "<div class='row'><div><label>Baud</label><select id='testBaud'>";
-  {
-    long bauds[] = { 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200 };
-    for (long b : bauds) {
-      h += "<option value='" + String(b) + "'";
-      if ((uint32_t)b == modbusGetCurrentBaud()) h += " selected";
-      h += ">" + String(b) + "</option>";
-    }
-  }
-  h += "</select></div><button type='button' onclick='setTestBaud()' style='margin-top:18px'>&#9889; Apply Live</button></div>";
-  h += "<div id='testBaudResult' class='small' style='margin-top:8px'>Bus currently running at <b>" + String(modbusGetCurrentBaud()) + "</b> baud.</div></div>";
-
-  h += "<h3>RS485 Bus Scan</h3><div class='card'>";
-  h += "<p class='small'>Finds which slave addresses respond at " + String(cfg.modbusBaud) + " baud (1-247, "
-       "up to ~30s). Report only — for auto-config see \"Auto-Detect &amp; Enable\" on "
-       "<a href='/sensors'>Sensors</a>.</p>";
-  h += "<div class='row'><div><label>Scan up to address</label><input id='scanMax' type='number' min='1' max='247' value='32'></div>";
-  h += "<button type='button' onclick='runScan()' id='scanBusBtn' style='margin-top:18px'>&#128269; Scan Bus</button></div>";
-  h += "<div id='scanBusResult' class='small'></div></div>";
-
-  h += "<h3>Register Probe</h3><div class='card'>";
-  h += "<p class='small'>Read one register now, without saving a sensor config.</p>";
-  h += "<div class='grid4'>";
-  h += "<div><label>Slave ID</label><input id='probeSid' type='number' min='1' max='247' value='1'></div>";
-  h += "<div><label>Function Code</label><select id='probeFc'><option value='4'>04 - Input Regs</option><option value='3'>03 - Holding Regs</option></select></div>";
-  h += "<div><label>Register (hex or dec)</label><input id='probeReg' value='0'></div>";
-  h += "<div><label>Data Type</label><select id='probeDt'><option value='0'>uint16</option><option value='1'>int16</option><option value='2'>uint32</option><option value='3'>int32</option><option value='4'>float32</option></select></div>";
-  h += "</div>";
-  h += "<button type='button' onclick='runProbe()'>&#128269; Probe Register</button>";
-  h += "<div id='probeResult' class='small' style='margin-top:8px'></div></div>";
-
-  h += "<h3>Multi-Register Read</h3><div class='card'>";
-  h += "<p class='small'>Reads a contiguous block of registers in one query — for sensors whose whole "
-       "config/status lives in a known range (e.g. QDW90A/QDY30A-family pressure &amp; level sensors, "
-       "registers 0-6).</p>";
-  h += "<div class='row'><div><label>Preset</label><select id='mrPreset' onchange='mrPresetChange()'>";
-  h += "<option value='custom'>Custom</option>";
-  h += "<option value='qdw90a'>QDW90A / QDY30A family (FC03, start 0x0000, count 7)</option>";
-  h += "<option value='sm7779'>SM7779 radar level (FC03, start 0x0064, count 6)</option>";
-  h += "</select></div></div>";
-  h += "<div class='grid4'>";
-  h += "<div><label>Slave ID</label><input id='mrSid' type='number' min='1' max='247' value='1'></div>";
-  h += "<div><label>Function Code</label><select id='mrFc'><option value='3'>03 - Holding Regs</option><option value='4'>04 - Input Regs</option></select></div>";
-  h += "<div><label>Start Register</label><input id='mrReg' value='0'></div>";
-  h += "<div><label>Count</label><input id='mrCount' type='number' min='1' max='16' value='7'></div>";
-  h += "</div>";
-  h += "<button type='button' onclick='runMultiProbe()'>&#128269; Read Registers</button>";
-  h += "<div id='mrResult' class='small' style='margin-top:8px'></div></div>";
-
-  h += "<h3>Register Write</h3><div class='card'>";
-  h += "<p class='small'><b>Caution:</b> writes directly to a sensor register (FC06). Probe-read the current "
-       "value first and write it down, in case you need to undo a change.</p>";
-  h += "<div class='row'><div><label>Preset</label><select id='wrPreset' onchange='wrPresetChange()'>";
-  h += "<option value='custom'>Custom (enter register manually)</option>";
-  h += "<option value='0x006B'>Calibration offset (0x006B) — 0-1000 adds, 64535-65535 subtracts</option>";
-  h += "<option value='0x0065'>RECOMMENDED: measuring points (0x0065) — value 1-20, likely averaging count. Lower = faster/noisier reading</option>";
-  h += "<option value='0x0066'>Slave address (0x0066) — value 1-249</option>";
-  h += "<option value='0x0067'>Baud rate (0x0067) — 1=2400 2=4800 3=9600 4=19200 5=38400 6=115200</option>";
-  h += "<option value='0x0068'>EXPERIMENTAL: comm mode (0x0068) — value 1-4, meaning unknown</option>";
-  h += "<option value='0x0069'>EXPERIMENTAL: protocol type (0x0069) — value 1-10, meaning unknown</option>";
-  h += "</select></div></div>";
-  h += "<div class='grid4'>";
-  h += "<div><label>Slave ID</label><input id='wrSid' type='number' min='1' max='247' value='1'></div>";
-  h += "<div><label>Register (hex or dec)</label><input id='wrReg' value='0'></div>";
-  h += "<div><label>Value (hex or dec)</label><input id='wrVal' value='0'></div>";
-  h += "<div></div>";
-  h += "</div>";
-  h += "<button type='button' onclick='runWrite()'>&#9888; Write Register</button>";
-  h += "<div id='wrResult' class='small' style='margin-top:8px'></div></div>";
-
-  h += "<h3>RS485 Sensor Comms Health</h3><div class='card'><div id='commsHealth'>Loading...</div></div>";
-
-  h += "<h3>RS485 Raw Traffic</h3><div class='card'>";
-  h += "<p class='small'>Newest first. <span class='ok'>ok</span> = valid, "
-       "<span class='timeout'>timeout</span> = no response, <span class='crc'>crc</span> = bad reply.</p>";
-  h += "<label><input type='checkbox' id='rawPause'> Pause</label>";
-  h += "<div style='max-height:400px;overflow-y:auto;margin-top:8px'><table class='mono'><thead><tr>"
-       "<th>Age (s)</th><th>Slave</th><th>FC</th><th>TX (hex)</th><th>RX (hex)</th><th>Result</th></tr></thead>"
-       "<tbody id='mbLogBody'></tbody></table></div></div>";
-
-  h += "<h3>CAN Raw Frame Sniffer</h3><div class='card'>";
-  if (!cfg.canEnabled) {
-    h += "<p class='small'>CAN disabled — enable on <a href='/'>Config</a>.</p>";
-  } else {
-    h += "<p class='small'>Newest first. Spot a recognizable value, note the byte offset, define it on "
-         "<a href='/can'>CAN</a>.</p>";
-    h += "<div>Total frames: <span id='diagCanTotal'>...</span> &nbsp; Rate: <span id='diagCanRate'>...</span> fps &nbsp; "
-         "Last frame: <span id='diagCanLast'>...</span></div>";
-    h += "<div style='max-height:400px;overflow-y:auto;margin-top:8px'><table class='mono'><thead><tr>"
-         "<th>Age (s)</th><th>ID</th><th>Ext</th><th>DLC</th><th>Data (hex)</th></tr></thead><tbody id='canFrameBody'></tbody></table></div>";
-  }
-  h += "</div>";
-
-  h += R"(
-<script>
-function setTestBaud(){
-  let baud=document.getElementById('testBaud').value;
-  let box=document.getElementById('testBaudResult');
-  box.textContent='Applying...';
-  fetch('/api/modbus/set-baud-live?baud='+baud,{method:'POST'}).then(r=>r.json()).then(d=>{
-    box.innerHTML='Bus now running at <b>'+d.baud+'</b> baud (not saved — try Register Probe / Bus Scan below).';
-  }).catch(e=>{ box.textContent='Failed: '+e; });
-}
-function runScan(){
-  let btn=document.getElementById('scanBusBtn'); let box=document.getElementById('scanBusResult');
-  let max=document.getElementById('scanMax').value;
-  btn.disabled=true; btn.textContent='Scanning...';
-  box.textContent='Scanning addresses 1-'+max+'... this can take a while for a mostly-empty range.';
-  fetch('/api/modbus/scan?max='+max).then(r=>r.json()).then(d=>{
-    btn.disabled=false; btn.innerHTML='&#128269; Scan Bus';
-    if(d.found.length===0){ box.textContent='No slaves responded. Check wiring, baud rate, and DE pin.'; return; }
-    box.innerHTML = 'Found ' + d.found.length + ' slave(s): <b>' + d.found.join(', ') + '</b>';
-  }).catch(e=>{ btn.disabled=false; btn.innerHTML='&#128269; Scan Bus'; box.textContent='Scan failed: '+e; });
-}
-function runProbe(){
-  let sid=document.getElementById('probeSid').value;
-  let fc=document.getElementById('probeFc').value;
-  let reg=document.getElementById('probeReg').value;
-  let dt=document.getElementById('probeDt').value;
-  let box=document.getElementById('probeResult');
-  probeWithRetry('/api/modbus/probe?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&dataType='+dt+'&wordOrder=0', box,
-    (d)=>'<span class="ok">OK</span> — raw registers: ['+d.regs.join(', ')+']  decoded: <b>'+d.decoded.toFixed(4)+'</b>'+
-      (d.actualSlaveId!==undefined ? '  <b>[broadcast reply — sensor\'s real address is '+d.actualSlaveId+']</b>' : ''),
-    (d)=>'<span class="timeout">FAILED</span> — '+d.error);
-}
-function wrPresetChange(){
-  let p=document.getElementById('wrPreset').value;
-  if(p==='custom') return;
-  document.getElementById('wrReg').value = p;
-}
-const MR_QDW90A_LABELS = ['Slave address (1-255)','Baud code (0=1200..7=115200)',
-  'Pressure unit code (0=none 1=CM 2=MM 3=MPa 4=Pa 5=KPa 6=mA — labels sometimes unreliable, verify empirically)',
-  'Decimal places code (0=#### 1=###.# 2=##.## 3=#.###)','Measured value (signed, apply decimal code)',
-  'Range zero point','Range full-scale point'];
-const MR_SM7779_LABELS = ['Model code','Measuring points (1-20, higher=slower/steadier)',
-  'Device address (1-249) — CAUTION: changing this breaks comms immediately',
-  'Baud code (1=2400 2=4800 3=9600 4=19200 5=38400 6=115200) — CAUTION: changing this breaks comms immediately',
-  'Comm mode (1-4, experimental/undocumented)','Protocol type (1-10, experimental/undocumented)'];
-function mrPresetChange(){
-  let p=document.getElementById('mrPreset').value;
-  if(p==='custom') return;
-  if(p==='qdw90a'){
-    document.getElementById('mrFc').value='3';
-    document.getElementById('mrReg').value='0x0000';
-    document.getElementById('mrCount').value='7';
-  } else if(p==='sm7779'){
-    document.getElementById('mrFc').value='3';
-    document.getElementById('mrReg').value='0x0064';
-    document.getElementById('mrCount').value='6';
-  }
-}
-function runMultiProbe(){
-  let sid=document.getElementById('mrSid').value;
-  let fc=document.getElementById('mrFc').value;
-  let reg=document.getElementById('mrReg').value;
-  let count=document.getElementById('mrCount').value;
-  let preset=document.getElementById('mrPreset').value;
-  let box=document.getElementById('mrResult');
-  box.textContent='Reading...';
-  fetch('/api/modbus/probe-multi?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&count='+count)
-    .then(r=>r.json()).then(d=>{
-      if(!d.ok){ box.innerHTML='<span class="timeout">FAILED</span> — '+d.error; return; }
-      let labels = preset==='qdw90a' ? MR_QDW90A_LABELS : preset==='sm7779' ? MR_SM7779_LABELS : null;
-      let s='<table><tr><th>#</th><th>Value (dec)</th><th>Value (hex)</th>';
-      if(labels) s+='<th>Meaning</th>';
-      s+='</tr>';
-      d.regs.forEach((v,i)=>{
-        s+='<tr><td>'+i+'</td><td>'+v+'</td><td>0x'+v.toString(16).toUpperCase().padStart(4,'0')+'</td>';
-        if(labels) s+='<td>'+(labels[i]||'')+'</td>';
-        s+='</tr>';
-      });
-      s+='</table>';
-      if(d.actualSlaveId!==undefined) s+='<p class="ok"><b>Broadcast reply — sensor\'s real address is '+d.actualSlaveId+'</b></p>';
-      box.innerHTML=s;
-    }).catch(e=>{ box.textContent='Request failed: '+e; });
-}
-function runWrite(){
-  let sid=document.getElementById('wrSid').value;
-  let reg=document.getElementById('wrReg').value;
-  let val=document.getElementById('wrVal').value;
-  let box=document.getElementById('wrResult');
-  if(!confirm('Write value '+val+' to register '+reg+' on slave '+sid+'? Make sure this matches the sensor\'s documented register map.')) return;
-  box.textContent='Writing...';
-  fetch('/api/modbus/write?slaveId='+sid+'&reg='+reg+'&value='+val,{method:'POST'})
-    .then(r=>r.json()).then(d=>{
-      if(d.ok) box.innerHTML = '<span class="ok">OK</span> — sensor confirmed register '+d.reg+' = '+d.value;
-      else box.innerHTML = '<span class="timeout">FAILED</span> — '+d.error;
-    }).catch(e=>{ box.textContent='Request failed: '+e; });
-}
-function fetchCommsHealth(){
-  fetch('/api/sensors/live').then(r=>r.json()).then(d=>{
-    let s='<table><tr><th>Sensor</th><th>Slave</th><th>Polls</th><th>Errors</th><th>Last OK</th><th>Status</th></tr>';
-    d.sensors.forEach(x=>{
-      if(!x.enabled) return;
-      let lastOk = x.lastOkAgoMs!=null ? (x.lastOkAgoMs/1000).toFixed(0)+'s ago' : 'never';
-      s += '<tr><td>'+(x.name||'Sensor '+(x.idx+1))+'</td><td>'+x.slaveId+'</td><td>'+x.pollCount+'</td>'+
-           '<td class="'+(x.errorCount>0?'warn':'')+'">'+x.errorCount+'</td><td>'+lastOk+'</td>'+
-           '<td class="'+x.status+'">'+x.status+'</td></tr>';
-    });
-    s+='</table>';
-    document.getElementById('commsHealth').innerHTML = s || 'No sensors configured yet.';
-  });
-}
-setInterval(fetchCommsHealth, 3000); fetchCommsHealth();
-function fetchCanFrames(){
-  fetch('/api/can/frames').then(r=>r.json()).then(d=>{
-    document.getElementById('diagCanTotal') && (document.getElementById('diagCanTotal').textContent = d.frameTotal);
-    document.getElementById('diagCanRate') && (document.getElementById('diagCanRate').textContent = d.frameRate);
-    document.getElementById('diagCanLast') && (document.getElementById('diagCanLast').textContent = d.lastFrameAgoMs!=null ? (d.lastFrameAgoMs/1000).toFixed(1)+'s ago' : 'never');
-    let body = document.getElementById('canFrameBody');
-    if(!body) return;
-    let s = '';
-    d.frames.forEach(f=>{
-      s += '<tr><td>'+(f.ageMs/1000).toFixed(1)+'</td><td>'+f.id+'</td><td>'+(f.ext?'Y':'N')+'</td><td>'+f.dlc+'</td><td>'+f.data+'</td></tr>';
-    });
-    body.innerHTML = s;
-  });
-}
-if(document.getElementById('canFrameBody')) setInterval(fetchCanFrames, 1000);
-fetchCanFrames();
-function fetchModbusLog(){
-  if(document.getElementById('rawPause') && document.getElementById('rawPause').checked) return;
-  fetch('/api/modbus/log').then(r=>r.json()).then(d=>{
-    let body = document.getElementById('mbLogBody');
-    if(!body) return;
-    let s = '';
-    d.log.forEach(e=>{
-      let cls = e.result==='ok'?'ok':e.result;
-      s += '<tr><td>'+(e.ageMs/1000).toFixed(1)+'</td><td>'+e.slaveId+'</td><td>'+e.funcCode+'</td>'+
-           '<td>'+e.tx+'</td><td>'+(e.rx||'<span class="stale">(none)</span>')+'</td>'+
-           '<td class="'+cls+'">'+e.result+'</td></tr>';
-    });
-    body.innerHTML = s || '<tr><td colspan="6" class="small">No traffic yet — add a sensor on /sensors or run a probe/scan above.</td></tr>';
-  });
-}
-if(document.getElementById('mbLogBody')) setInterval(fetchModbusLog, 1000);
-fetchModbusLog();
 </script>)";
   h += "</div>";
   return h;
@@ -876,9 +628,9 @@ static void handleApiStatus() {
   _srv->send(200, "application/json", out);
 }
 
-// Live sensor readings for the /sensors + /diag pages — richer than the
-// payload's "channels" array (includes disabled slots, error counters,
-// slave IDs) since this is a diagnostics/editing view, not the wire format.
+// Live sensor readings for the /sensors page — richer than the payload's
+// "channels" array (includes disabled slots, error counters, slave IDs)
+// since this is an editing view, not the wire format.
 static void handleSensorsLive() {
   DynamicJsonDocument doc(4096);
   JsonArray arr = doc.createNestedArray("sensors");
@@ -894,10 +646,8 @@ static void handleSensorsLive() {
       o["hasValue"]   = r.hasValue;
       o["value"]      = r.hasValue ? r.value : (float)0;
       if (!r.hasValue) o["value"] = nullptr;
-      // "status" = raw per-poll result, used by /diag's comms health
-      // table (shows every real timeout/CRC error, unfiltered — that
-      // page exists specifically to see what's actually happening).
-      // "displayStatus" = debounced version for the /sensors page's own
+      // "status" = raw per-poll result (every real timeout/CRC error,
+      // unfiltered). "displayStatus" = debounced version for the /sensors page's own
       // live indicator next to each sensor card (suppresses a lone
       // timeout on a sensor with a slow measurement cycle that's
       // otherwise reporting fine).
@@ -939,80 +689,9 @@ static void handleCanLive() {
   _srv->send(200, "application/json", out);
 }
 
-// Raw CAN frame log for the Diagnostics page sniffer.
-static void handleCanFrames() {
-  DynamicJsonDocument doc(6144);
-  doc["frameTotal"] = canGetFrameTotal();
-  doc["frameRate"]  = canGetRecentFrameRate();
-  unsigned long lastMs = canGetLastFrameMs();
-  if (lastMs) doc["lastFrameAgoMs"] = (long)(millis() - lastMs);
-  else doc["lastFrameAgoMs"] = nullptr;
-  doc["serverNowMs"] = (long)millis();
-
-  JsonArray arr = doc.createNestedArray("frames");
-  CanFrameLog frames[CAN_LOG_SIZE];
-  int n = canGetRecentFrames(frames, CAN_LOG_SIZE);
-  unsigned long now = millis();
-  for (int i = 0; i < n; i++) {
-    JsonObject o = arr.createNestedObject();
-    char idHex[12];
-    snprintf(idHex, sizeof(idHex), "0x%lX", (unsigned long)frames[i].id);
-    o["id"]  = idHex;
-    o["ext"] = frames[i].extended;
-    o["dlc"] = frames[i].dlc;
-    o["ageMs"] = (long)(now - frames[i].ms);
-    char dataHex[24] = {0};
-    int p = 0;
-    for (int b = 0; b < frames[i].dlc && b < 8; b++) {
-      p += snprintf(dataHex + p, sizeof(dataHex) - p, "%02X ", frames[i].data[b]);
-    }
-    o["data"] = String(dataHex);
-  }
-  String out;
-  serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-// Raw Modbus TX/RX log for the Diagnostics page — every actual
-// transaction (background polling AND manual probes), byte-for-byte, no
-// USB cable required. This is the direct answer to "let me see what the
-// sensor is actually saying."
-static void handleModbusLog() {
-  DynamicJsonDocument doc(8192);
-  doc["serverNowMs"] = (long)millis();
-  JsonArray arr = doc.createNestedArray("log");
-  ModbusRawLogEntry entries[MODBUS_LOG_SIZE];
-  int n;
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-    n = modbusGetRecentLog(entries, MODBUS_LOG_SIZE);
-    xSemaphoreGive(modbusBusMutex);
-  } else {
-    n = 0;
-  }
-  unsigned long now = millis();
-  for (int i = 0; i < n; i++) {
-    JsonObject o = arr.createNestedObject();
-    o["ageMs"]    = (long)(now - entries[i].ms);
-    o["slaveId"]  = entries[i].slaveId;
-    o["funcCode"] = entries[i].funcCode;
-    o["result"]   = (entries[i].result == MB_OK) ? "ok" :
-                     (entries[i].result == MB_TIMEOUT) ? "timeout" :
-                     (entries[i].result == MB_CRC_ERROR) ? "crc" : "bad";
-    char txHex[32] = {0}; int p = 0;
-    for (int b = 0; b < entries[i].txLen; b++) p += snprintf(txHex + p, sizeof(txHex) - p, "%02X ", entries[i].tx[b]);
-    o["tx"] = String(txHex);
-    char rxHex[128] = {0}; p = 0;
-    for (int b = 0; b < entries[i].rxLen && p < (int)sizeof(rxHex) - 4; b++) p += snprintf(rxHex + p, sizeof(rxHex) - p, "%02X ", entries[i].rx[b]);
-    o["rx"] = String(rxHex);
-  }
-  String out;
-  serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
 // Reads a specific register combo from a specific slave right now —
-// backs both the /diag Register Probe tool and the per-sensor "Probe Now"
-// button on /sensors. Doesn't touch saved config at all.
+// backs the per-sensor "Probe Now" button on /sensors. Doesn't touch
+// saved config at all.
 static void handleModbusProbe() {
   if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
     _srv->send(503, "application/json", "{\"ok\":false,\"error\":\"bus busy\"}");
@@ -1064,132 +743,10 @@ static void handleModbusProbe() {
   _srv->send(200, "application/json", out);
 }
 
-// Reads a contiguous block of raw registers (no decoding) — backs the
-// /diag "Multi-Register Read" tool. Useful for sensors that expose a
-// chunk of config/status registers together (e.g. QDW90A/QDY30A-family
-// pressure & level sensors: address, baud, unit, decimals, value, zero,
-// full-scale all sit in registers 0-6). Doesn't touch saved config.
-static void handleModbusProbeMulti() {
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
-    _srv->send(503, "application/json", "{\"ok\":false,\"error\":\"bus busy\"}");
-    return;
-  }
-  uint8_t slaveId = _p("slaveId").toInt();
-  uint8_t funcCode = _p("funcCode").toInt();
-  String regStr = _p("reg");
-  uint16_t startAddr = (uint16_t)strtol(regStr.c_str(), nullptr, 0);
-  uint8_t count = (uint8_t)constrain(_p("count").toInt(), 1, 16);
-
-  uint16_t regs[16] = {0};
-  uint8_t actualSlaveId = 0;
-  int rc = modbusReadRegs(slaveId, funcCode, startAddr, count, regs, true, 600, &actualSlaveId);
-  xSemaphoreGive(modbusBusMutex);
-
-  DynamicJsonDocument doc(512);
-  if (rc == MB_OK) {
-    doc["ok"] = true;
-    JsonArray regsArr = doc.createNestedArray("regs");
-    for (int i = 0; i < count; i++) regsArr.add(regs[i]);
-    if (modbusIsBroadcastAddr(slaveId)) doc["actualSlaveId"] = actualSlaveId;
-  } else {
-    doc["ok"] = false;
-    doc["error"] = (rc == MB_TIMEOUT) ? "timeout — no response" :
-                   (rc == MB_CRC_ERROR) ? "CRC error" : "bad response";
-    if (rc == MB_BAD_RESPONSE && actualSlaveId != 0 && actualSlaveId != slaveId) {
-      doc["error"] = String("bad response — but got a reply FROM address ") + actualSlaveId +
-                     " instead of the address you queried (" + slaveId + ")";
-      doc["actualSlaveId"] = actualSlaveId;
-    }
-  }
-  String out;
-  serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-// Writes a single register to a slave right now (Modbus FC06). Backs
-// the /diag "Register Write" tool — for sensor-side config registers
-// (measurement mode, response time, range/blind-zone, etc.) that a
-// datasheet documents but this firmware has no dedicated field for.
-// Deliberately manual/one-shot — nothing here is saved to our own NVS
-// config; it's a direct write to the SENSOR's own memory.
-static void handleModbusWrite() {
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    _srv->send(503, "application/json", "{\"ok\":false,\"error\":\"bus busy\"}");
-    return;
-  }
-  uint8_t slaveId = _p("slaveId").toInt();
-  String regStr = _p("reg");
-  String valStr = _p("value");
-  uint16_t regAddr = (uint16_t)strtol(regStr.c_str(), nullptr, 0);
-  uint16_t value = (uint16_t)strtol(valStr.c_str(), nullptr, 0);
-
-  int rc = modbusWriteReg(slaveId, regAddr, value, true);
-  xSemaphoreGive(modbusBusMutex);
-
-  DynamicJsonDocument doc(256);
-  if (rc == MB_OK) {
-    doc["ok"] = true;
-    doc["reg"] = regAddr;
-    doc["value"] = value;
-  } else {
-    doc["ok"] = false;
-    doc["error"] = (rc == MB_TIMEOUT) ? "timeout — no response" :
-                   (rc == MB_CRC_ERROR) ? "CRC error" :
-                   (rc == MB_BAD_RESPONSE) ? "sensor rejected write (exception response)" : "bad response";
-  }
-  String out;
-  serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-// Temporary, non-persisted baud change for the /diag "Test Baud" tool —
-// changes Serial2 immediately so Register Probe / Bus Scan can be tried
-// against a different rate in seconds. Deliberately does NOT touch
-// cfg.modbusBaud or NVS at all: a reboot, a genuine /config save, or the
-// background auto-detect task will put the bus back to the saved baud.
-// Held behind modbusBusMutex since it touches the shared Serial2 object
-// the poll task also uses.
-static void handleModbusSetBaudLive() {
-  long baud = _p("baud").isEmpty() ? 9600 : _p("baud").toInt();
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-    modbusSetBaudLive((uint32_t)baud);
-    xSemaphoreGive(modbusBusMutex);
-  }
-  DynamicJsonDocument doc(128);
-  doc["ok"] = true;
-  doc["baud"] = (long)modbusGetCurrentBaud();
-  String out;
-  serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-// Bus-wide slave scan for the Diagnostics page — synchronous/blocking,
-// holds modbusBusMutex for the whole scan so the poll task can't
-// interleave. Deliberately capped by the caller's "max" param since a
-// full 1-247 scan is slow when most addresses are empty (each miss is a
-// ~400ms*2 timeout — FC04 then FC03 both get tried per address).
-static void handleModbusScan() {
-  int maxAddr = _p("max").isEmpty() ? 32 : _p("max").toInt();
-  if (maxAddr < 1) maxAddr = 1;
-  if (maxAddr > 247) maxAddr = 247;
-
-  DynamicJsonDocument doc(1024);
-  JsonArray found = doc.createNestedArray("found");
-
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(60000)) == pdTRUE) {
-    modbusScanSlaves(maxAddr, [&](int addr, int fc) { found.add(addr); });
-    xSemaphoreGive(modbusBusMutex);
-  }
-
-  String out;
-  serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
 // Auto-Detect & Enable — scans the bus and fills in/enables sensor slots
 // for anything new found, saving config if anything changed. Backs both
 // the boot-time/periodic background pass and the manual button on
-// /sensors. Synchronous — same blocking-scan caveat as handleModbusScan.
+// /sensors. Synchronous/blocking — a few hundred ms per address scanned.
 // modbusAutoDetectAndEnable() is already declared+defined in modbus.h,
 // included before this file — no forward decl needed here.
 static void handleAutoDetectEnable() {
@@ -1463,19 +1020,13 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/sensors",  HTTP_GET, [noCacheHtml](){ noCacheHtml(200, sensorsPage(*_cfg)); });
   srv.on("/can",      HTTP_GET, [noCacheHtml](){ noCacheHtml(200, canPage(*_cfg)); });
   srv.on("/live",     HTTP_GET, [noCacheHtml](){ noCacheHtml(200, livePage()); });
-  srv.on("/diag",     HTTP_GET, [noCacheHtml](){ noCacheHtml(200, diagPage(*_cfg)); });
   srv.on("/system",   HTTP_GET, [noCacheHtml](){ noCacheHtml(200, sysPage(*_cfg)); });
 
   // GET APIs
   srv.on("/api/status",       HTTP_GET, handleApiStatus);
   srv.on("/api/sensors/live", HTTP_GET, handleSensorsLive);
   srv.on("/api/can/live",     HTTP_GET, handleCanLive);
-  srv.on("/api/can/frames",   HTTP_GET, handleCanFrames);
   srv.on("/api/modbus/probe", HTTP_GET, handleModbusProbe);
-  srv.on("/api/modbus/probe-multi", HTTP_GET, handleModbusProbeMulti);
-  srv.on("/api/modbus/write", HTTP_POST, handleModbusWrite);
-  srv.on("/api/modbus/scan",  HTTP_GET, handleModbusScan);
-  srv.on("/api/modbus/log",   HTTP_GET, handleModbusLog);
   srv.on("/api/wifi/scan",    HTTP_GET, handleWifiScan);
   srv.on("/api/ota",          HTTP_GET, handleOTA);
 
@@ -1486,7 +1037,6 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/wifi/forget",    HTTP_POST, handleWifiForget);
   srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);
   srv.on("/api/modbus/autodetect-enable", HTTP_POST, handleAutoDetectEnable);
-  srv.on("/api/modbus/set-baud-live", HTTP_POST, handleModbusSetBaudLive);
 
   srv.on("/api/buffer/flush", HTTP_POST, [](){
     flushNow = true;

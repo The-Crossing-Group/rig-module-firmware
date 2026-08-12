@@ -16,14 +16,6 @@
 
 static int _RS485_DE_PIN = -1;
 static HardwareSerial* _mbSerial = nullptr;
-// Tracks whatever baud Serial2 is ACTUALLY running at right now, which is
-// not always cfg.modbusBaud — see modbusSetBaudLive() below, used by the
-// /diag "Test Baud" tool to try a rate without saving/rebooting. Set here
-// so the web UI can show "live bus baud" vs "saved baud" distinctly.
-static uint32_t _mbCurrentBaud = 0;
-
-// Returns whatever baud Serial2 is actually running at right now.
-uint32_t modbusGetCurrentBaud() { return _mbCurrentBaud; }
 
 // CRC16 for Modbus RTU
 static uint16_t modbusCRC(const uint8_t* buf, int len) {
@@ -47,24 +39,7 @@ void modbusInit(int rxPin, int txPin, int dePin, uint32_t baud) {
 
   _mbSerial = &Serial2;
   _mbSerial->begin(baud, SERIAL_8N1, rxPin, txPin);
-  _mbCurrentBaud = baud;
   Serial.printf("[Modbus] Init on Serial2 RX=%d TX=%d DE=%d baud=%u\n", rxPin, txPin, dePin, baud);
-}
-
-// Changes Serial2's baud LIVE, without touching cfg.modbusBaud or NVS at
-// all — purely for the /diag "Test Baud" tool, so you can try a rate
-// against a sensor in seconds instead of save+reboot+check. This is
-// deliberately NOT persisted anywhere; a reboot (or the poll task's own
-// background auto-detect, or genuinely saving /config) will put Serial2
-// back to whatever cfg.modbusBaud says. If you find the right baud this
-// way, you still need to go set it for real on /config to keep it.
-void modbusSetBaudLive(uint32_t baud) {
-  if (!_mbSerial) return;
-  _mbSerial->flush();
-  _mbSerial->updateBaudRate(baud);
-  _mbCurrentBaud = baud;
-  delay(20);
-  Serial.printf("[Modbus] Live baud change (NOT saved) -> %u\n", baud);
 }
 
 // Send bytes, toggle DE high during TX
@@ -113,11 +88,10 @@ static int modbusReceive(uint8_t* buf, int maxLen, int timeoutMs, bool verbose) 
 static const int MB_OK = 0, MB_TIMEOUT = 1, MB_CRC_ERROR = 2, MB_BAD_RESPONSE = 3;
 
 // =============================================================================
-// RAW TRAFFIC LOG — every request/response byte, for the web UI's live
-// "RS485 Raw Traffic" panel (/diag). Unlike Serial Monitor output, this
-// captures EVERY transaction, including normal background polling, not
-// just manual probes — so you can watch what a sensor is actually saying
-// without a USB cable plugged in.
+// RAW TRAFFIC LOG — every request/response byte, kept in a small ring
+// buffer. No web UI in this build reads it back out; retained internally
+// only in case a future debug build wants it. Recording it here is
+// harmless (SRAM only, never written back to a sensor).
 // =============================================================================
 struct ModbusRawLogEntry {
   unsigned long ms;
@@ -148,17 +122,6 @@ static void modbusLogTransaction(uint8_t slaveId, uint8_t funcCode,
   e.result = result;
   _mbLogHead = (_mbLogHead + 1) % MODBUS_LOG_SIZE;
   if (_mbLogCount < MODBUS_LOG_SIZE) _mbLogCount++;
-}
-
-// Copies the most recent N transactions out for JSON serialization,
-// newest first. Returns how many were actually copied.
-int modbusGetRecentLog(ModbusRawLogEntry* out, int maxCount) {
-  int n = min(maxCount, _mbLogCount);
-  for (int i = 0; i < n; i++) {
-    int idx = (_mbLogHead - 1 - i + MODBUS_LOG_SIZE * 2) % MODBUS_LOG_SIZE;
-    out[i] = _mbLog[idx];
-  }
-  return n;
 }
 
 // Drains any bytes sitting in the RX buffer, but doesn't stop at the
@@ -324,91 +287,16 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
   return MB_OK;
 }
 
-// Writes a single 16-bit register (FC06 - Write Single Register). Used
-// for sensor-side config registers that a datasheet documents but our
-// firmware has no dedicated UI for (e.g. a "fast measurement mode"
-// switch, a response-time/filter setting, a range/blind-zone value).
-// Standard Modbus RTU: request and a well-formed reply both echo back
-// the register address + value written, so success is "got back exactly
-// what we sent, CRC-correct" — nothing to decode.
-// Returns MB_OK/MB_TIMEOUT/MB_CRC_ERROR/MB_BAD_RESPONSE, same codes as
-// modbusReadRegs.
-int modbusWriteReg(uint8_t slaveId, uint16_t regAddr, uint16_t value,
-                    bool verbose = false, int timeoutMs = 600) {
-  if (!_mbSerial) return MB_TIMEOUT;
-
-  modbusFlushRx(); // same late-byte defense as modbusReadRegs
-
-  uint8_t req[8];
-  req[0] = slaveId;
-  req[1] = 0x06; // Write Single Register
-  req[2] = regAddr >> 8;
-  req[3] = regAddr & 0xFF;
-  req[4] = value >> 8;
-  req[5] = value & 0xFF;
-  uint16_t crc = modbusCRC(req, 6);
-  req[6] = crc & 0xFF;
-  req[7] = crc >> 8;
-
-  modbusSend(req, 8, verbose);
-
-  uint8_t resp[16];
-  int n = modbusReceive(resp, sizeof(resp), timeoutMs, verbose);
-
-  if (n < 3) {
-    if (verbose) Serial.printf("[Modbus] Write timeout: got %d bytes\n", n);
-    modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_TIMEOUT);
-    return MB_TIMEOUT;
-  }
-
-  // Exception response: slaveId, funcCode|0x80, exceptionCode, CRC(2) = 5 bytes.
-  // Unlike modbusReadRegs, this used to only return early when the
-  // exception frame's own CRC checked out — a CRC mismatch fell through
-  // into the normal-response parsing below instead of being reported as
-  // an error, a small but real gap versus modbusReadRegs' equivalent
-  // check. Now matches that pattern: any CRC failure on what looks like
-  // an exception frame is reported immediately, not silently ignored.
-  if ((resp[1] & 0x80) && n >= 5) {
-    uint16_t rxCrc = resp[3] | ((uint16_t)resp[4] << 8);
-    uint16_t calcCrc = modbusCRC(resp, 3);
-    if (rxCrc == calcCrc) {
-      if (verbose) Serial.printf("[Modbus] Write exception response: code %02X\n", resp[2]);
-      modbusLogTransaction(slaveId, 0x06, req, 8, resp, 5, MB_BAD_RESPONSE);
-      return MB_BAD_RESPONSE;
-    }
-    if (verbose) Serial.printf("[Modbus] Write: exception-shaped response failed CRC (got %04X, calc %04X)\n", rxCrc, calcCrc);
-    modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_CRC_ERROR);
-    return MB_CRC_ERROR;
-  }
-
-  // Normal FC06 reply is always exactly 8 bytes: slaveId, 0x06, regHi,
-  // regLo, valHi, valLo, CRC(2) — same length as the request.
-  if (n < 8) {
-    if (verbose) Serial.printf("[Modbus] Write: short response (%d bytes)\n", n);
-    modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_BAD_RESPONSE);
-    return MB_BAD_RESPONSE;
-  }
-
-  uint16_t rxCrc = resp[6] | ((uint16_t)resp[7] << 8);
-  uint16_t calcCrc = modbusCRC(resp, 6);
-  if (rxCrc != calcCrc) {
-    if (verbose) Serial.printf("[Modbus] Write CRC error: got %04X, calc %04X\n", rxCrc, calcCrc);
-    modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_CRC_ERROR);
-    return MB_CRC_ERROR;
-  }
-
-  // Same broadcast-reply bug fixed as in modbusReadRegs above: a
-  // broadcast write's reply comes back from the sensor's real address,
-  // not the broadcast address we sent to.
-  if ((!modbusIsBroadcastAddr(slaveId) && resp[0] != slaveId) || resp[1] != 0x06) {
-    if (verbose) Serial.printf("[Modbus] Write: bad response slave=%02X fc=%02X\n", resp[0], resp[1]);
-    modbusLogTransaction(slaveId, 0x06, req, 8, resp, n, MB_BAD_RESPONSE);
-    return MB_BAD_RESPONSE;
-  }
-
-  modbusLogTransaction(slaveId, 0x06, req, 8, resp, 8, MB_OK);
-  return MB_OK;
-}
+// NOTE: There is deliberately no modbusWriteReg()/FC06 write support in
+// this production firmware variant. Writing to a sensor's own config
+// registers (comm mode, protocol type, etc.) is exactly what corrupted
+// the SM7779 radar sensor's internal state during earlier debugging
+// (2026-08-10/11) — undocumented registers accepted the write but put the
+// sensor into a state it couldn't recover from without a factory reset.
+// If a sensor genuinely needs a register written (address, baud, etc.)
+// do it in isolation with the LilyGo sensor-debug tool before wiring it
+// onto the shared production bus — keep write capability off hardware
+// that's actively running three-plus sensors you can't afford to lose.
 
 // Decodes 1 or 2 raw registers into a float per the sensor's configured
 // data type + word order. This is the whole point of making sensors
