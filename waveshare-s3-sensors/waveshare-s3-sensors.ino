@@ -157,26 +157,13 @@ void setup() {
     RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
   modbusInit(RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
 
-  // Auto-detect & enable: scan a modest address range (1-16, keeps boot
-  // delay reasonable) at the configured baud, and if nothing's configured
-  // yet AND nothing answers, also sweep the other standard baud rates
-  // (see modbusAutoDetectAndEnable() in modbus.h) — covers "brand new
-  // module, sensor's already wired, but at some other baud" without any
-  // manual steps. Auto-fills/enables any responding slave that isn't
-  // already configured. No mutex contention concern here — nothing else
-  // touches the bus yet this early in setup(), poll task hasn't started.
-  Serial.println("[BOOT] Auto-detecting RS485 sensors (addresses 1-16, current baud first)...");
-  {
-    int found = modbusAutoDetectAndEnable(cfg, 16);
-    if (found > 0) {
-      Serial.printf("[BOOT] Auto-detect found and enabled %d new sensor(s) at %ld baud\n", found, cfg.modbusBaud);
-      prefs.begin("rigmod", false);
-      saveConfig(prefs, cfg);
-      prefs.end();
-    } else {
-      Serial.println("[BOOT] Auto-detect found no new sensors at any standard baud");
-    }
-  }
+  // Auto-detect & enable now runs from pollTask shortly after startup
+  // instead of blocking here — a from-scratch scan (16 addresses x every
+  // standard baud, 600ms timeout each) can take tens of seconds, which
+  // used to delay the AP/web UI coming up that whole time. Now the AP
+  // and web server start immediately below, and the scan happens ~2s
+  // later in the background (see pollTask()).
+  Serial.println("[BOOT] RS485 sensor auto-detect deferred to background poll task (won't block AP/web UI startup)");
 
   // CAN only comes up if explicitly enabled on the Config page — listen-
   // only mode (see can.h), so an unconfigured/unused CAN bus is never
@@ -561,7 +548,12 @@ void pollTask(void* param) {
   delay(2000);
 
   int cycleCount = 0;
-  unsigned long lastAutoDetectMs = millis(); // boot-time scan already ran in setup()
+  // Backdated so the very first loop iteration's "> 300000UL" check below
+  // is already true — runs the first auto-detect scan almost immediately
+  // (a couple seconds after boot) instead of waiting the full 5-minute
+  // period. AP/web UI is already up by this point (setup() no longer
+  // blocks on this scan), so there's no downside to doing it right away.
+  unsigned long lastAutoDetectMs = millis() - 300000UL;
   for (;;) {
     cycleCount++;
     int okCount = 0, failCount = 0;
