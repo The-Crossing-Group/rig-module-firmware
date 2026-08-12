@@ -599,7 +599,10 @@ void pollTask(void* param) {
       float raw = 0, value = 0;
       int rc;
       if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        rc = modbusPollSensor(s, raw, value);
+        // verbose=true: prints every RS485 TX/RX byte for this poll to
+        // Serial (see modbusSend()/modbusReceive() in modbus.h) — handy
+        // for bench testing over USB without needing WiFi/web UI at all.
+        rc = modbusPollSensor(s, raw, value, true);
         xSemaphoreGive(modbusBusMutex);
       } else {
         rc = MB_TIMEOUT;
@@ -653,7 +656,11 @@ void pollTask(void* param) {
       vTaskDelay(pdMS_TO_TICKS(20));
     }
 
-    if (cycleCount <= 5 || cycleCount % 20 == 0) {
+    {
+      // Summary table printed every cycle (bench-testing over serial —
+      // no downside to printing every time; this used to only print for
+      // the first 5 cycles then every 20th, which was too sparse for
+      // active USB-serial testing without WiFi/web UI).
       Serial.printf("[Poll] Cycle #%d: %d ok, %d failed\n", cycleCount, okCount, failCount);
       if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
         for (int i = 0; i < MAX_SENSORS; i++) {
