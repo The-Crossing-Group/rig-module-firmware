@@ -63,6 +63,11 @@
 //   log [n]                       — show last n traffic log entries (default 15)
 //   sniff <seconds>               — listen passively, print any unsolicited
 //                                    bytes seen on the bus (no TX at all)
+//   sweep [slaveId] [fc] [reg] [count]
+//                                 — baud sweep: register read at 8N1 across all
+//                                    standard bauds (1200-115200), stops on first
+//                                    clean reply. Defaults: slave 1, FC03, reg
+//                                    0x0000, count 1
 //   qdw90a [slaveId]              — labeled probe of all 7 QDW90A/QDY30A
 //                                    registers (address, baud, unit, decimals,
 //                                    value, zero point, full-scale), default
@@ -119,6 +124,11 @@ void printHelp() {
     "                                reset values across all parity/stop combos at\n"
     "                                9600, checking for a real ack after each. If\n"
     "                                nothing acks anywhere, auto-runs a 10s sniff too\n"
+    "  sweep [slaveId] [fc] [reg] [count]\n"
+    "                                baud sweep: tries a register read at 8N1 across\n"
+    "                                all standard bauds (1200-115200), stops and stays\n"
+    "                                on the first one that gets a clean reply.\n"
+    "                                defaults: slave 1, FC03, reg 0x0000, count 1\n"
     "  qdw90a [slaveId]              labeled read of all 7 QDW90A/QDY30A registers\n"
     "                                (default slave 1)\n"
   ));
@@ -326,6 +336,65 @@ void doStop(std::vector<String>& args) {
   SerialCfg sc = dbgGetSerialCfg();
   dbgSerialApply(sc.baud, sc.parity, s);
   doStatus();
+}
+
+// =============================================================================
+// BAUD SWEEP — tries a single FC03/FC04 register read against one slave
+// address across every standard baud rate at 8N1, so you don't have to
+// manually "baud <n>" + "read ..." over and over while hunting for a
+// sensor's actual configured baud. Parity/stop bits are NOT swept here
+// (that's what "recover" is for, and it's a different failure mode) -
+// this is specifically for "I'm getting garbage/no reply, what baud is
+// this thing actually on". Stops and leaves the port on the first baud
+// that gets a clean, CRC-valid reply; restores the original config if
+// nothing works anywhere.
+// =============================================================================
+static const uint32_t STANDARD_BAUDS[] = {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200};
+static const int NUM_STANDARD_BAUDS = 8;
+
+String dbgBaudSweep(uint8_t slaveId, uint8_t fc, uint16_t reg, uint8_t count) {
+  SerialCfg orig = dbgGetSerialCfg();
+  String out = "Baud sweep: probing slave " + String(slaveId) + ", FC" + String(fc)
+    + ", reg 0x" + String(reg, HEX) + ", count " + String(count) + ", 8N1, across standard bauds...\n";
+  bool found = false;
+  uint32_t foundBaud = 0;
+
+  for (int i = 0; i < NUM_STANDARD_BAUDS; i++) {
+    uint32_t b = STANDARD_BAUDS[i];
+    dbgSerialApply(b, 'N', 1);
+    delay(30);
+    ModbusResult r = dbgReadRegs(slaveId, fc, reg, count, 350);
+    if (r.ok) {
+      out += "  " + String(b) + " baud: OK — reply from slave " + String(r.actualSlaveId) + ": ";
+      for (int j = 0; j < r.regCount; j++) out += String(r.regs[j]) + " ";
+      out += "\n";
+      if (!found) { found = true; foundBaud = b; }
+    } else {
+      out += "  " + String(b) + " baud: " + r.error;
+      if (r.rxHex.length()) out += " (raw: " + r.rxHex + ")";
+      out += "\n";
+    }
+  }
+
+  if (found) {
+    dbgSerialApply(foundBaud, 'N', 1);
+    out += "\n*** Working baud found: " + String(foundBaud) + " 8N1. Port left at this baud. ***\n";
+  } else {
+    dbgSerialApply(orig.baud, orig.parity, orig.stopBits);
+    out += "\nNo baud got a clean reply at 8N1. Port restored to " + String(orig.baud)
+      + " 8" + String(orig.parity) + String(orig.stopBits) + ".\n"
+      + "If you're seeing garbled-but-nonzero replies at every baud, try 'recover' (parity/stop sweep) "
+      + "or double-check A/B polarity and 24V power.\n";
+  }
+  return out;
+}
+
+void doBaudSweep(std::vector<String>& args) {
+  uint8_t sid = args.size() > 1 ? (uint8_t)parseNum(args[1]) : 1;
+  uint8_t fc = args.size() > 2 ? (uint8_t)parseNum(args[2]) : 3;
+  uint16_t reg = args.size() > 3 ? (uint16_t)parseNum(args[3]) : 0x0000;
+  uint8_t count = args.size() > 4 ? (uint8_t)parseNum(args[4]) : 1;
+  Serial.print(dbgBaudSweep(sid, fc, reg, count));
 }
 
 // Shared passive-listen implementation used by the USB command, the web
@@ -545,6 +614,7 @@ void handleCommand(String line) {
   else if (cmd == "autosniff") doAutoSniff(args);
   else if (cmd == "bitscope") doBitscope(args);
   else if (cmd == "recover") { Serial.println("Starting recovery sweep (6 framing combos + auto-sniff if nothing acks, ~4-15s)..."); Serial.print(dbgRecoverySweep()); }
+  else if (cmd == "sweep") doBaudSweep(args);
   else if (cmd == "qdw90a") doQdw90a(args);
   else Serial.println("Unknown command '" + cmd + "'. Type 'help' for the list.");
 }
@@ -650,6 +720,19 @@ void handleRoot() {
        "<form action='/bitscope' method='GET'><div class='row'>"
        "Window (ms): <input type='number' name='ms' value='6000' min='50' max='15000' style='width:70px'>"
        "<button type='submit'>Capture</button>"
+       "</div></form>";
+
+  h += "<h2>Baud Sweep</h2>"
+       "<div class='row'>Tries a register read at 8N1 across every standard baud "
+       "(1200-115200) against one slave address. Stops and leaves the port on the "
+       "first baud that gets a clean reply - use this when you're not sure what baud "
+       "a sensor is actually configured for.</div>"
+       "<form action='/sweep' method='GET'><div class='row'>"
+       "Slave: <input name='sid' value='1' style='width:50px'>"
+       "FC: <select name='fc'><option value='3'>03</option><option value='4'>04</option></select>"
+       "Reg: <input name='reg' value='0x0000' style='width:70px'>"
+       "Count: <input name='count' value='1' style='width:50px'>"
+       "<button type='submit'>Sweep</button>"
        "</div></form>";
 
   h += "<h2>SM7779 Recovery Sweep</h2>"
@@ -808,6 +891,19 @@ void handleRecoverWeb() {
   server.send(200, "text/html", h);
 }
 
+void handleSweepWeb() {
+  uint8_t sid = server.hasArg("sid") ? (uint8_t)parseNum(server.arg("sid")) : 1;
+  uint8_t fc = server.hasArg("fc") ? (uint8_t)parseNum(server.arg("fc")) : 3;
+  uint16_t reg = server.hasArg("reg") ? (uint16_t)parseNum(server.arg("reg")) : 0;
+  uint8_t count = server.hasArg("count") ? (uint8_t)parseNum(server.arg("count")) : 1;
+
+  String out = dbgBaudSweep(sid, fc, reg, count);
+  Serial.println("[Web] " + out);
+
+  String h = String(PAGE_HEAD) + "<h2>Baud sweep result</h2><pre>" + htmlEscape(out) + "</pre><p><a href='/'>&larr; back</a></p>" + PAGE_FOOT;
+  server.send(200, "text/html", h);
+}
+
 void handleQdw90aWeb() {
   uint8_t sid = server.hasArg("sid") ? (uint8_t)parseNum(server.arg("sid")) : 1;
   String out = qdw90aReport(sid);
@@ -907,6 +1003,7 @@ void setupWebServer() {
   server.on("/autosniff", handleAutosniff);
   server.on("/bitscope", handleBitscopeWeb);
   server.on("/recover", handleRecoverWeb);
+  server.on("/sweep", handleSweepWeb);
   server.on("/qdw90a", handleQdw90aWeb);
   server.on("/read", handleReadWeb);
   server.on("/write", handleWriteWeb);
