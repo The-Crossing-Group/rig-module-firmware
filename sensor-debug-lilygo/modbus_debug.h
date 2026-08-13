@@ -17,6 +17,13 @@
 #pragma once
 #include <Arduino.h>
 
+// Defined in the .ino (WS2812 status LED) - forward-declared here so
+// every Modbus request in this file can flash green/red on its own
+// result without every single command handler having to remember to
+// call it.
+void ledFlashOk();
+void ledFlashErr();
+
 static int _dbgDePin = -1;
 static int _dbgRxPin = -1;
 static int _dbgTxPin = -1;
@@ -279,17 +286,19 @@ ModbusResult dbgReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr, 
   int n = dbgRawSend(req, 8, resp, sizeof(resp), timeoutMs);
   r.rxHex = n > 0 ? bytesToHex(resp, n) : "";
 
-  if (n < 3) { r.error = "timeout (" + String(n) + " bytes)"; dbgLog("FC" + String(funcCode) + " read", req, 8, resp, n, "timeout"); return r; }
+  if (n < 3) { r.error = "timeout (" + String(n) + " bytes)"; dbgLog("FC" + String(funcCode) + " read", req, 8, resp, n, "timeout"); ledFlashErr(); return r; }
 
   if (resp[1] & 0x80) {
     r.error = "exception code " + String(resp[2]);
     dbgLog("FC" + String(funcCode) + " read", req, 8, resp, n, r.error);
+    ledFlashErr();
     return r;
   }
 
   if (resp[1] != 0x03 && resp[1] != 0x04) {
     r.error = "unexpected function code 0x" + String(resp[1], HEX);
     dbgLog("FC" + String(funcCode) + " read", req, 8, resp, n, r.error);
+    ledFlashErr();
     return r;
   }
 
@@ -298,6 +307,7 @@ ModbusResult dbgReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr, 
   if (frameLen > (int)sizeof(resp) || n < frameLen) {
     r.error = "short/oversized frame (got " + String(n) + ", need " + String(frameLen) + ")";
     dbgLog("FC" + String(funcCode) + " read", req, 8, resp, n, r.error);
+    ledFlashErr();
     return r;
   }
 
@@ -306,6 +316,7 @@ ModbusResult dbgReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr, 
   if (rxCrc != calcCrc) {
     r.error = "CRC mismatch (got " + String(rxCrc, HEX) + ", calc " + String(calcCrc, HEX) + ")";
     dbgLog("FC" + String(funcCode) + " read", req, 8, resp, n, r.error);
+    ledFlashErr();
     return r;
   }
 
@@ -315,6 +326,7 @@ ModbusResult dbgReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr, 
   if (addrMismatch && !dbgIsBroadcastAddr(slaveId)) {
     r.error = "address mismatch: asked " + String(slaveId) + ", got reply from " + String(resp[0]) + " (data below is real, just from a different address)";
     dbgLog("FC" + String(funcCode) + " read", req, 8, resp, n, r.error);
+    ledFlashErr();
     return r;
   }
 
@@ -326,6 +338,7 @@ ModbusResult dbgReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr, 
   r.regCount = copyCount;
   r.ok = true;
   dbgLog("FC" + String(funcCode) + " read", req, 8, resp, frameLen, addrMismatch ? "ok (broadcast reply)" : "ok");
+  ledFlashOk();
   return r;
 }
 
@@ -356,10 +369,11 @@ ModbusResult dbgWriteReg(uint8_t slaveId, uint16_t regAddr, uint16_t value, int 
     r.ok = true;
     r.error = "broadcast sent, no reply (normal for some sensors)";
     dbgLog("FC06 write", req, 8, resp, n, "broadcast, no reply");
+    ledFlashOk();
     return r;
   }
 
-  if (n < 3) { r.error = "timeout (" + String(n) + " bytes)"; dbgLog("FC06 write", req, 8, resp, n, "timeout"); return r; }
+  if (n < 3) { r.error = "timeout (" + String(n) + " bytes)"; dbgLog("FC06 write", req, 8, resp, n, "timeout"); ledFlashErr(); return r; }
 
   if (resp[1] & 0x80) {
     if (n >= 5) {
@@ -368,21 +382,24 @@ ModbusResult dbgWriteReg(uint8_t slaveId, uint16_t regAddr, uint16_t value, int 
       if (rxCrc == calcCrc) {
         r.error = "exception code " + String(resp[2]);
         dbgLog("FC06 write", req, 8, resp, n, r.error);
+        ledFlashErr();
         return r;
       }
     }
     r.error = "exception-shaped response, bad CRC";
     dbgLog("FC06 write", req, 8, resp, n, r.error);
+    ledFlashErr();
     return r;
   }
 
-  if (n < 8) { r.error = "short response (" + String(n) + " bytes)"; dbgLog("FC06 write", req, 8, resp, n, r.error); return r; }
+  if (n < 8) { r.error = "short response (" + String(n) + " bytes)"; dbgLog("FC06 write", req, 8, resp, n, r.error); ledFlashErr(); return r; }
 
   uint16_t rxCrc = resp[6] | ((uint16_t)resp[7] << 8);
   uint16_t calcCrc = dbgCRC(resp, 6);
   if (rxCrc != calcCrc) {
     r.error = "CRC mismatch";
     dbgLog("FC06 write", req, 8, resp, n, r.error);
+    ledFlashErr();
     return r;
   }
 
@@ -391,16 +408,19 @@ ModbusResult dbgWriteReg(uint8_t slaveId, uint16_t regAddr, uint16_t value, int 
   if (addrMismatch && !dbgIsBroadcastAddr(slaveId)) {
     r.error = "address mismatch: asked " + String(slaveId) + ", got reply from " + String(resp[0]);
     dbgLog("FC06 write", req, 8, resp, n, r.error);
+    ledFlashErr();
     return r;
   }
   if (resp[1] != 0x06) {
     r.error = "unexpected function code in reply: 0x" + String(resp[1], HEX);
     dbgLog("FC06 write", req, 8, resp, n, r.error);
+    ledFlashErr();
     return r;
   }
 
   r.ok = true;
   dbgLog("FC06 write", req, 8, resp, n, addrMismatch ? "ok (broadcast reply)" : "ok");
+  ledFlashOk();
   return r;
 }
 
@@ -429,6 +449,7 @@ String dbgRawHexSend(const String& hexIn, int timeoutMs) {
   int n = dbgRawSend(tx, txLen, resp, sizeof(resp), timeoutMs);
   String rxHex = n > 0 ? bytesToHex(resp, n) : "";
   dbgLog("RAW", tx, txLen, resp, n, n > 0 ? (String(n) + " bytes back") : "no reply");
+  if (n > 0) ledFlashOk(); else ledFlashErr();
   return rxHex;
 }
 

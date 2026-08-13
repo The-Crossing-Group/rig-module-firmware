@@ -2,11 +2,15 @@
 // sensor-debug-lilygo.ino — Standalone RS485/Modbus debugging tool
 // (LilyGo T-CAN485 variant)
 //
-// Same tool as sensor-debug/ (Waveshare ESP32-S3-RS485-CAN variant), just
-// re-pinned for the LilyGo T-CAN485 board (ESP32, not ESP32-S3) which
-// production rig-module-firmware.ino targets. Two boards, two sets of
-// pins/enable-lines, same debugging logic (modbus_debug.h / bitscope.h
-// are byte-for-byte copies from sensor-debug/).
+// Similar tool to sensor-debug/ (Waveshare ESP32-S3-RS485-CAN variant),
+// but they are separate, independently-maintained sketches — not kept
+// in sync. Don't assume a change made here is (or should be) mirrored
+// there, or vice versa.
+//
+// Status LED: onboard WS2812 (GPIO4). Slow dim-blue blink = alive/idle
+// heartbeat (stops blinking = firmware hung/crashed). Brief green flash
+// = last Modbus read/write/raw send got a valid reply. Brief red flash
+// = it failed/timed out. Two amber blinks on boot.
 //
 // The board is its own WiFi access point — no router/hotspot needed,
 // nothing to join beforehand. On boot it broadcasts an open SSID
@@ -78,6 +82,7 @@
 #include <vector>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <driver/rmt.h>
 #include "modbus_debug.h"
 #include "bitscope.h"
 
@@ -86,6 +91,7 @@
 #define RS485_DE  17
 #define PIN_5V_EN 16   // 5V booster enable — must be HIGH or RS485 has no power
 #define RS485_SE  19   // RS485 /SHDN (shutdown pin — must be HIGH to enable chip)
+#define WS2812_PIN 4   // onboard WS2812B RGB LED (same as production firmware)
 
 // The board's own access point. Open network (no password) by default
 // so there's nothing to type before you can see the debugging tools.
@@ -94,6 +100,93 @@
 
 WebServer server(80);
 String inputLine = "";
+
+// =============================================================================
+// STATUS LED (WS2812 via ESP32 RMT, same driver as the production
+// firmware) — this tool had no visual "is it alive" indicator at all,
+// which made a hung/crashed/rebooting board indistinguishable from a
+// board that's fine but just isn't visible on WiFi for some other
+// reason. Two jobs:
+//   1. Heartbeat: slow dim-blue blink, always running from loop(). If it
+//      stops blinking, firmware has hung or crashed - no need to have
+//      Serial Monitor open to know that.
+//   2. Activity flash: brief green flash after any successful Modbus
+//      read/write/scan/sweep, brief red flash after a failed one -
+//      lets you tell at a glance whether the last thing you tried
+//      actually got a reply, without reading the text output.
+// =============================================================================
+#define RMT_CHANNEL  RMT_CHANNEL_0
+#define RMT_CLK_DIV  4   // 80MHz / 4 = 20MHz -> 50ns/tick
+
+static void ledInit() {
+  rmt_config_t cfg = {};
+  cfg.rmt_mode      = RMT_MODE_TX;
+  cfg.channel       = RMT_CHANNEL;
+  cfg.gpio_num      = (gpio_num_t)WS2812_PIN;
+  cfg.clk_div       = RMT_CLK_DIV;
+  cfg.mem_block_num = 1;
+  cfg.tx_config.loop_en        = false;
+  cfg.tx_config.carrier_en     = false;
+  cfg.tx_config.idle_output_en = true;
+  cfg.tx_config.idle_level     = RMT_IDLE_LEVEL_LOW;
+  esp_err_t e1 = rmt_config(&cfg);
+  esp_err_t e2 = rmt_driver_install(RMT_CHANNEL, 0, 0);
+  if (e1 != ESP_OK || e2 != ESP_OK) {
+    Serial.printf("[LED] WARNING: RMT init failed - rmt_config=0x%x rmt_driver_install=0x%x\n", e1, e2);
+  }
+}
+
+static void ledSet(uint8_t r, uint8_t g, uint8_t b) {
+  uint8_t bytes[3] = { g, r, b }; // WS2812 wire order is G,R,B
+  rmt_item32_t items[24];
+  for (int i = 0; i < 24; i++) {
+    int byteIdx = i / 8;
+    int bitIdx  = 7 - (i % 8);
+    bool bit = (bytes[byteIdx] >> bitIdx) & 1;
+    if (bit) { items[i].level0 = 1; items[i].duration0 = 14; items[i].level1 = 0; items[i].duration1 = 9; }
+    else     { items[i].level0 = 1; items[i].duration0 = 7;  items[i].level1 = 0; items[i].duration1 = 16; }
+  }
+  rmt_write_items(RMT_CHANNEL, items, 24, true);
+  delayMicroseconds(60);
+}
+
+static unsigned long _ledHeartbeatLast = 0;
+static bool _ledHeartbeatOn = false;
+static unsigned long _ledFlashUntil = 0;
+
+// Call every loop() iteration. Skips the heartbeat step while an
+// activity flash is showing so the flash color doesn't get stomped.
+void ledHeartbeatTick() {
+  unsigned long now = millis();
+  if (_ledFlashUntil) {
+    if (now >= _ledFlashUntil) { _ledFlashUntil = 0; ledSet(0, 0, 0); }
+    return;
+  }
+  if (now - _ledHeartbeatLast > 1000) {
+    _ledHeartbeatLast = now;
+    _ledHeartbeatOn = !_ledHeartbeatOn;
+    ledSet(0, 0, _ledHeartbeatOn ? 25 : 0); // dim blue blink
+  }
+}
+
+// Brief blocking flash — fine here since every caller is already a
+// synchronous command/HTTP handler that finished its own blocking bus
+// I/O moments before. 150ms doesn't meaningfully affect responsiveness.
+void ledFlashOk() {
+  ledSet(0, 40, 0);
+  delay(150);
+  ledSet(0, 0, 0);
+  _ledFlashUntil = 0;
+  _ledHeartbeatLast = millis();
+}
+
+void ledFlashErr() {
+  ledSet(40, 0, 0);
+  delay(150);
+  ledSet(0, 0, 0);
+  _ledFlashUntil = 0;
+  _ledHeartbeatLast = millis();
+}
 
 // =============================================================================
 // SERIAL (USB) COMMAND INTERFACE
@@ -1030,6 +1123,10 @@ void setup() {
   digitalWrite(RS485_SE, HIGH);    // un-shutdown the MAX13487 RS485 chip
   delay(20);
 
+  ledInit();
+  ledSet(40, 20, 0); delay(150); ledSet(0, 0, 0); delay(100);   // boot blink (amber)
+  ledSet(40, 20, 0); delay(150); ledSet(0, 0, 0);
+
   dbgSerialInit(RS485_RXD, RS485_TXD, RS485_DE, 9600, 'N', 1);
   bitscopeInit(RS485_RXD);
   Serial.println("\n=== sensor-debug-lilygo: RS485/Modbus debugging tool (LilyGo T-CAN485) ===");
@@ -1057,4 +1154,5 @@ void loop() {
   pollSerial();
   server.handleClient();
   dbgAutoSniffPoll();
+  ledHeartbeatTick();
 }
