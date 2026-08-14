@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.10.0"
+#define FW_VERSION "rig-module-1.9.2"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -58,39 +58,6 @@ struct ChannelConfig {
 struct DigitalChannelConfig {
   bool   enabled = true;
   String name    = "";
-};
-
-// =============================================================================
-// RPM / PULSE COUNTER — GPIO interrupt-based, completely independent of
-// the RS485/Modbus bus. Exists because Modbus polling physically cannot
-// measure rotation speed reliably ("plug and play, works on anything" —
-// a slow poll loop aliases/misses pulses once a shaft spins fast enough,
-// and there's no way to fix that with software tuning; interrupt counting
-// on a GPIO pin is the only approach that scales from a few RPM to
-// thousands with the same code). Two channels — this board breaks out
-// GPIO1 and GPIO2 on its screw terminal specifically for this kind of
-// general-purpose sensor input (unused by RS485/CAN).
-//
-// Wiring: sensor loop through an opto-isolator (e.g. PC817) into the
-// GPIO pin — same isolation principle as the AMIDJ14's own isolated DI
-// inputs, works across whatever voltage the sensor loop runs at (6-36VDC
-// covers basically all industrial 2-wire proximity sensors) without
-// risking the ESP32's 3.3V-only GPIO.
-struct RpmChannelConfig {
-  bool   enabled         = false;
-  String name            = "";
-  int    pulsesPerRev    = 1;      // how many trigger points per full revolution
-  int    debounceMs      = 2;      // ignore edges closer together than this (contact bounce / noise)
-  float  timeoutS        = 3.0f;   // no pulse for this long -> report 0 RPM (stopped), not stale last value
-};
-
-// Live RPM reading — computed from time between consecutive pulses, not a
-// fixed counting window, so the same code is accurate whether the shaft
-// is turning at 5 RPM or 5,000 RPM with zero per-install tuning.
-struct RpmReading {
-  bool   valid   = false;   // true once at least one pulse interval has been measured
-  float  rpm     = 0.0f;
-  String status  = "stale"; // "ok" | "stopped" | "stale"
 };
 
 // =============================================================================
@@ -156,11 +123,6 @@ struct ModuleConfig {
   // Digital I/O — only polled/shown when boardProfile.hasDigitalIO is true.
   DigitalChannelConfig din[4];
   DigitalChannelConfig dout[4];
-
-  // RPM / pulse counter — independent of board type, always available
-  // (GPIO1 + GPIO2 on this board's screw terminal, not shared with any
-  // Modbus/board-detection logic).
-  RpmChannelConfig rpm[2];
 
   // Advanced / hidden — see ExtraBoardConfig above.
   ExtraBoardConfig extraBoards[MAX_EXTRA_BOARDS];
@@ -251,22 +213,6 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
     c.dout[i].name    = p.getString((preOut + "nm").c_str(), "DO " + String(i+1));
   }
 
-  // RPM / pulse counter channels — default DISABLED (unlike everything
-  // else in this file which defaults to plug-and-play "on"). Different
-  // convention here on purpose: a GPIO wired to nothing floats and will
-  // spew random noise/false pulses if enabled with nothing connected,
-  // unlike an analog channel (which just reads open-circuit) or a DI
-  // (which is opto-isolated and sits at a defined level). Enabling it is
-  // a deliberate one-checkbox step on /rpm once a sensor's actually wired.
-  for (int i = 0; i < 2; i++) {
-    String pre = "rpm" + String(i);
-    c.rpm[i].enabled      = p.getBool((pre + "en").c_str(), false);
-    c.rpm[i].name         = p.getString((pre + "nm").c_str(), "RPM " + String(i+1));
-    c.rpm[i].pulsesPerRev = p.getInt((pre + "ppr").c_str(), 1);
-    c.rpm[i].debounceMs   = p.getInt((pre + "dbm").c_str(), 2);
-    c.rpm[i].timeoutS     = p.getFloat((pre + "tos").c_str(), 3.0f);
-  }
-
   // Advanced / hidden extra boards — see ExtraBoardConfig (config.h).
   for (int i = 0; i < MAX_EXTRA_BOARDS; i++) {
     String pre = "xb" + String(i);
@@ -319,15 +265,6 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
     p.putString((preIn + "nm").c_str(), c.din[i].name);
     p.putBool((preOut + "en").c_str(), c.dout[i].enabled);
     p.putString((preOut + "nm").c_str(), c.dout[i].name);
-  }
-
-  for (int i = 0; i < 2; i++) {
-    String pre = "rpm" + String(i);
-    p.putBool((pre + "en").c_str(), c.rpm[i].enabled);
-    p.putString((pre + "nm").c_str(), c.rpm[i].name);
-    p.putInt((pre + "ppr").c_str(), c.rpm[i].pulsesPerRev);
-    p.putInt((pre + "dbm").c_str(), c.rpm[i].debounceMs);
-    p.putFloat((pre + "tos").c_str(), c.rpm[i].timeoutS);
   }
 
   // Advanced / hidden extra boards — see ExtraBoardConfig (config.h).
