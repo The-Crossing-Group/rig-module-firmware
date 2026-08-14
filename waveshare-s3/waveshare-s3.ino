@@ -1074,7 +1074,8 @@ String buildPayload(bool bufferedFlag) {
         JsonObject d = diArr.createNestedObject();
         d["ch"]     = i;
         d["name"]   = cfg.din[i].name;
-        d["state"]  = dinReadings[i].valid ? dinReadings[i].state : nullptr;
+        if (dinReadings[i].valid) d["state"] = dinReadings[i].state;
+        else                      d["state"] = nullptr;
         d["status"] = dinReadings[i].status;
       }
       JsonArray doArr = doc.createNestedArray("digitalOutputs");
@@ -1083,7 +1084,8 @@ String buildPayload(bool bufferedFlag) {
         JsonObject d = doArr.createNestedObject();
         d["ch"]     = i;
         d["name"]   = cfg.dout[i].name;
-        d["state"]  = doutReadings[i].valid ? doutReadings[i].state : nullptr;
+        if (doutReadings[i].valid) d["state"] = doutReadings[i].state;
+        else                       d["state"] = nullptr;
         d["status"] = doutReadings[i].status;
       }
     }
