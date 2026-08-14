@@ -150,6 +150,25 @@ static String cfgPage(ModuleConfig& cfg) {
     }
   }
   h += "</select>";
+  h += "<label>Board Type</label><select name='boardOverride'>";
+  {
+    struct { const char* val; const char* label; } boards[] = {
+      { "auto",     "Auto-Detect (default)" },
+      { "waveshare", "Force: Waveshare 8AI (B)" },
+      { "amidj14",   "Force: Eletechsup AMIDJ14" },
+    };
+    for (auto& b : boards) {
+      h += "<option value='" + String(b.val) + "'";
+      if (cfg.boardOverride == b.val) h += " selected";
+      h += ">" + String(b.label) + "</option>";
+    }
+  }
+  h += "</select>";
+  h += "<div class='small' style='margin:6px 0 10px'>Leave on Auto-Detect normally — it reads the "
+       "board's Product ID register at boot and picks the right channel count/scaling automatically. "
+       "Only force a specific board if auto-detect is picking the wrong one (e.g. the AMIDJ14's digital "
+       "I/O page says \"no digital I/O on this board\" even though it's wired up). Takes effect on next "
+       "reboot, same as a baud change.</div>";
   h += "<button type='button' id='autoBaudBtn' onclick='autoDetectBaud()'>&#128269; Auto-Detect Baud Rate</button>"
        "<div class='small' id='autoBaudStatus' style='margin:6px 0 10px'>Probes the connected board at every "
        "standard rate and picks whichever gets a real response — no need to know the board's factory default.</div>"
@@ -629,6 +648,10 @@ static void handleConfig() {
   applyParam("modbusSlaveId",  [](String v){ _cfg->modbusSlaveId = v.toInt(); });
   bool baudChanged = false;
   applyParam("modbusBaud",     [&](String v){ long nb = v.toInt(); if (nb != _cfg->modbusBaud) { _cfg->modbusBaud = nb; baudChanged = true; } });
+  // Board override needs the same "changed -> reboot" treatment as baud:
+  // boardProfile is only ever assigned once, at poll-task startup, so a
+  // change here does nothing until the next boot picks it up.
+  applyParam("boardOverride",  [&](String v){ if (v != _cfg->boardOverride) { _cfg->boardOverride = v; baudChanged = true; } });
   applyParam("pollIntervalS",  [](String v){ _cfg->pollIntervalS = constrain(v.toInt(),1,30); });
   applyParam("piHost",         [](String v){ _cfg->piHost        = v; });
   // Never save a blank token — this field is required for the Pi to accept
@@ -700,10 +723,12 @@ static void handleConfig() {
     delay(1000);
     ESP.restart();
   } else if (baudChanged) {
-    // Serial2 (RS485) is only configured once at boot via modbusInit() —
-    // reboot so the poll task picks up the new baud cleanly instead of
-    // trying to reinit HardwareSerial out from under a running task.
-    _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to apply new RS485 baud rate...</p>");
+    // Serial2 (RS485) baud and board detection are both only settled once
+    // at boot (modbusInit() / the board-override check in the poll task) —
+    // reboot so either change is picked up cleanly instead of trying to
+    // reinit things out from under a running task. Reused for board
+    // override changes too (variable name is stale but harmless).
+    _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to apply RS485/board settings...</p>");
     delay(1000);
     ESP.restart();
   } else {

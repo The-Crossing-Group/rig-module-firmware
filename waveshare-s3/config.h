@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.8.0"
+#define FW_VERSION "rig-module-1.8.1"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -83,6 +83,14 @@ struct ModuleConfig {
   String wifiSSID       = "";
   String wifiPass       = "";
 
+  // Board type — normally left "auto" (probes Product ID register 0x00F7,
+  // modbus.h modbusDetectBoard()). Override to "waveshare" or "amidj14" if
+  // the auto-probe isn't identifying the connected board correctly (wrong
+  // register response, board doesn't implement 0x00F7, etc.) — this skips
+  // the probe entirely and just believes what you tell it. Takes effect on
+  // next boot (same as a baud/WiFi change).
+  String boardOverride = "auto";
+
   ChannelConfig ch[8];
 
   // Digital I/O — only polled/shown when boardProfile.hasDigitalIO is true.
@@ -142,6 +150,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   if (c.rigToken.isEmpty()) c.rigToken = "7804991970";
   c.wifiSSID      = p.getString("wifiSSID", "");
   c.wifiPass      = p.getString("wifiPass", "");
+  c.boardOverride = p.getString("boardOvr", "auto");
 
   for (int i = 0; i < 8; i++) {
     String pre = "ch" + String(i);
@@ -188,6 +197,7 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   p.putString("rigToken", c.rigToken);
   p.putString("wifiSSID", c.wifiSSID);
   p.putString("wifiPass", c.wifiPass);
+  p.putString("boardOvr", c.boardOverride);
 
   for (int i = 0; i < 8; i++) {
     String pre = "ch" + String(i);

@@ -795,16 +795,29 @@ void pollTask(void* param) {
         }
       }
 
-      // Board auto-detection — reads the Product ID special-function
-      // register (0x00F7) to work out which analog-to-Modbus board is
-      // actually wired up (Waveshare vs. Eletechsup AMIDJ14, etc.) and
-      // picks the matching channel count + raw-value scale automatically.
-      // No dropdown, no jumper, no manual config — plug in either board
-      // and this firmware just works. Runs once at boot, after baud is
-      // already sorted out above (the ID probe needs a working baud).
-      boardProfile = modbusDetectBoard(cfg.modbusSlaveId);
-      Serial.printf("[Poll] Detected board: %s (%d channels, raw/%.0f = mA)\n",
-        boardProfile.name, boardProfile.numChannels, boardProfile.rawDivisor);
+      // Board detection — reads the Product ID special-function register
+      // (0x00F7) to work out which analog-to-Modbus board is actually
+      // wired up (Waveshare vs. Eletechsup AMIDJ14, etc.) and picks the
+      // matching channel count + raw-value scale automatically. No
+      // dropdown, no jumper, no manual config needed in the normal case.
+      // Runs once at boot, after baud is already sorted out above (the ID
+      // probe needs a working baud).
+      //
+      // cfg.boardOverride lets this be skipped entirely and forced to a
+      // known board — for boards that don't answer 0x00F7 the way
+      // expected, or any other case where the auto-probe picks wrong.
+      if (cfg.boardOverride == "waveshare") {
+        boardProfile = BOARD_WAVESHARE_8AI;
+        Serial.println("[Poll] Board override: forced to Waveshare 8AI (B) — skipping auto-probe");
+      } else if (cfg.boardOverride == "amidj14") {
+        boardProfile = BOARD_ELETECHSUP_AMIDJ14;
+        Serial.println("[Poll] Board override: forced to Eletechsup AMIDJ14 — skipping auto-probe");
+      } else {
+        boardProfile = modbusDetectBoard(cfg.modbusSlaveId);
+      }
+      Serial.printf("[Poll] Board in use: %s (%d channels, raw/%.0f = mA, digitalIO=%s)\n",
+        boardProfile.name, boardProfile.numChannels, boardProfile.rawDivisor,
+        boardProfile.hasDigitalIO ? "yes" : "no");
 
       xSemaphoreGive(modbusBusMutex);
     }
