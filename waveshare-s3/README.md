@@ -1,8 +1,63 @@
 # Rig Module Firmware — Waveshare ESP32-S3-RS485-CAN
 
-**Version:** rig-module-1.9.0
+**Version:** rig-module-1.10.0
 **Board:** Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, screw terminal)
 **Target:** Waveshare Modbus RTU Analog Input 8CH (B) or Eletechsup AMIDJ14 — auto-detected, same as LilyGo variant.
+
+## RPM / Pulse Counter (v1.10.0+)
+
+New `/rpm` page + `rpm.h`. Measures rotation speed via GPIO interrupt
+pulse counting — **not** Modbus. This is deliberate: RS485 polling
+physically cannot measure RPM reliably at arbitrary speeds. A poll loop
+has dead time between polls where pulses get missed, and there's no
+polling rate that's safely fast enough for "works on anything from a slow
+drill string to a fast-spinning shaft" — you can get a plausible-looking
+but silently WRONG number (aliasing) with no way to tell it's wrong.
+Hardware interrupt counting is the only approach that's genuinely
+rate-independent.
+
+- **Two channels, GPIO1 + GPIO2** — this board's spare general-purpose
+  pins (broken out on the screw terminal next to the CAN terminal),
+  not used by RS485 or CAN.
+- **Off by default per channel**, unlike everything else in this
+  firmware — an unwired GPIO floats and can register false pulses if
+  left enabled with nothing connected. Turn a channel on deliberately on
+  `/rpm` once a sensor is actually wired.
+- **Method:** measures the time between consecutive pulses (not a fixed
+  counting window) — `RPM = 60 / (period_seconds × pulsesPerRev)`.
+  Updates on every single pulse, so it's responsive at low RPM and has no
+  inherent upper speed limit (other than the configurable debounce
+  floor). No pulse for longer than the configured timeout → reports 0 RPM
+  ("stopped") instead of freezing on the last reading forever.
+- **Per-channel config:** enabled, name, pulses-per-revolution (1 for a
+  single trigger point on the shaft; higher for e.g. gear teeth),
+  debounce (ms, filters contact bounce/noise), stopped-timeout (s).
+- **Wiring:** the GPIO pins are 3.3V logic only — do **not** wire a
+  sensor loop straight to them if it runs at any other voltage. Route the
+  sensor through a small opto-isolator (e.g. PC817 + one resistor) into
+  the GPIO pin instead — same isolation principle as this board's own
+  isolated Digital I/O, and works across the whole common 6-36VDC
+  industrial-sensor range with one resistor value, no per-install tuning.
+  Pin is configured `INPUT_PULLUP`, triggers on `FALLING` edge (isolator
+  output side pulls the pin low when triggered) — no external pull-up
+  resistor needed.
+- **2-wire sensors** (no dedicated power line — the sensor itself acts as
+  a series switch) need to sit in series with a supply + load, same as
+  wiring one into this board's Digital I/O — see the Digital I/O section
+  below/README for the same principle, or ask if you hit this: a 2-wire
+  sensor wired straight across two pins with no load path will just park
+  at one level and never toggle.
+- Reported in the JSON payload as a top-level `rpm[]` array (only present
+  if at least one channel is enabled) — `{ch, name, rpm, status}`, same
+  shape convention as `digitalInputs`/`digitalOutputs`.
+- Config changes on `/rpm` take effect **immediately, no reboot** — the
+  GPIO pins are always this device's own, independent of whatever's wired
+  on the RS485 bus (unlike baud/board-type changes elsewhere in the UI).
+
+**Diverges from the LilyGo variant as of this version** — `config.h` and
+`webui.h` are no longer byte-for-byte identical (RPM support only added
+here so far), and this variant now has an extra `rpm.h` the LilyGo sketch
+doesn't have. If porting other fixes between the two, watch for this.
 
 ## Advanced: Multi-Board RS485 (v1.9.0+)
 

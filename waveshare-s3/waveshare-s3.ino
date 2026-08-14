@@ -50,6 +50,7 @@
 #include "config.h"
 #include "modbus.h"
 #include "scaling.h"
+#include "rpm.h"
 #include "webui.h"
 
 // =============================================================================
@@ -290,6 +291,15 @@ void setup() {
   Serial.printf("[BOOT] RS485 pins: RX=%d TX=%d DE=%d baud=%ld\n",
     RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
   modbusInit(RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
+
+  // Init RPM / pulse counter GPIOs (rpm.h) — independent of RS485/Modbus,
+  // attaches interrupts only for channels enabled on /rpm. Safe to call
+  // again later (handleConfig() does, on every /rpm save) to pick up
+  // enabled/debounce changes live without a reboot.
+  Serial.printf("[BOOT] RPM ch1=GPIO%d (%s) ch2=GPIO%d (%s)\n",
+    RPM1_PIN, cfg.rpm[0].enabled ? "enabled" : "disabled",
+    RPM2_PIN, cfg.rpm[1].enabled ? "enabled" : "disabled");
+  rpmInit(cfg);
 
   // Connect WiFi (LED slow-blinks blue during this)
   connectWifi();
@@ -937,6 +947,12 @@ void pollTask(void* param) {
       Serial.printf("[Poll] #%d FAILED — Modbus error (slave ID=%d)\n", pollCount, cfg.modbusSlaveId);
     }
 
+    // Debug print cadence — first 10 polls always, then every 30. Shared
+    // by analog, digital I/O (both inside the mutex block below), and
+    // RPM (outside it, further down) — declared here so it's in scope
+    // for all three.
+    bool debugCadence = (pollCount <= 10 || pollCount % 30 == 0);
+
     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
       modbusOk = ok;
       if (ok) {
@@ -1011,15 +1027,6 @@ void pollTask(void* param) {
         }
       }
 
-      // Debug print cadence — first 10 polls always, then every 30. Shared
-      // by analog (below, only if the analog read itself succeeded) AND
-      // digital I/O (further below) — digital gets its own gate on
-      // boardProfile.hasDigitalIO rather than `ok`, since `ok` only
-      // reflects the analog read and shouldn't suppress DI/DO debug output
-      // on a board where the analog read failed but digital is fine (or
-      // vice versa).
-      bool debugCadence = (pollCount <= 10 || pollCount % 30 == 0);
-
       if (ok) {
         // Debug print: actual engineering values per enabled channel (not
         // just raw mA) — so the real numbers (e.g. mud tank gallons) are
@@ -1091,6 +1098,28 @@ void pollTask(void* param) {
       }
 
       xSemaphoreGive(stateMutex);
+    }
+
+    // RPM debug print — same cadence as analog/digital above. Doesn't
+    // need stateMutex (rpmCompute() only touches its own volatiles, not
+    // shared poll-task state) and doesn't need modbusBusMutex either —
+    // this is the whole point of the GPIO-interrupt approach, it's
+    // completely decoupled from the RS485 bus and this poll cycle.
+    if ((cfg.rpm[0].enabled || cfg.rpm[1].enabled) && debugCadence) {
+      Serial.println("  --- RPM ---");
+      for (int i = 0; i < 2; i++) {
+        if (!cfg.rpm[i].enabled) continue;
+        RpmReading r;
+        rpmCompute(i, cfg, r);
+        String label = cfg.rpm[i].name.isEmpty() ? ("RPM" + String(i + 1)) : cfg.rpm[i].name;
+        if (r.valid) {
+          Serial.printf("  %-20s%-10s          = %8.1f RPM (%s)\n",
+            label.c_str(), "[gpio]", r.rpm, r.status.c_str());
+        } else {
+          Serial.printf("  %-20s%-10s          -- (%s)\n",
+            label.c_str(), "[gpio]", r.status.c_str());
+        }
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(cfg.pollIntervalS * 1000));
@@ -1246,6 +1275,29 @@ String buildPayload(bool bufferedFlag) {
         if (doutReadings[i].valid) d["state"] = doutReadings[i].state;
         else                       d["state"] = nullptr;
         d["status"] = doutReadings[i].status;
+      }
+    }
+
+    // RPM / pulse counter channels — independent of board type, only
+    // included per-channel if that channel is actually enabled (unlike
+    // digital I/O above which is gated on board type; RPM is gated on
+    // the user having deliberately turned a channel on since an unwired
+    // GPIO left enabled would report noise, see config.h). Computed
+    // fresh here (rpmCompute() is cheap, no bus I/O) rather than reusing
+    // a value stored elsewhere, so this payload always reflects the
+    // latest pulse timing regardless of the outer poll cadence.
+    bool anyRpmEnabled = cfg.rpm[0].enabled || cfg.rpm[1].enabled;
+    if (anyRpmEnabled) {
+      JsonArray rpmArr = doc.createNestedArray("rpm");
+      for (int i = 0; i < 2; i++) {
+        if (!cfg.rpm[i].enabled) continue;
+        RpmReading r;
+        rpmCompute(i, cfg, r);
+        JsonObject o = rpmArr.createNestedObject();
+        o["ch"]     = i;
+        o["name"]   = cfg.rpm[i].name;
+        o["rpm"]    = r.valid ? r.rpm : nullptr;
+        o["status"] = r.status;
       }
     }
 

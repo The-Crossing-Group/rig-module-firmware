@@ -85,6 +85,7 @@ static const char NAV[] PROGMEM = R"(
   <a href='/'>&#9881; Config</a>
   <a href='/channels'>&#128208; Channels</a>
   <a href='/digital'>&#128268; Digital I/O</a>
+  <a href='/rpm'>&#128260; RPM</a>
   <a href='/live'>&#128202; Live</a>
   <a href='/system'>&#128295; System</a>
 </div>
@@ -516,6 +517,68 @@ function writeDO(ch,val){
 }
 
 // =============================================================================
+// /rpm — GPIO interrupt-based pulse counter / RPM measurement (rpm.h).
+// Completely independent of the RS485/Modbus board — always available on
+// GPIO1 + GPIO2 regardless of what analog-to-Modbus board (or none at
+// all) is wired up. Off by default per channel (see config.h comment —
+// unlike everything else on this device, an unwired GPIO floats and can
+// spew false pulses if left enabled with nothing connected).
+// =============================================================================
+static String rpmPage(ModuleConfig& cfg) {
+  String h = FPSTR(NAV);
+  h += "<div class='page'><h2>&#128260; RPM / Pulse Counter</h2>";
+  h += "<p class='small'>Two independent channels on GPIO1 and GPIO2 (this board's spare "
+       "general-purpose pins, not shared with RS485/CAN). Measures the time between pulses, "
+       "not a counting window — accurate at any speed, from a couple RPM up to whatever the "
+       "sensor/wiring can physically switch, with no per-install tuning. Wire the sensor "
+       "through an opto-isolator (e.g. PC817 + one resistor) into the GPIO pin, same isolation "
+       "principle as this board's Digital I/O — works across common 6-36VDC sensor voltages "
+       "without risking the ESP32's 3.3V-only pin. Pin pulls to GND on trigger (FALLING edge, "
+       "internal pull-up enabled — no external pull-up resistor needed).</p>";
+
+  h += "<form method='POST' action='/api/config'>";
+  h += "<input type='hidden' name='fromRpmPage' value='1'>";
+  h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save</button>";
+
+  for (int i = 0; i < 2; i++) {
+    h += "<div class='card'><b>RPM " + String(i+1) + " (GPIO" + String(i+1) + ")</b>&nbsp;<span class='small' id='rpmState" + String(i) + "'></span>";
+    h += "<label><input type='checkbox' name='rpm" + String(i) + "en'";
+    h += (cfg.rpm[i].enabled ? " checked" : "");
+    h += "> Enabled</label>";
+    h += "<label>Name</label><input name='rpm" + String(i) + "nm' value='" + cfg.rpm[i].name + "' placeholder='e.g. Driveshaft, Mud Pump'>";
+    h += "<label>Pulses per Revolution</label><input name='rpm" + String(i) + "ppr' type='number' min='1' value='" + String(cfg.rpm[i].pulsesPerRev) + "'>";
+    h += "<div class='small' style='margin-top:-6px;margin-bottom:10px'>1 if there's a single trigger point on the shaft (e.g. one bolt head/magnet); "
+         "higher if the sensor sees multiple points per revolution (e.g. gear teeth).</div>";
+    h += "<label>Debounce (ms)</label><input name='rpm" + String(i) + "dbm' type='number' min='0' value='" + String(cfg.rpm[i].debounceMs) + "'>";
+    h += "<div class='small' style='margin-top:-6px;margin-bottom:10px'>Ignore pulses closer together than this — filters out contact bounce/electrical "
+         "noise. Raise it if RPM looks implausibly high/erratic; lower it if it's capping out at high real speeds.</div>";
+    h += "<label>Stopped Timeout (s)</label><input name='rpm" + String(i) + "tos' type='number' min='0.1' step='0.1' value='" + String(cfg.rpm[i].timeoutS) + "'>";
+    h += "<div class='small' style='margin-top:-6px'>No pulse for this long &rarr; reports 0 RPM (stopped) instead of holding the last reading forever.</div>";
+    h += "</div>";
+  }
+
+  h += "<button type='submit' style='margin-top:6px'>&#128190; Save</button>";
+  h += "</form>";
+
+  h += R"(
+<script>
+function fetchRpm(){
+  fetch('/api/rpm').then(r=>r.json()).then(d=>{
+    d.rpm.forEach(c=>{
+      let el=document.getElementById('rpmState'+c.ch);
+      if(!el) return;
+      if (!c.valid) { el.textContent = '(no pulses seen yet)'; return; }
+      el.textContent = c.status==='stopped' ? '0 RPM (stopped)' : c.rpm.toFixed(1)+' RPM';
+    });
+  });
+}
+setInterval(fetchRpm,1000); fetchRpm();
+</script>)";
+  h += "</div>";
+  return h;
+}
+
+// =============================================================================
 // /advanced — hidden power-user page (only linked quietly from /system).
 // Multi-board support: wire up to MAX_EXTRA_BOARDS additional analog-to-
 // Modbus boards (e.g. more than one Eletechsup AMIDJ14) on the SAME RS485
@@ -646,6 +709,18 @@ function fetchLive(){
         let cls = c.status==='ok'?'ok':'open';
         let stxt = c.state==null ? '--' : (c.state ? 'ON' : 'OFF');
         s += '<tr><td>DO'+(c.ch+1)+'</td><td>'+(c.name||'')+'</td><td>Output</td><td>'+stxt+'</td><td class="'+cls+'">'+c.status+'</td></tr>';
+      });
+      s += '</table>';
+    }
+    // RPM channels — always potentially present (independent of board
+    // type), but only shown if at least one is enabled+configured
+    // (buildPayload() only includes enabled RPM channels in the array).
+    if (d.rpm && d.rpm.length) {
+      s += '<h3>RPM</h3><table><tr><th>Ch</th><th>Name</th><th>RPM</th><th>Status</th></tr>';
+      d.rpm.forEach(c=>{
+        let cls = c.status==='ok'?'ok':(c.status==='stopped'?'warn':'open');
+        let vtxt = !c.valid ? '--' : (c.status==='stopped' ? '0 (stopped)' : c.rpm.toFixed(1));
+        s += '<tr><td>RPM'+(c.ch+1)+'</td><td>'+(c.name||'')+'</td><td>'+vtxt+'</td><td class="'+cls+'">'+c.status+'</td></tr>';
       });
       s += '</table>';
     }
@@ -842,6 +917,23 @@ static void handleConfig() {
     }
   }
 
+  // RPM channels — only ever submitted from /rpm (own form, own
+  // "fromRpmPage" marker), same all-at-once pattern as /digital above.
+  // enabled/pulsesPerRev/debounceMs changes take effect immediately via
+  // rpmInit() below — no reboot needed, unlike baud/board changes,
+  // because the GPIO pins are always this device's own pins regardless
+  // of what's wired on the Modbus bus.
+  if (_srv->hasArg("fromRpmPage")) {
+    for (int i = 0; i < 2; i++) {
+      String pre = "rpm" + String(i);
+      _cfg->rpm[i].enabled = _srv->hasArg((pre+"en").c_str());
+      applyParam((pre+"nm").c_str(),  [i](String v){ _cfg->rpm[i].name = v; });
+      applyParam((pre+"ppr").c_str(), [i](String v){ _cfg->rpm[i].pulsesPerRev = max(1, v.toInt()); });
+      applyParam((pre+"dbm").c_str(), [i](String v){ _cfg->rpm[i].debounceMs = max(0, v.toInt()); });
+      applyParam((pre+"tos").c_str(), [i](String v){ _cfg->rpm[i].timeoutS = max(0.1f, v.toFloat()); });
+    }
+  }
+
   // Advanced / hidden extra boards — only ever submitted from /advanced
   // (own form, own "fromAdvancedPage" marker), same all-at-once pattern as
   // /channels and /digital above. Slave ID / board type changes need a
@@ -869,6 +961,11 @@ static void handleConfig() {
 
   saveConfig(*_prefs, *_cfg);
 
+  // Apply RPM channel changes live — no reboot needed (see comment above).
+  // Safe to call unconditionally; it's a cheap detach/reattach and no-ops
+  // for anything unchanged.
+  rpmInit(*_cfg);
+
   if (boardsChanged && !wifiChanged) {
     _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to apply board changes...</p>");
     delay(1000);
@@ -895,6 +992,7 @@ static void handleConfig() {
     String backTo = "/";
     if (allChannels || which >= 0) backTo = "/channels";
     else if (_srv->hasArg("fromDigitalPage")) backTo = "/digital";
+    else if (_srv->hasArg("fromRpmPage")) backTo = "/rpm";
     else if (_srv->hasArg("fromAdvancedPage")) backTo = "/advanced";
     _srv->sendHeader("Location", backTo);
     _srv->send(302, "text/plain", "");
@@ -1127,6 +1225,28 @@ static void handleDigitalWrite() {
   _srv->send(ok ? 200 : 500, "application/json", r);
 }
 
+// Live RPM state for the /rpm page's 1s poll. rpmCompute() (rpm.h) is
+// cheap — just reads a few volatiles set by the ISR and does float math,
+// no bus I/O — safe to call directly from the web handler on every
+// request rather than only from the poll task, so this is as responsive
+// as the pulses themselves rather than tied to cfg.pollIntervalS.
+static void handleApiRpm() {
+  DynamicJsonDocument doc(512);
+  JsonArray arr = doc.createNestedArray("rpm");
+  for (int i = 0; i < 2; i++) {
+    RpmReading r;
+    rpmCompute(i, *_cfg, r);
+    JsonObject o = arr.createNestedObject();
+    o["ch"]     = i;
+    o["valid"]  = r.valid;
+    o["rpm"]    = r.valid ? r.rpm : nullptr;
+    o["status"] = r.status;
+  }
+  String out;
+  serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
+}
+
 static void handleCalZero() {
   int ch = _srv->hasArg("ch") ? _srv->arg("ch").toInt() : -1;
   if (ch < 0 || ch > 7) { _srv->send(400,"application/json","{\"ok\":false}"); return; }
@@ -1206,6 +1326,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/",            HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, cfgPage(*_cfg)); });
   srv.on("/channels",    HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, calPage(*_cfg)); });
   srv.on("/digital",     HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, digitalPage(*_cfg)); });
+  srv.on("/rpm",         HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, rpmPage(*_cfg)); });
   srv.on("/live",        HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, livePage()); });
   srv.on("/system",      HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, sysPage(*_cfg)); });
   // /advanced — hidden power-user page (multi-board + bus scan), only
@@ -1221,6 +1342,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/wifi/scan",   HTTP_GET,  handleWifiScan);
   srv.on("/api/ota",         HTTP_GET,  handleOTA);
   srv.on("/api/digital",     HTTP_GET,  handleApiDigital);
+  srv.on("/api/rpm",         HTTP_GET,  handleApiRpm);
 
   // POST APIs
   srv.on("/api/config",        HTTP_POST, handleConfig);
