@@ -631,6 +631,24 @@ function fetchLive(){
       s += '<td class="'+cls+'">'+c.status+'</td></tr>';
     });
     s += '</table>';
+    // Digital I/O — only present in the payload on boards with DI/DO
+    // hardware (AMIDJ14), same gating buildPayload() already does on the
+    // firmware side. Was missing from this page entirely before — data
+    // was already in /api/status, just never rendered here.
+    if ((d.digitalInputs && d.digitalInputs.length) || (d.digitalOutputs && d.digitalOutputs.length)) {
+      s += '<h3>Digital I/O</h3><table><tr><th>Ch</th><th>Name</th><th>Direction</th><th>State</th><th>Status</th></tr>';
+      (d.digitalInputs||[]).forEach(c=>{
+        let cls = c.status==='ok'?'ok':'open';
+        let stxt = c.state==null ? '--' : (c.state ? 'ON' : 'OFF');
+        s += '<tr><td>DI'+(c.ch+1)+'</td><td>'+(c.name||'')+'</td><td>Input</td><td>'+stxt+'</td><td class="'+cls+'">'+c.status+'</td></tr>';
+      });
+      (d.digitalOutputs||[]).forEach(c=>{
+        let cls = c.status==='ok'?'ok':'open';
+        let stxt = c.state==null ? '--' : (c.state ? 'ON' : 'OFF');
+        s += '<tr><td>DO'+(c.ch+1)+'</td><td>'+(c.name||'')+'</td><td>Output</td><td>'+stxt+'</td><td class="'+cls+'">'+c.status+'</td></tr>';
+      });
+      s += '</table>';
+    }
     let sys = d.system||{};
     s += '<h3>System</h3><table>';
     s += '<tr><td>Module ID</td><td>'+d.moduleId+'</td></tr>';
@@ -656,9 +674,11 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<div class='page'><h2>&#128295; System</h2>";
   h += "<div class='card'><b>Firmware:</b> ";
   h += String(FW_VERSION);
-  h += "<br><b>Detected Board:</b> ";
+  h += "<br><b>Detected Board:</b> <span id='detBoardName'>";
   h += String(boardProfile.name);
-  h += " (" + String(boardProfile.numChannels) + " channels, auto-detected via Product ID register)";
+  h += "</span> (<span id='detBoardCh'>" + String(boardProfile.numChannels) + "</span> channels, auto-detected via Product ID register) ";
+  h += "<button type='button' onclick='redetectBoard()' style='margin-left:6px;padding:2px 8px'>&#128260; Re-detect</button>";
+  h += "<div id='redetectResult' class='small'></div>";
   h += "<br><b>Module ID:</b> ";
   h += cfg.moduleId;
   h += "<br><b>MAC:</b> ";
@@ -688,6 +708,15 @@ function doOTA(){
   let url=document.getElementById('otaUrl').value;
   if(!url)return alert('Enter URL');
   fetch('/api/ota?url='+encodeURIComponent(url)).then(r=>r.text()).then(t=>alert(t));
+}
+function redetectBoard(){
+  let box=document.getElementById('redetectResult');
+  box.textContent='Probing bus...';
+  fetch('/api/modbus/redetect-board',{method:'POST'}).then(r=>r.json()).then(d=>{
+    document.getElementById('detBoardName').textContent = d.boardName;
+    document.getElementById('detBoardCh').textContent = d.numChannels;
+    box.textContent = 'Re-detected: ' + d.boardName + '. Any \"Force\" override on Config has been cleared back to Auto-Detect.';
+  }).catch(e=>{ box.textContent='Re-detect failed: '+e; });
 }
 </script>)";
   h += "</div>";
@@ -973,6 +1002,43 @@ static void handleModbusAutoDetect() {
   }
 }
 
+// Live board re-detect for the /system page's "Re-detect Board" button —
+// re-runs the Product ID probe (modbusDetectBoard()) right now, no reboot
+// needed (boardProfile is just re-assigned; the poll loop reads it fresh
+// every cycle already, unlike baud which needs Serial2 re-init).
+//
+// ALSO resets cfg.boardOverride back to "auto" and saves. This matters:
+// the #1 reason re-detect would otherwise silently do nothing is a stale
+// override left over from earlier troubleshooting (e.g. someone forced
+// "waveshare" while chasing a wiring problem, fixed the wiring, but the
+// override is still sitting there forcing the wrong board every boot).
+// A re-detect button that respects a stuck override would be useless, so
+// this one always does a REAL probe and clears the override to match.
+static void handleBoardRedetect() {
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    _srv->send(503, "application/json", "{\"ok\":false,\"error\":\"bus busy, try again\"}");
+    return;
+  }
+  BoardProfile detected = modbusDetectBoard(_cfg->modbusSlaveId);
+  xSemaphoreGive(modbusBusMutex);
+
+  boardProfile = detected;
+  if (_cfg->boardOverride != "auto") {
+    Serial.println("[Modbus] Re-detect: clearing stuck boardOverride back to auto");
+    _cfg->boardOverride = "auto";
+  }
+  saveConfig(*_prefs, *_cfg);
+
+  DynamicJsonDocument doc(256);
+  doc["ok"]           = true;
+  doc["boardName"]    = detected.name;
+  doc["numChannels"]  = detected.numChannels;
+  doc["hasDigitalIO"] = detected.hasDigitalIO;
+  String out;
+  serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
+}
+
 // Slave ID bus scan for the /advanced page — synchronous/blocking, holds
 // modbusBusMutex for the whole scan so the poll task can't interleave a
 // read on top of it. Capped by the caller's "max" param since a full
@@ -1162,6 +1228,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/cal/zero",      HTTP_POST, handleCalZero);
   srv.on("/api/cal/max",       HTTP_POST, handleCalMax);
   srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);
+  srv.on("/api/modbus/redetect-board", HTTP_POST, handleBoardRedetect);
   srv.on("/api/modbus/scan",       HTTP_GET,  handleModbusScan);
   srv.on("/api/digital/write", HTTP_POST, handleDigitalWrite);
 
