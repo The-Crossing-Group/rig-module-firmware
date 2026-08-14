@@ -1011,12 +1011,20 @@ void pollTask(void* param) {
         }
       }
 
+      // Debug print cadence — first 10 polls always, then every 30. Shared
+      // by analog (below, only if the analog read itself succeeded) AND
+      // digital I/O (further below) — digital gets its own gate on
+      // boardProfile.hasDigitalIO rather than `ok`, since `ok` only
+      // reflects the analog read and shouldn't suppress DI/DO debug output
+      // on a board where the analog read failed but digital is fine (or
+      // vice versa).
+      bool debugCadence = (pollCount <= 10 || pollCount % 30 == 0);
+
       if (ok) {
         // Debug print: actual engineering values per enabled channel (not
         // just raw mA) — so the real numbers (e.g. mud tank gallons) are
-        // visible on Serial/USB with no Pi logger hooked up at all. First
-        // 10 polls always, then every 30, same cadence as before.
-        if (ok && (pollCount <= 10 || pollCount % 30 == 0)) {
+        // visible on Serial/USB with no Pi logger hooked up at all.
+        if (debugCadence) {
           Serial.printf("[Poll] #%d OK\n", pollCount);
           for (int ch = 0; ch < 8; ch++) {
             if (!cfg.ch[ch].enabled) continue;
@@ -1049,6 +1057,39 @@ void pollTask(void* param) {
           }
         }
       }
+
+      // Digital I/O debug print — same cadence as analog above, only on
+      // boards that actually have DI/DO (AMIDJ14). Was previously only
+      // visible via /live or /api/digital; this puts it on Serial too, same
+      // as the analog channels, for bench testing with no Pi/network at all.
+      if (boardProfile.hasDigitalIO && debugCadence) {
+        Serial.println("  --- Digital I/O ---");
+        for (int i = 0; i < 4; i++) {
+          if (!cfg.din[i].enabled) continue;
+          String label = cfg.din[i].name.isEmpty() ? ("DI" + String(i + 1)) : cfg.din[i].name;
+          DigitalReading& r = dinReadings[i];
+          if (r.valid) {
+            Serial.printf("  %-20s%-10s          state=%-4s (%s)\n",
+              label.c_str(), "[input]", r.state ? "ON" : "OFF", r.status.c_str());
+          } else {
+            Serial.printf("  %-20s%-10s          state=--   (%s)\n",
+              label.c_str(), "[input]", r.status.c_str());
+          }
+        }
+        for (int i = 0; i < 4; i++) {
+          if (!cfg.dout[i].enabled) continue;
+          String label = cfg.dout[i].name.isEmpty() ? ("DO" + String(i + 1)) : cfg.dout[i].name;
+          DigitalReading& r = doutReadings[i];
+          if (r.valid) {
+            Serial.printf("  %-20s%-10s          state=%-4s (%s)\n",
+              label.c_str(), "[output]", r.state ? "ON" : "OFF", r.status.c_str());
+          } else {
+            Serial.printf("  %-20s%-10s          state=--   (%s)\n",
+              label.c_str(), "[output]", r.status.c_str());
+          }
+        }
+      }
+
       xSemaphoreGive(stateMutex);
     }
 
