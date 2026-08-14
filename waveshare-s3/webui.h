@@ -28,6 +28,9 @@ extern DigitalReading dinReadings[4];
 extern DigitalReading doutReadings[4];
 extern SemaphoreHandle_t stateMutex;
 extern SemaphoreHandle_t modbusBusMutex;
+// pulse.h — "Pulse Counter Mode" (DI transitions -> RPM over Modbus,
+// pulse.h included before this file, before .ino defines these — no
+// forward decl actually needed, but listed here for discoverability).
 long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud); // modbus.h
 BoardProfile modbusDetectBoard(uint8_t slaveId); // modbus.h
 bool modbusWriteDO(uint8_t slaveId, int doIndex, bool value); // modbus.h
@@ -467,12 +470,30 @@ static String digitalPage(ModuleConfig& cfg) {
   h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save Names/Enabled</button>";
 
   h += "<h3>Digital Inputs</h3>";
+  {
+    float pollHz = pulsePollRateHz();
+    if (pollHz > 0.1f) {
+      h += "<p class='small'>Pulse Counter Mode fast-poll rate: <b>" + String(pollHz, 1) +
+           " Hz</b> — that's the accuracy ceiling for RPM below; readings alias (silently wrong, "
+           "not just slow) well past roughly half that rate in pulses/sec.</p>";
+    }
+  }
   for (int i = 0; i < 4; i++) {
     h += "<div class='card'><b>DI" + String(i+1) + "</b>&nbsp;<span class='small' id='diState" + String(i) + "'></span>";
     h += "<label><input type='checkbox' name='di" + String(i) + "en'";
     h += (cfg.din[i].enabled ? " checked" : "");
     h += "> Enabled</label>";
     h += "<label>Name</label><input name='di" + String(i) + "nm' value='" + cfg.din[i].name + "' placeholder='e.g. Low Level Switch'>";
+    h += "<label><input type='checkbox' name='di" + String(i) + "pmEn'";
+    h += (cfg.din[i].pulseModeEnabled ? " checked" : "");
+    h += "> Pulse Counter Mode (report RPM from this DI's transitions) &nbsp;<span class='small' id='diRpm" + String(i) + "'></span></label>";
+    h += "<div style='margin-left:20px'>";
+    h += "<label>Pulses per Revolution</label><input name='di" + String(i) + "ppr' type='number' min='1' value='" + String(cfg.din[i].pulsesPerRev) + "'>";
+    h += "<div class='small' style='margin-top:-6px;margin-bottom:10px'>1 if there's a single trigger point on the shaft; higher if the "
+         "sensor sees multiple points per revolution (e.g. gear teeth).</div>";
+    h += "<label>Stopped Timeout (s)</label><input name='di" + String(i) + "pto' type='number' min='0.1' step='0.1' value='" + String(cfg.din[i].timeoutS) + "'>";
+    h += "<div class='small' style='margin-top:-6px'>No transition for this long &rarr; reports 0 RPM (stopped) instead of holding the last reading.</div>";
+    h += "</div>";
     h += "</div>";
   }
 
@@ -499,6 +520,12 @@ function fetchDigital(){
     d.din.forEach(c=>{
       let el=document.getElementById('diState'+c.ch);
       if(el) el.textContent = c.status!=='ok' ? '(stale)' : (c.state ? 'ON' : 'OFF');
+      let rpmEl=document.getElementById('diRpm'+c.ch);
+      if(rpmEl){
+        if(!c.rpm) rpmEl.textContent='';
+        else if(!c.rpm.valid) rpmEl.textContent='(no pulses seen yet)';
+        else rpmEl.textContent = c.rpm.status==='stopped' ? '0 RPM (stopped)' : c.rpm.value.toFixed(1)+' RPM';
+      }
     });
     d.dout.forEach(c=>{
       let el=document.getElementById('doState'+c.ch);
@@ -646,6 +673,19 @@ function fetchLive(){
         let cls = c.status==='ok'?'ok':'open';
         let stxt = c.state==null ? '--' : (c.state ? 'ON' : 'OFF');
         s += '<tr><td>DO'+(c.ch+1)+'</td><td>'+(c.name||'')+'</td><td>Output</td><td>'+stxt+'</td><td class="'+cls+'">'+c.status+'</td></tr>';
+      });
+      s += '</table>';
+    }
+    // Pulse Counter Mode RPM — piggybacks on digitalInputs[].rpm (only
+    // present on DIs with pulseModeEnabled, see buildPayload()).
+    let rpmChs = (d.digitalInputs||[]).filter(c=>c.rpm);
+    if (rpmChs.length) {
+      s += '<h3>RPM (Pulse Counter Mode)</h3><table><tr><th>Ch</th><th>Name</th><th>RPM</th><th>Status</th></tr>';
+      rpmChs.forEach(c=>{
+        let r = c.rpm;
+        let cls = r.status==='ok'?'ok':(r.status==='stopped'?'warn':'open');
+        let vtxt = r.value==null ? '--' : (r.status==='stopped' ? '0 (stopped)' : r.value.toFixed(1));
+        s += '<tr><td>DI'+(c.ch+1)+'</td><td>'+(c.name||'')+'</td><td>'+vtxt+'</td><td class="'+cls+'">'+r.status+'</td></tr>';
       });
       s += '</table>';
     }
@@ -839,7 +879,15 @@ static void handleConfig() {
       _cfg->dout[i].enabled = _srv->hasArg((preOut+"en").c_str());
       applyParam((preIn+"nm").c_str(),  [i](String v){ _cfg->din[i].name  = v; });
       applyParam((preOut+"nm").c_str(), [i](String v){ _cfg->dout[i].name = v; });
+      // Pulse Counter Mode (pulse.h) — DI-only, checkbox present in the
+      // same all-at-once /digital form as everything else above.
+      _cfg->din[i].pulseModeEnabled = _srv->hasArg((preIn+"pmEn").c_str());
+      applyParam((preIn+"ppr").c_str(), [i](String v){ _cfg->din[i].pulsesPerRev = max(1, v.toInt()); });
+      applyParam((preIn+"pto").c_str(), [i](String v){ _cfg->din[i].timeoutS = max(0.1f, v.toFloat()); });
     }
+    // Clear any stale edge-timing state for channels no longer in pulse
+    // mode (see pulse.h pulseConfigChanged() for why).
+    pulseConfigChanged(*_cfg);
   }
 
   // Advanced / hidden extra boards — only ever submitted from /advanced
@@ -1074,7 +1122,7 @@ static void handleModbusScan() {
 // handleChannelRaw() for analog. No live bus round-trip here; that's what
 // the background poll task is already doing every cfg.pollIntervalS.
 static void handleApiDigital() {
-  DynamicJsonDocument doc(1024);
+  DynamicJsonDocument doc(1536); // bumped for the per-DI "rpm" sub-object (pulse.h Pulse Counter Mode)
   JsonArray din = doc.createNestedArray("din");
   JsonArray dout = doc.createNestedArray("dout");
   if (xSemaphoreTake(_mtx, pdMS_TO_TICKS(200)) == pdTRUE) {
@@ -1083,6 +1131,16 @@ static void handleApiDigital() {
       di["ch"] = i;
       di["state"] = dinReadings[i].state;
       di["status"] = dinReadings[i].status;
+      // Pulse Counter Mode (pulse.h) — computed fresh here (cheap, no
+      // bus I/O) rather than reusing a stored value, same as buildPayload().
+      if (_cfg->din[i].pulseModeEnabled) {
+        PulseReading pr;
+        pulseRpmCompute(i, *_cfg, pr);
+        JsonObject rpmObj = di.createNestedObject("rpm");
+        rpmObj["valid"]  = pr.valid;
+        rpmObj["value"]  = pr.valid ? pr.rpm : nullptr;
+        rpmObj["status"] = pr.status;
+      }
       JsonObject dop = dout.createNestedObject();
       dop["ch"] = i;
       dop["state"] = doutReadings[i].state;

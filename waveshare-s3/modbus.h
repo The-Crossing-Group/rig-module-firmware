@@ -37,11 +37,20 @@ void modbusInit(int rxPin, int txPin, int dePin, uint32_t baud) {
   Serial.printf("[Modbus] Init on Serial2 RX=%d TX=%d DE=%d baud=%u\n", rxPin, txPin, dePin, baud);
 }
 
-// Send bytes, toggle DE high during TX
-static void modbusSend(const uint8_t* buf, int len) {
-  Serial.printf("[RS485] TX (%d bytes):", len);
-  for (int i = 0; i < len; i++) Serial.printf(" %02X", buf[i]);
-  Serial.println();
+// Send bytes, toggle DE high during TX. `quiet=true` skips the hex-dump
+// Serial print — used by the DI pulse-counter fast-poll loop (webui.h/
+// waveshare-s3.ino "Pulse Counter Mode"), which hammers this as fast as
+// the bus allows; printing every single TX/RX at that rate would flood
+// Serial and (worse) the printf() calls themselves would slow the loop
+// down enough to hurt the exact timing accuracy the feature depends on.
+// Every other caller is unaffected (defaults to the old always-print
+// behavior).
+static void modbusSend(const uint8_t* buf, int len, bool quiet = false) {
+  if (!quiet) {
+    Serial.printf("[RS485] TX (%d bytes):", len);
+    for (int i = 0; i < len; i++) Serial.printf(" %02X", buf[i]);
+    Serial.println();
+  }
 
   digitalWrite(_RS485_DE_PIN, HIGH);
   delayMicroseconds(100); // DE propagation delay
@@ -51,8 +60,8 @@ static void modbusSend(const uint8_t* buf, int len) {
   digitalWrite(_RS485_DE_PIN, LOW); // back to receive
 }
 
-// Read response with timeout (ms)
-static int modbusReceive(uint8_t* buf, int maxLen, int timeoutMs) {
+// Read response with timeout (ms). See modbusSend() above re: `quiet`.
+static int modbusReceive(uint8_t* buf, int maxLen, int timeoutMs, bool quiet = false) {
   unsigned long deadline = millis() + timeoutMs;
   int n = 0;
   while (millis() < deadline && n < maxLen) {
@@ -61,12 +70,14 @@ static int modbusReceive(uint8_t* buf, int maxLen, int timeoutMs) {
       deadline = millis() + 20; // inter-byte timeout 20ms
     }
   }
-  if (n > 0) {
-    Serial.printf("[RS485] RX (%d bytes):", n);
-    for (int i = 0; i < n; i++) Serial.printf(" %02X", buf[i]);
-    Serial.println();
-  } else {
-    Serial.println("[RS485] RX: no bytes received");
+  if (!quiet) {
+    if (n > 0) {
+      Serial.printf("[RS485] RX (%d bytes):", n);
+      for (int i = 0; i < n; i++) Serial.printf(" %02X", buf[i]);
+      Serial.println();
+    } else {
+      Serial.println("[RS485] RX: no bytes received");
+    }
   }
   return n;
 }
@@ -168,7 +179,14 @@ bool modbusWriteMultiple(uint8_t slaveId, uint16_t startAddr, uint8_t count, uin
 
 // FC02 — Read Discrete Inputs
 // Returns true on success, fills bits[count] with 0/1 (one bool per input)
-bool modbusReadDiscreteInputs(uint8_t slaveId, uint16_t startAddr, uint8_t count, bool* bits) {
+// `quiet`/`timeoutMs`: used by the DI pulse-counter fast-poll loop (see
+// modbusSend()/modbusReceive() above) to hammer a single DI as fast as
+// possible without flooding Serial, and with a shorter timeout than the
+// normal 300ms default (still generous for a healthy bus, but a fast-poll
+// loop calling this hundreds of times a second can't afford to eat a
+// full 300ms stall on every single missed/slow response).
+bool modbusReadDiscreteInputs(uint8_t slaveId, uint16_t startAddr, uint8_t count, bool* bits,
+                               bool quiet = false, int timeoutMs = 300) {
   if (!_mbSerial) return false;
 
   while (_mbSerial->available()) _mbSerial->read();
@@ -184,23 +202,23 @@ bool modbusReadDiscreteInputs(uint8_t slaveId, uint16_t startAddr, uint8_t count
   req[6] = crc & 0xFF;
   req[7] = crc >> 8;
 
-  modbusSend(req, 8);
+  modbusSend(req, 8, quiet);
 
   // Response: slaveId + 0x02 + byteCount + packed bits + CRC(2)
   uint8_t byteCount = (count + 7) / 8;
   int expectedLen = 3 + byteCount + 2;
   uint8_t resp[16];
-  int n = modbusReceive(resp, expectedLen, 300);
+  int n = modbusReceive(resp, expectedLen, timeoutMs, quiet);
 
   if (n < expectedLen) {
-    Serial.printf("[Modbus] FC02 timeout: got %d, expected %d\n", n, expectedLen);
+    if (!quiet) Serial.printf("[Modbus] FC02 timeout: got %d, expected %d\n", n, expectedLen);
     return false;
   }
 
   uint16_t rxCrc   = resp[n-2] | ((uint16_t)resp[n-1] << 8);
   uint16_t calcCrc = modbusCRC(resp, n-2);
   if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x02) {
-    Serial.printf("[Modbus] FC02 bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
+    if (!quiet) Serial.printf("[Modbus] FC02 bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
     return false;
   }
 
@@ -320,6 +338,15 @@ static const uint16_t AMIDJ14_DO_START = 1; // DO1=1, DO2=2, DO3=3, DO4=4 (FC01/
 // Convenience: read all 4 digital inputs in one FC02 request.
 bool modbusReadAllDI(uint8_t slaveId, bool* din4) {
   return modbusReadDiscreteInputs(slaveId, AMIDJ14_DI_START, 4, din4);
+}
+
+// Convenience: read a SINGLE digital input — used by the DI pulse-
+// counter fast-poll loop (webui.h/waveshare-s3.ino "Pulse Counter Mode"),
+// which only cares about one DI's transitions at a time and wants each
+// round-trip as short as possible (1 bit vs. 4) since round-trip time
+// directly caps the highest RPM this method can measure without aliasing.
+bool modbusReadOneDI(uint8_t slaveId, int diIndex, bool* state, bool quiet = true, int timeoutMs = 60) {
+  return modbusReadDiscreteInputs(slaveId, AMIDJ14_DI_START + diIndex, 1, state, quiet, timeoutMs);
 }
 
 // Convenience: read all 4 digital outputs' current state in one FC01 request.

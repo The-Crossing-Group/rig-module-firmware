@@ -50,6 +50,7 @@
 #include "config.h"
 #include "modbus.h"
 #include "scaling.h"
+#include "pulse.h"
 #include "webui.h"
 
 // =============================================================================
@@ -343,6 +344,13 @@ void setup() {
   // Start poll task on core 1
   Serial.println("[BOOT] Starting Modbus poll task...");
   xTaskCreatePinnedToCore(pollTask, "poll", 8192, NULL, 1, NULL, 1);
+
+  // Start the DI pulse-counter fast-poll task (pulse.h) — also core 1,
+  // shares modbusBusMutex with pollTask above so the two never collide
+  // on the wire. Sleeps on its own when no DI has Pulse Counter Mode
+  // enabled, so this is a no-op cost-wise on a normal setup.
+  Serial.println("[BOOT] Starting DI pulse-counter fast-poll task...");
+  xTaskCreatePinnedToCore(pulsePollTask, "pulsepoll", 4096, &cfg, 1, NULL, 1);
 
   Serial.println("========================================");
   Serial.println("[BOOT] Ready! Open the web UI to configure.");
@@ -1121,7 +1129,9 @@ String buildPayload(bool bufferedFlag) {
   // the "extraBoards" array (Advanced / hidden multi-board support —
   // config.h ExtraBoardConfig — up to MAX_EXTRA_BOARDS boards, each with
   // its own channels + digital I/O, roughly doubles worst-case payload
-  // size vs. the primary board alone).
+  // size vs. the primary board alone). Per-DI "rpm" sub-object (pulse.h
+  // Pulse Counter Mode) adds only ~50 bytes x up to 4 DIs — comfortably
+  // inside existing headroom, no further bump needed.
   DynamicJsonDocument doc(14336);
 
   doc["moduleId"] = cfg.moduleId;   // primary key the Pi uses
@@ -1236,6 +1246,19 @@ String buildPayload(bool bufferedFlag) {
         if (dinReadings[i].valid) d["state"] = dinReadings[i].state;
         else                      d["state"] = nullptr;
         d["status"] = dinReadings[i].status;
+
+        // Pulse Counter Mode (pulse.h) — RPM derived from this DI's
+        // transitions, riding the same Modbus wiring instead of any new
+        // hardware. Only added when actually enabled on this channel;
+        // omitted entirely otherwise, same "don't report phantom data"
+        // convention used throughout this payload.
+        if (cfg.din[i].pulseModeEnabled) {
+          PulseReading pr;
+          pulseRpmCompute(i, cfg, pr);
+          JsonObject rpmObj = d.createNestedObject("rpm");
+          rpmObj["value"]  = pr.valid ? pr.rpm : nullptr;
+          rpmObj["status"] = pr.status;
+        }
       }
       JsonArray doArr = doc.createNestedArray("digitalOutputs");
       for (int i = 0; i < 4; i++) {

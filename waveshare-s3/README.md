@@ -1,8 +1,41 @@
 # Rig Module Firmware — Waveshare ESP32-S3-RS485-CAN
 
-**Version:** rig-module-1.9.0
+**Version:** rig-module-1.10.0
 **Board:** Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, screw terminal)
 **Target:** Waveshare Modbus RTU Analog Input 8CH (B) or Eletechsup AMIDJ14 — auto-detected, same as LilyGo variant.
+
+## RPM / Pulse Counter Mode (v1.10.0+) — AMIDJ14 Digital Inputs only
+
+New per-DI checkbox on `/digital`: "Pulse Counter Mode". Turns a digital
+input's ON/OFF transitions into an RPM reading — **over the existing
+Modbus DI wiring, no GPIO, no extra hardware.** Uses whatever sensor is
+already wired to that DI (e.g. a proximity sensor watching a bolt/target
+pass once per revolution).
+
+- A dedicated background task (`pulse.h`) hammers just that one DI with
+  single-bit FC02 reads as fast as the RS485 bus allows — much faster
+  than the normal poll cycle, since RPM needs to catch every transition,
+  not a periodic snapshot. Shares the same bus mutex as the main poll
+  task so the two never collide on the wire.
+- **Math:** time between rising edges (OFF→ON), not a fixed counting
+  window — `RPM = 60 / (period_seconds × pulsesPerRev)`. Updates on every
+  transition, responsive at low RPM, no pulse for the configured timeout
+  → reports 0 (stopped) instead of freezing on a stale value.
+- **Per-DI config:** enable, pulses-per-revolution (1 for a single
+  trigger point on the shaft; higher for e.g. gear teeth), stopped
+  timeout (s).
+- **Honest limitation — read this before relying on it at speed:**
+  accuracy is capped by how fast this device can round-trip a single-bit
+  Modbus read over RS485, not open-ended like a hardware interrupt would
+  be. Roughly the "few hundred RPM" range at typical baud rates, and it
+  gets less reliable (aliasing — a plausible-looking but silently WRONG
+  number, not just a slow one) past that. The actual measured fast-poll
+  rate is shown live on `/digital` so this is a fact you can check, not a
+  guess — if you need faster/higher-RPM sensing than that ceiling, it
+  needs a different measurement method (dedicated hardware pulse counter/
+  interrupt), which is a bigger scope change than this feature.
+- Reported per-DI in the JSON payload (`digitalInputs[].rpm = {value,
+  status}`, only present when that DI has pulse mode on) and on `/live`.
 
 ## Advanced: Multi-Board RS485 (v1.9.0+)
 

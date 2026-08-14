@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.9.2"
+#define FW_VERSION "rig-module-1.10.0"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -55,9 +55,35 @@ struct ChannelConfig {
 // (currently just the Eletechsup AMIDJ14: 4 DI + 4 DO). Plug-and-play
 // default-enabled, same convention as the analog channels — uncheck
 // whichever DI/DO aren't actually wired up on /digital.
+//
+// Optional "Pulse Counter Mode" (DIs only) — turns a DI's ON/OFF
+// transitions over time into an RPM reading, using the SAME Modbus
+// wiring/DI channel already in use, no extra hardware or GPIO. Polled at
+// whatever rate the RS485 bus can sustain (see pollTask's dedicated fast-
+// poll loop) rather than the normal cfg.pollIntervalS cadence, since RPM
+// needs to catch every transition, not just a periodic snapshot.
+// Deliberately off by default, same reasoning as leaving a channel
+// disabled elsewhere — turning it on is a one-checkbox opt-in once a
+// sensor's actually wired to that DI for this purpose.
 struct DigitalChannelConfig {
-  bool   enabled = true;
-  String name    = "";
+  bool   enabled          = true;
+  String name             = "";
+  bool   pulseModeEnabled = false; // DI-only: interpret ON/OFF transitions as rotation pulses
+  int    pulsesPerRev     = 1;     // trigger points per revolution (1 = single point, e.g. one bolt/target)
+  float  timeoutS         = 3.0f;  // no transition for this long -> report 0 RPM (stopped)
+};
+
+// Live RPM reading derived from a DI's Modbus-polled transitions (see
+// pulseModeEnabled above). Time-between-transitions math, same principle
+// as any other pulse tach — just fed from Modbus reads on a fast poll
+// loop instead of a GPIO interrupt, so accuracy is bounded by how fast
+// this device can round-trip the RS485 bus rather than being open-ended;
+// see pollTask's fast-poll loop / the /digital page copy for the actual
+// ceiling and why.
+struct PulseReading {
+  bool   valid  = false;   // true once at least one full period has been measured
+  float  rpm    = 0.0f;
+  String status = "stale"; // "ok" | "stopped" | "stale"
 };
 
 // =============================================================================
@@ -207,8 +233,11 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   for (int i = 0; i < 4; i++) {
     String preIn  = "di" + String(i);
     String preOut = "do" + String(i);
-    c.din[i].enabled  = p.getBool((preIn + "en").c_str(), true);
-    c.din[i].name     = p.getString((preIn + "nm").c_str(), "DI " + String(i+1));
+    c.din[i].enabled          = p.getBool((preIn + "en").c_str(), true);
+    c.din[i].name             = p.getString((preIn + "nm").c_str(), "DI " + String(i+1));
+    c.din[i].pulseModeEnabled = p.getBool((preIn + "pmEn").c_str(), false);
+    c.din[i].pulsesPerRev     = p.getInt((preIn + "ppr").c_str(), 1);
+    c.din[i].timeoutS         = p.getFloat((preIn + "pto").c_str(), 3.0f);
     c.dout[i].enabled = p.getBool((preOut + "en").c_str(), true);
     c.dout[i].name    = p.getString((preOut + "nm").c_str(), "DO " + String(i+1));
   }
@@ -263,6 +292,9 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
     String preOut = "do" + String(i);
     p.putBool((preIn + "en").c_str(), c.din[i].enabled);
     p.putString((preIn + "nm").c_str(), c.din[i].name);
+    p.putBool((preIn + "pmEn").c_str(), c.din[i].pulseModeEnabled);
+    p.putInt((preIn + "ppr").c_str(), c.din[i].pulsesPerRev);
+    p.putFloat((preIn + "pto").c_str(), c.din[i].timeoutS);
     p.putBool((preOut + "en").c_str(), c.dout[i].enabled);
     p.putString((preOut + "nm").c_str(), c.dout[i].name);
   }
