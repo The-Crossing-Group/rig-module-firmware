@@ -363,15 +363,25 @@ struct BoardProfile {
 
 static const BoardProfile BOARD_WAVESHARE_8AI  = { "Waveshare 8AI (B)",  8, 1000.0f, false };
 static const BoardProfile BOARD_ELETECHSUP_AMIDJ14 = { "Eletechsup AMIDJ14", 6, 100.0f, true };
+// Used when the Product ID probe gets no/bad response at all (bus not
+// wired up yet, wrong baud, board unpowered) — deliberately shows
+// EVERYTHING (8 analog channels + digital I/O) rather than silently
+// defaulting to Waveshare's narrower profile. That old default meant the
+// /digital page would say "no digital I/O on this board" any time the
+// bus was simply unplugged or mis-wired, which looks exactly like "this
+// firmware doesn't support your board" instead of "check your wiring" —
+// showing every option during setup/debugging makes it obvious it's a
+// wiring problem, not a missing feature. Once the probe actually gets a
+// good response, this doesn't apply — a real Waveshare board still
+// detects correctly as BOARD_WAVESHARE_8AI as before.
+static const BoardProfile BOARD_UNKNOWN = { "Unknown (no response — check wiring)", 8, 1000.0f, true };
 
 // Reads special-function register 0x00F7 (Product ID) via FC03. Returns the
-// matching BoardProfile, or Waveshare as the safe fallback if the read
+// matching BoardProfile, or BOARD_UNKNOWN (everything enabled) if the read
 // fails (unplugged bus, board without this register, wrong baud, etc.) or
-// returns an ID we don't recognize yet — the original 8-channel/µA
-// behavior is that fallback, so any board this firmware worked with
-// before Product-ID detection existed keeps working identically.
+// returns an ID we don't recognize yet.
 BoardProfile modbusDetectBoard(uint8_t slaveId) {
-  if (!_mbSerial) return BOARD_WAVESHARE_8AI;
+  if (!_mbSerial) return BOARD_UNKNOWN;
 
   while (_mbSerial->available()) _mbSerial->read();
 
@@ -392,14 +402,14 @@ BoardProfile modbusDetectBoard(uint8_t slaveId) {
   int n = modbusReceive(resp, 7, 300); // slave+fc+len+2 data+2 CRC = 7 bytes
 
   if (n < 7) {
-    Serial.println("[Modbus] Board ID probe: no/short response — defaulting to Waveshare");
-    return BOARD_WAVESHARE_8AI;
+    Serial.println("[Modbus] Board ID probe: no/short response — check wiring/baud/power. Showing all channels + digital I/O so nothing's hidden while you sort it out.");
+    return BOARD_UNKNOWN;
   }
   uint16_t rxCrc   = resp[n-2] | ((uint16_t)resp[n-1] << 8);
   uint16_t calcCrc = modbusCRC(resp, n-2);
   if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x03) {
-    Serial.println("[Modbus] Board ID probe: bad response — defaulting to Waveshare");
-    return BOARD_WAVESHARE_8AI;
+    Serial.println("[Modbus] Board ID probe: bad response — check wiring/baud/power. Showing all channels + digital I/O so nothing's hidden while you sort it out.");
+    return BOARD_UNKNOWN;
   }
 
   uint16_t productId = ((uint16_t)resp[3] << 8) | resp[4];
@@ -409,8 +419,8 @@ BoardProfile modbusDetectBoard(uint8_t slaveId) {
     case 2308: return BOARD_WAVESHARE_8AI;
     case 2814: return BOARD_ELETECHSUP_AMIDJ14;
     default:
-      Serial.printf("[Modbus] Unrecognized Product ID %u — defaulting to Waveshare\n", productId);
-      return BOARD_WAVESHARE_8AI;
+      Serial.printf("[Modbus] Unrecognized Product ID %u — showing all channels + digital I/O\n", productId);
+      return BOARD_UNKNOWN;
   }
 }
 

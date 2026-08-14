@@ -830,7 +830,11 @@ void pollTask(void* param) {
   // implement it, but skip it explicitly once we know the board isn't
   // Waveshare, to avoid a pointless bus round-trip and a scary-looking
   // "failed to set channel modes" warning on every boot for those boards).
-  if (boardProfile.rawDivisor == BOARD_WAVESHARE_8AI.rawDivisor) {
+  // BOARD_UNKNOWN (no-response fallback) shares Waveshare's divisor value
+  // by design (see modbus.h) but isn't actually confirmed Waveshare hardware
+  // -- compare by name, not divisor, so an unwired/unresponsive bus doesn't
+  // also attempt a doomed mode-3 write on top of everything else.
+  if (String(boardProfile.name) == BOARD_WAVESHARE_8AI.name) {
     writeChannelModes();
   } else {
     Serial.printf("[Modbus] Skipping mode-3 write — %s doesn't use Waveshare's mode registers\n", boardProfile.name);
