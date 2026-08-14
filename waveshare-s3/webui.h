@@ -882,7 +882,7 @@ static void handleConfig() {
       // Pulse Counter Mode (pulse.h) — DI-only, checkbox present in the
       // same all-at-once /digital form as everything else above.
       _cfg->din[i].pulseModeEnabled = _srv->hasArg((preIn+"pmEn").c_str());
-      applyParam((preIn+"ppr").c_str(), [i](String v){ _cfg->din[i].pulsesPerRev = max(1, v.toInt()); });
+      applyParam((preIn+"ppr").c_str(), [i](String v){ _cfg->din[i].pulsesPerRev = max(1, (int)v.toInt()); });
       applyParam((preIn+"pto").c_str(), [i](String v){ _cfg->din[i].timeoutS = max(0.1f, v.toFloat()); });
     }
     // Clear any stale edge-timing state for channels no longer in pulse
@@ -1138,7 +1138,8 @@ static void handleApiDigital() {
         pulseRpmCompute(i, *_cfg, pr);
         JsonObject rpmObj = di.createNestedObject("rpm");
         rpmObj["valid"]  = pr.valid;
-        rpmObj["value"]  = pr.valid ? pr.rpm : nullptr;
+        if (pr.valid) rpmObj["value"] = pr.rpm;
+        else          rpmObj["value"] = nullptr;
         rpmObj["status"] = pr.status;
       }
       JsonObject dop = dout.createNestedObject();

@@ -1256,7 +1256,8 @@ String buildPayload(bool bufferedFlag) {
           PulseReading pr;
           pulseRpmCompute(i, cfg, pr);
           JsonObject rpmObj = d.createNestedObject("rpm");
-          rpmObj["value"]  = pr.valid ? pr.rpm : nullptr;
+          if (pr.valid) rpmObj["value"] = pr.rpm;
+          else          rpmObj["value"] = nullptr;
           rpmObj["status"] = pr.status;
         }
       }
