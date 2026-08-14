@@ -363,6 +363,16 @@ struct BoardProfile {
 
 static const BoardProfile BOARD_WAVESHARE_8AI  = { "Waveshare 8AI (B)",  8, 1000.0f, false };
 static const BoardProfile BOARD_ELETECHSUP_AMIDJ14 = { "Eletechsup AMIDJ14", 6, 100.0f, true };
+
+// Resolves an ExtraBoardConfig.boardType string ("amidj14"/"waveshare") to
+// its BoardProfile. Used for extra/advanced boards, which are explicitly
+// typed by whoever wired them up rather than auto-probed like the primary
+// board (see config.h ExtraBoardConfig — deliberately no "auto" option
+// there to keep the advanced feature simple and predictable).
+BoardProfile boardProfileForType(const String& boardType) {
+  if (boardType == "waveshare") return BOARD_WAVESHARE_8AI;
+  return BOARD_ELETECHSUP_AMIDJ14; // default
+}
 // Used when the Product ID probe gets no/bad response at all (bus not
 // wired up yet, wrong baud, board unpowered) — deliberately shows
 // EVERYTHING (8 analog channels + digital I/O) rather than silently
@@ -474,4 +484,44 @@ long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud) {
   _mbSerial->updateBaudRate(originalBaud);
   delay(20);
   return -1;
+}
+
+// =============================================================================
+// SLAVE ID BUS SCAN (Advanced / hidden — /advanced page)
+//
+// Sanity-check tool for multi-board setups: probes addresses 1..maxAddr at
+// the CURRENT baud rate and reports which ones actually answer, plus their
+// Product ID (0x00F7) if it identifies as a known board. Exists so that if
+// a slave ID gets fat-fingered on /advanced (typo, duplicate address,
+// forgot which address a board was set to), it's a one-click way to see
+// what's really out there on the wire instead of guessing/re-wiring to
+// check.
+//
+// Synchronous/blocking — probes at ~300ms timeout per address, so a full
+// 1-247 scan can take over a minute. Caller (web handler) should cap
+// maxAddr to something reasonable for interactive use (default 32, covers
+// every sane multi-board setup) and MUST hold modbusBusMutex for the
+// whole call so the poll task can't interleave a read on top of it.
+//
+// Calls onFound(addr, productIdOrMinus1) for every address that answers a
+// basic FC04 read of register 0 — productIdOrMinus1 is the board's Product
+// ID (via a follow-up FC03 read of 0x00F7) if that also succeeds, or -1 if
+// the board answered analog reads but not the ID register (older/unknown
+// board — still a real device at that address, just unidentified).
+template<typename FoundFn>
+void modbusScanSlaves(int maxAddr, FoundFn onFound, int timeoutMs = 300) {
+  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr > 247) maxAddr = 247;
+  uint16_t regs[1];
+  for (int addr = 1; addr <= maxAddr; addr++) {
+    if (modbusReadInputRegs((uint8_t)addr, 0x0000, 1, regs)) {
+      // Got a live device — try to identify it via the Product ID
+      // register too (best-effort, doesn't affect the "found" result).
+      BoardProfile p = modbusDetectBoard((uint8_t)addr);
+      int productId = -1;
+      if (String(p.name) == BOARD_WAVESHARE_8AI.name) productId = 2308;
+      else if (String(p.name) == BOARD_ELETECHSUP_AMIDJ14.name) productId = 2814;
+      onFound(addr, productId);
+    }
+  }
 }

@@ -14,7 +14,13 @@
 // BoardProfile picked by modbusDetectBoard() at boot (modbus.h) so this
 // function itself never needs to know which specific board is wired up —
 // it just applies whatever divisor was detected.
-void scaleChannel(int ch, uint16_t raw, ModuleConfig& cfg, ChannelReading& out, float rawDivisor) {
+// Shared scaling core — takes a ChannelConfig directly rather than
+// indexing into a ModuleConfig, so it works both for the primary board's
+// per-channel-configured cfg.ch[] AND for extra/advanced boards (config.h
+// ExtraBoardConfig) which don't carry full per-channel calibration — those
+// callers pass a shared default-constructed ChannelConfig (standard
+// 4-20mA -> 0-1 linear map) instead.
+void scaleChannelCfg(uint16_t raw, ChannelConfig& c, ChannelReading& out, float rawDivisor) {
   out.valid = true;
 
   float mA = raw / rawDivisor;
@@ -36,7 +42,6 @@ void scaleChannel(int ch, uint16_t raw, ModuleConfig& cfg, ChannelReading& out, 
     return;
   }
 
-  ChannelConfig& c = cfg.ch[ch];
   float frac;
 
   // Use captured zero/max cal if available
@@ -59,6 +64,11 @@ void scaleChannel(int ch, uint16_t raw, ModuleConfig& cfg, ChannelReading& out, 
   out.value    = val;
   out.hasValue = true;
   out.status   = "ok";
+}
+
+// Scale one channel of the PRIMARY board (indexes cfg.ch[ch]).
+void scaleChannel(int ch, uint16_t raw, ModuleConfig& cfg, ChannelReading& out, float rawDivisor) {
+  scaleChannelCfg(raw, cfg.ch[ch], out, rawDivisor);
 }
 
 // =============================================================================

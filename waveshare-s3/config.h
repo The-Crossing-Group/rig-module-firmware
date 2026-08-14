@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.8.2"
+#define FW_VERSION "rig-module-1.9.0"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -60,6 +60,33 @@ struct DigitalChannelConfig {
   String name    = "";
 };
 
+// =============================================================================
+// EXTRA BOARDS (Advanced / hidden) — supports wiring up to MAX_EXTRA_BOARDS
+// additional analog-to-Modbus boards (e.g. more than one Eletechsup
+// AMIDJ14) on the SAME RS485 bus as the primary board, each at its own
+// unique Modbus slave address. This is a genuine power-user feature —
+// intentionally kept off the main /config, /channels, /digital pages and
+// only reachable via /advanced (linked quietly from /system) so a normal
+// single-board setup never sees it.
+//
+// Each extra board gets its own slave ID + board type (same two profiles
+// as the primary: Waveshare 8AI or Eletechsup AMIDJ14) but — unlike the
+// primary board — does NOT get full per-channel calibration/tank-volume
+// config. That's a deliberate scope cut to keep NVS usage sane with
+// multiple boards; extra-board channels report with generic names
+// (e.g. "Board 2 Ch 1") and the board's standard 4-20mA linear map only.
+// Rename/re-scale support can be added later if it's actually needed.
+// =============================================================================
+#define MAX_EXTRA_BOARDS 3
+
+struct ExtraBoardConfig {
+  bool   enabled   = false;
+  int    slaveId   = 0;          // 0 = not set; must be unique on the bus
+  String boardType = "amidj14";  // "amidj14" or "waveshare" — no "auto" here,
+                                  // advanced users set this explicitly
+  String name      = "";         // optional label, e.g. "Board 2"
+};
+
 // Full module config
 struct ModuleConfig {
   String moduleId       = "";    // built from MAC: MODULE-ABC123
@@ -96,6 +123,9 @@ struct ModuleConfig {
   // Digital I/O — only polled/shown when boardProfile.hasDigitalIO is true.
   DigitalChannelConfig din[4];
   DigitalChannelConfig dout[4];
+
+  // Advanced / hidden — see ExtraBoardConfig above.
+  ExtraBoardConfig extraBoards[MAX_EXTRA_BOARDS];
 };
 
 // Per-channel live reading
@@ -182,6 +212,15 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
     c.dout[i].enabled = p.getBool((preOut + "en").c_str(), true);
     c.dout[i].name    = p.getString((preOut + "nm").c_str(), "DO " + String(i+1));
   }
+
+  // Advanced / hidden extra boards — see ExtraBoardConfig (config.h).
+  for (int i = 0; i < MAX_EXTRA_BOARDS; i++) {
+    String pre = "xb" + String(i);
+    c.extraBoards[i].enabled   = p.getBool((pre + "en").c_str(), false);
+    c.extraBoards[i].slaveId   = p.getInt((pre + "sid").c_str(), 0);
+    c.extraBoards[i].boardType = p.getString((pre + "bt").c_str(), "amidj14");
+    c.extraBoards[i].name      = p.getString((pre + "nm").c_str(), "Board " + String(i+2));
+  }
 }
 
 // Save all config to NVS
@@ -226,6 +265,15 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
     p.putString((preIn + "nm").c_str(), c.din[i].name);
     p.putBool((preOut + "en").c_str(), c.dout[i].enabled);
     p.putString((preOut + "nm").c_str(), c.dout[i].name);
+  }
+
+  // Advanced / hidden extra boards — see ExtraBoardConfig (config.h).
+  for (int i = 0; i < MAX_EXTRA_BOARDS; i++) {
+    String pre = "xb" + String(i);
+    p.putBool((pre + "en").c_str(), c.extraBoards[i].enabled);
+    p.putInt((pre + "sid").c_str(), c.extraBoards[i].slaveId);
+    p.putString((pre + "bt").c_str(), c.extraBoards[i].boardType);
+    p.putString((pre + "nm").c_str(), c.extraBoards[i].name);
   }
   p.end();
 }

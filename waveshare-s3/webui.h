@@ -31,7 +31,16 @@ extern SemaphoreHandle_t modbusBusMutex;
 long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud); // modbus.h
 BoardProfile modbusDetectBoard(uint8_t slaveId); // modbus.h
 bool modbusWriteDO(uint8_t slaveId, int doIndex, bool value); // modbus.h
+BoardProfile boardProfileForType(const String& boardType); // modbus.h
+// modbusScanSlaves() (templated) is already declared+defined in modbus.h,
+// included before this file — no forward decl needed/possible here.
 extern BoardProfile boardProfile; // rig-module-firmware.ino — detected once at boot
+
+// Advanced / hidden extra boards (config.h ExtraBoardConfig, /advanced page)
+extern BoardProfile   extraBoardProfile[MAX_EXTRA_BOARDS];
+extern ChannelReading extraReadings[MAX_EXTRA_BOARDS][8];
+extern DigitalReading extraDinReadings[MAX_EXTRA_BOARDS][4];
+extern DigitalReading extraDoutReadings[MAX_EXTRA_BOARDS][4];
 extern NTPClient ntpClient;
 extern bool apModeActive;
 extern String apSSID;
@@ -506,6 +515,93 @@ function writeDO(ch,val){
   return h;
 }
 
+// =============================================================================
+// /advanced — hidden power-user page (only linked quietly from /system).
+// Multi-board support: wire up to MAX_EXTRA_BOARDS additional analog-to-
+// Modbus boards (e.g. more than one Eletechsup AMIDJ14) on the SAME RS485
+// bus as the primary board, each at its own unique slave address. See
+// config.h ExtraBoardConfig for why this is scoped down (no per-channel
+// calibration/tank-volume for extra boards — generic names + standard
+// 4-20mA linear map only).
+//
+// Also hosts the Slave ID Bus Scan tool — a safety net for exactly this
+// kind of multi-board setup: if a slave ID gets typo'd or two boards end
+// up on the same address by accident, this reports what's actually
+// responding on the wire so it's obvious at a glance instead of a silent
+// "board 3 just stopped working".
+// =============================================================================
+static String advancedPage(ModuleConfig& cfg) {
+  String h = FPSTR(NAV);
+  h += "<div class='page'><h2>&#9881;&#65039; Advanced</h2>";
+  h += "<p class='small'>Power-user settings — most setups never need this page. "
+       "Changes to slave ID or board type reboot the module to take effect.</p>";
+
+  h += "<h3>Slave ID Bus Scan</h3><div class='card'>";
+  h += "<p class='small'>Probes addresses 1-N at the current baud rate and reports which ones "
+       "answer. Use this to double-check for typos or address collisions before/after editing "
+       "the extra boards below — especially handy if something got edited by accident and a "
+       "board \"went missing\".</p>";
+  h += "<div class='row'><div><label>Scan up to address</label><input id='scanMax' type='number' min='1' max='247' value='16'></div>";
+  h += "<button type='button' onclick='runScan()' id='scanBusBtn' style='margin-top:18px'>&#128269; Scan Bus</button></div>";
+  h += "<div id='scanBusResult' class='small' style='margin-top:8px'></div></div>";
+
+  h += "<h3>Extra Boards (Multi-Board RS485)</h3>";
+  h += "<p class='small' style='margin-bottom:10px'>Add up to " + String(MAX_EXTRA_BOARDS) +
+       " more analog-to-Modbus boards on this same RS485 bus — e.g. several Eletechsup AMIDJ14 "
+       "units wired together, each at a different slave address. The primary board above (see "
+       "<a href='/'>Config</a>) keeps its own Slave ID / Board Type — these are IN ADDITION to it. "
+       "Every slave ID on the bus (primary + every extra board) must be unique. Extra boards report "
+       "generic channel names (\"Board Ch 1\", etc.) and a standard 4-20mA linear map — no per-channel "
+       "calibration here, unlike the primary board's <a href='/channels'>Channels</a> page.</p>";
+
+  h += "<form method='POST' action='/api/config'>";
+  h += "<input type='hidden' name='fromAdvancedPage' value='1'>";
+  h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save Extra Boards</button>";
+
+  for (int i = 0; i < MAX_EXTRA_BOARDS; i++) {
+    ExtraBoardConfig& xb = cfg.extraBoards[i];
+    String pre = "xb" + String(i);
+    h += "<div class='card'><b>Extra Board " + String(i + 1) + "</b>";
+    if (xb.enabled) {
+      h += " &nbsp;<span class='small'>(" + String(extraBoardProfile[i].name) + ", " +
+           String(extraBoardProfile[i].numChannels) + " channels)</span>";
+    }
+    h += "<label><input type='checkbox' name='" + pre + "en'";
+    if (xb.enabled) h += " checked";
+    h += "> Enabled</label>";
+    h += "<label>Name</label><input name='" + pre + "nm' value='" + xb.name +
+         "' placeholder='e.g. Board " + String(i + 2) + "'>";
+    h += "<div class='row'><div><label>Slave ID (1-247, unique)</label><input name='" + pre +
+         "sid' type='number' min='1' max='247' value='" + String(xb.slaveId) + "'></div>";
+    h += "<div><label>Board Type</label><select name='" + pre + "bt'>";
+    h += "<option value='amidj14'"; if (xb.boardType == "amidj14") h += " selected"; h += ">Eletechsup AMIDJ14</option>";
+    h += "<option value='waveshare'"; if (xb.boardType == "waveshare") h += " selected"; h += ">Waveshare 8AI (B)</option>";
+    h += "</select></div></div>";
+    h += "</div>";
+  }
+
+  h += "<button type='submit' style='margin-top:6px'>&#128190; Save Extra Boards</button>";
+  h += "</form>";
+
+  h += R"(
+<script>
+function runScan(){
+  let btn=document.getElementById('scanBusBtn'); let box=document.getElementById('scanBusResult');
+  let max=document.getElementById('scanMax').value;
+  btn.disabled=true; btn.textContent='Scanning...';
+  box.textContent='Scanning addresses 1-'+max+'... this can take a while.';
+  fetch('/api/modbus/scan?max='+max).then(r=>r.json()).then(d=>{
+    btn.disabled=false; btn.innerHTML='&#128269; Scan Bus';
+    if(d.found.length===0){ box.textContent='No slaves responded. Check wiring, baud rate, and DE pin.'; return; }
+    let lines = d.found.map(f => 'Address ' + f.addr + (f.productId>0 ? ' — ' + (f.productId===2308?'Waveshare 8AI (B)':(f.productId===2814?'Eletechsup AMIDJ14':f.productId)) : ' — unidentified board'));
+    box.innerHTML = 'Found ' + d.found.length + ' device(s):<br>' + lines.join('<br>');
+  }).catch(e=>{ btn.disabled=false; btn.innerHTML='&#128269; Scan Bus'; box.textContent='Scan failed: '+e; });
+}
+</script>)";
+  h += "</div>";
+  return h;
+}
+
 static String livePage() {
   String h = FPSTR(NAV);
   h += "<div class='page'><h2>&#128202; Live Status</h2><div id='liveData'>Loading...</div>";
@@ -581,6 +677,7 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<h3>Danger Zone</h3><div class='card'>";
   h += "<button onclick='if(confirm(\"Reboot?\"))fetch(\"/api/reboot\",{method:\"POST\"})'>Reboot</button>&nbsp;";
   h += "<button class='btn-red' onclick='if(confirm(\"Factory reset? ALL config will be lost.\"))fetch(\"/api/factory-reset\",{method:\"POST\"})'>Factory Reset</button></div>";
+  h += "<div class='small' style='margin-top:20px'><a href='/advanced' style='color:#556'>Advanced settings</a></div>";
   h += R"(
 <script>
 fetch('/api/status').then(r=>r.json()).then(d=>{
@@ -599,7 +696,7 @@ function doOTA(){
 
 // ─── API handler helpers ──────────────────────────────────────────────────────
 static void handleApiStatus() {
-  DynamicJsonDocument doc(7168); // matches buildPayload()'s size (multi-tank volume + digital I/O)
+  DynamicJsonDocument doc(14336); // matches buildPayload()'s size (multi-tank volume + digital I/O + extraBoards)
   String payload = buildPayload(false);
   deserializeJson(doc, payload);
   doc["system"]["uptime"]     = millis() / 1000;
@@ -716,9 +813,38 @@ static void handleConfig() {
     }
   }
 
+  // Advanced / hidden extra boards — only ever submitted from /advanced
+  // (own form, own "fromAdvancedPage" marker), same all-at-once pattern as
+  // /channels and /digital above. Slave ID / board type changes need a
+  // reboot too, same reasoning as the primary board's boardOverride/baud
+  // (extraBoardProfile[] is only resolved once, at poll-task startup).
+  bool boardsChanged = false;
+  if (_srv->hasArg("fromAdvancedPage")) {
+    for (int i = 0; i < MAX_EXTRA_BOARDS; i++) {
+      String pre = "xb" + String(i);
+      bool nowEnabled = _srv->hasArg((pre+"en").c_str());
+      if (nowEnabled != _cfg->extraBoards[i].enabled) boardsChanged = true;
+      _cfg->extraBoards[i].enabled = nowEnabled;
+      applyParam((pre+"sid").c_str(), [i,&boardsChanged](String v){
+        int nv = v.toInt();
+        if (nv != _cfg->extraBoards[i].slaveId) boardsChanged = true;
+        _cfg->extraBoards[i].slaveId = nv;
+      });
+      applyParam((pre+"bt").c_str(), [i,&boardsChanged](String v){
+        if (v != _cfg->extraBoards[i].boardType) boardsChanged = true;
+        _cfg->extraBoards[i].boardType = v;
+      });
+      applyParam((pre+"nm").c_str(), [i](String v){ _cfg->extraBoards[i].name = v; });
+    }
+  }
+
   saveConfig(*_prefs, *_cfg);
 
-  if (wifiChanged) {
+  if (boardsChanged && !wifiChanged) {
+    _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to apply board changes...</p>");
+    delay(1000);
+    ESP.restart();
+  } else if (wifiChanged) {
     _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to connect to new WiFi...</p>");
     delay(1000);
     ESP.restart();
@@ -740,6 +866,7 @@ static void handleConfig() {
     String backTo = "/";
     if (allChannels || which >= 0) backTo = "/channels";
     else if (_srv->hasArg("fromDigitalPage")) backTo = "/digital";
+    else if (_srv->hasArg("fromAdvancedPage")) backTo = "/advanced";
     _srv->sendHeader("Location", backTo);
     _srv->send(302, "text/plain", "");
   }
@@ -844,6 +971,36 @@ static void handleModbusAutoDetect() {
   } else {
     _srv->send(200, "application/json", "{\"ok\":true,\"detected\":false}");
   }
+}
+
+// Slave ID bus scan for the /advanced page — synchronous/blocking, holds
+// modbusBusMutex for the whole scan so the poll task can't interleave a
+// read on top of it. Capped by the caller's "max" param since a full
+// 1-247 scan is slow when most addresses are empty (~300ms timeout per
+// miss). See modbus.h modbusScanSlaves() for the probe details.
+static void handleModbusScan() {
+  int maxAddr = _p("max").isEmpty() ? 16 : _p("max").toInt();
+  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr > 247) maxAddr = 247;
+
+  DynamicJsonDocument doc(2048);
+  JsonArray found = doc.createNestedArray("found");
+
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(90000)) == pdTRUE) {
+    modbusScanSlaves(maxAddr, [&](int addr, int productId) {
+      JsonObject o = found.createNestedObject();
+      o["addr"]      = addr;
+      o["productId"] = productId;
+    }, 300);
+    xSemaphoreGive(modbusBusMutex);
+  } else {
+    _srv->send(503, "application/json", "{\"ok\":false,\"error\":\"bus busy, try again\"}");
+    return;
+  }
+
+  String out;
+  serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
 }
 
 // Live DI/DO state for the /digital page's 2s poll — reads whatever the
@@ -985,6 +1142,9 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/digital",     HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, digitalPage(*_cfg)); });
   srv.on("/live",        HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, livePage()); });
   srv.on("/system",      HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, sysPage(*_cfg)); });
+  // /advanced — hidden power-user page (multi-board + bus scan), only
+  // linked quietly from the bottom of /system, not in the main nav.
+  srv.on("/advanced",    HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, advancedPage(*_cfg)); });
   // /wifi removed — WiFi settings now live on the main Config page ("/"),
   // no more redundant standalone page duplicating the same SSID/password
   // fields.
@@ -1002,6 +1162,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/cal/zero",      HTTP_POST, handleCalZero);
   srv.on("/api/cal/max",       HTTP_POST, handleCalMax);
   srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);
+  srv.on("/api/modbus/scan",       HTTP_GET,  handleModbusScan);
   srv.on("/api/digital/write", HTTP_POST, handleDigitalWrite);
 
   srv.on("/api/buffer/flush", HTTP_POST, [](){

@@ -169,6 +169,20 @@ bool modbusInitDone = false; // true after mode-3 write on boot
 // board added to modbus.h's BoardProfile table) with zero manual config.
 BoardProfile boardProfile = BOARD_WAVESHARE_8AI;
 
+// Advanced / hidden extra boards (config.h ExtraBoardConfig, /advanced
+// page) — up to MAX_EXTRA_BOARDS additional analog-to-Modbus boards on
+// the same RS485 bus, each at its own slave address. Detected profile,
+// readings, and DI/DO state kept in parallel arrays indexed the same as
+// cfg.extraBoards[]. Only populated/polled for slots with enabled=true.
+BoardProfile     extraBoardProfile[MAX_EXTRA_BOARDS];
+ChannelReading   extraReadings[MAX_EXTRA_BOARDS][8];
+DigitalReading    extraDinReadings[MAX_EXTRA_BOARDS][4];
+DigitalReading    extraDoutReadings[MAX_EXTRA_BOARDS][4];
+// Shared default channel config (standard 4-20mA -> 0-1 linear map) used
+// to scale every extra-board channel — extra boards don't get the
+// primary board's full per-channel calibration UI (see config.h).
+static ChannelConfig _extraBoardDefaultCh;
+
 WebServer webServer(80);
 
 // Pi connectivity
@@ -819,6 +833,21 @@ void pollTask(void* param) {
         boardProfile.name, boardProfile.numChannels, boardProfile.rawDivisor,
         boardProfile.hasDigitalIO ? "yes" : "no");
 
+      // Advanced / hidden extra boards — resolved from their explicit
+      // boardType (no auto-probe; see config.h ExtraBoardConfig). Only
+      // enabled slots with a valid slaveId (1-247) get a profile at all;
+      // disabled/unset slots stay zero-initialized and are skipped
+      // everywhere else (poll loop, payload).
+      for (int i = 0; i < MAX_EXTRA_BOARDS; i++) {
+        ExtraBoardConfig& xb = cfg.extraBoards[i];
+        if (xb.enabled && xb.slaveId >= 1 && xb.slaveId <= 247) {
+          extraBoardProfile[i] = boardProfileForType(xb.boardType);
+          Serial.printf("[Poll] Extra board %d (\"%s\"): slave=%d type=%s (%d channels, digitalIO=%s)\n",
+            i, xb.name.c_str(), xb.slaveId, extraBoardProfile[i].name,
+            extraBoardProfile[i].numChannels, extraBoardProfile[i].hasDigitalIO ? "yes" : "no");
+        }
+      }
+
       xSemaphoreGive(modbusBusMutex);
     }
   }
@@ -870,6 +899,37 @@ void pollTask(void* param) {
       }
     }
 
+    // Advanced / hidden extra boards — same read pattern as the primary
+    // board above, once per enabled slot, each on its own slave ID. Kept
+    // in the same poll cycle (same pollIntervalS) rather than a separate
+    // task — simpler, and RS485 is a shared bus anyway so there's no
+    // concurrency benefit to polling boards independently.
+    uint16_t extraRaw[MAX_EXTRA_BOARDS][8] = {{0}};
+    bool     extraOk[MAX_EXTRA_BOARDS]     = {false};
+    bool     extraDin[MAX_EXTRA_BOARDS][4]  = {{false}};
+    bool     extraDout[MAX_EXTRA_BOARDS][4] = {{false}};
+    bool     extraDiOk[MAX_EXTRA_BOARDS]    = {false};
+    bool     extraDoOk[MAX_EXTRA_BOARDS]    = {false};
+    for (int i = 0; i < MAX_EXTRA_BOARDS; i++) {
+      ExtraBoardConfig& xb = cfg.extraBoards[i];
+      if (!xb.enabled || xb.slaveId < 1 || xb.slaveId > 247) continue;
+      if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        extraOk[i] = modbusReadAll((uint8_t)xb.slaveId, extraRaw[i], extraBoardProfile[i].numChannels);
+        xSemaphoreGive(modbusBusMutex);
+      }
+      if (extraBoardProfile[i].hasDigitalIO) {
+        if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+          extraDiOk[i] = modbusReadAllDI((uint8_t)xb.slaveId, extraDin[i]);
+          extraDoOk[i] = modbusReadAllDO((uint8_t)xb.slaveId, extraDout[i]);
+          xSemaphoreGive(modbusBusMutex);
+        }
+      }
+      if (!extraOk[i]) {
+        Serial.printf("[Poll] Extra board %d (\"%s\") FAILED — Modbus error (slave ID=%d)\n",
+          i, xb.name.c_str(), xb.slaveId);
+      }
+    }
+
     if (ok) {
       ledSet(LED_DATA_OK);
     } else {
@@ -910,6 +970,43 @@ void pollTask(void* param) {
             doutReadings[i].status = "ok";
           } else {
             doutReadings[i].status = "stale";
+          }
+        }
+      }
+
+      // Advanced / hidden extra boards — scale + store the same way as
+      // the primary board, using the shared default ChannelConfig (no
+      // per-channel calibration for these — see config.h ExtraBoardConfig).
+      for (int b = 0; b < MAX_EXTRA_BOARDS; b++) {
+        ExtraBoardConfig& xb = cfg.extraBoards[b];
+        if (!xb.enabled || xb.slaveId < 1 || xb.slaveId > 247) continue;
+        if (extraOk[b]) {
+          for (int ch = 0; ch < 8; ch++) {
+            if (ch < extraBoardProfile[b].numChannels) {
+              scaleChannelCfg(extraRaw[b][ch], _extraBoardDefaultCh, extraReadings[b][ch], extraBoardProfile[b].rawDivisor);
+            } else {
+              extraReadings[b][ch].valid = false;
+            }
+          }
+        } else {
+          for (int ch = 0; ch < 8; ch++) extraReadings[b][ch].valid = false;
+        }
+        if (extraBoardProfile[b].hasDigitalIO) {
+          for (int i = 0; i < 4; i++) {
+            if (extraDiOk[b]) {
+              extraDinReadings[b][i].valid  = true;
+              extraDinReadings[b][i].state  = extraDin[b][i];
+              extraDinReadings[b][i].status = "ok";
+            } else {
+              extraDinReadings[b][i].status = "stale";
+            }
+            if (extraDoOk[b]) {
+              extraDoutReadings[b][i].valid  = true;
+              extraDoutReadings[b][i].state  = extraDout[b][i];
+              extraDoutReadings[b][i].status = "ok";
+            } else {
+              extraDoutReadings[b][i].status = "stale";
+            }
           }
         }
       }
@@ -979,8 +1076,12 @@ void writeChannelModes() {
 // =============================================================================
 String buildPayload(bool bufferedFlag) {
   // Bumped 4096 -> 6144 (multi-tank volume objects), then -> 7168 for the
-  // new digitalInputs/digitalOutputs arrays (AMIDJ14 DI/DO).
-  DynamicJsonDocument doc(7168);
+  // digitalInputs/digitalOutputs arrays (AMIDJ14 DI/DO), then -> 14336 for
+  // the "extraBoards" array (Advanced / hidden multi-board support —
+  // config.h ExtraBoardConfig — up to MAX_EXTRA_BOARDS boards, each with
+  // its own channels + digital I/O, roughly doubles worst-case payload
+  // size vs. the primary board alone).
+  DynamicJsonDocument doc(14336);
 
   doc["moduleId"] = cfg.moduleId;   // primary key the Pi uses
   doc["type"]     = cfg.moduleType.isEmpty() ? "generic" : cfg.moduleType;  // configurable on /config
@@ -1104,6 +1205,55 @@ String buildPayload(bool bufferedFlag) {
         if (doutReadings[i].valid) d["state"] = doutReadings[i].state;
         else                       d["state"] = nullptr;
         d["status"] = doutReadings[i].status;
+      }
+    }
+
+    // Advanced / hidden extra boards (config.h ExtraBoardConfig) — kept
+    // in a SEPARATE top-level "extraBoards" array rather than merged into
+    // "channels" above, so the primary board's channel numbering/shape
+    // never changes for existing Pi/dashboard consumers regardless of
+    // whether any extra boards are configured. Each entry mirrors the
+    // primary board's channels/digitalInputs/digitalOutputs shape, plus
+    // slaveId/boardType/name so the consumer can tell them apart.
+    JsonArray extraArr = doc.createNestedArray("extraBoards");
+    for (int b = 0; b < MAX_EXTRA_BOARDS; b++) {
+      ExtraBoardConfig& xb = cfg.extraBoards[b];
+      if (!xb.enabled || xb.slaveId < 1 || xb.slaveId > 247) continue;
+      JsonObject bo = extraArr.createNestedObject();
+      bo["slaveId"]   = xb.slaveId;
+      bo["boardType"] = extraBoardProfile[b].name;
+      bo["name"]      = xb.name.isEmpty() ? ("Board " + String(b + 2)) : xb.name;
+
+      JsonArray bch = bo.createNestedArray("channels");
+      for (int ch = 0; ch < extraBoardProfile[b].numChannels; ch++) {
+        JsonObject c = bch.createNestedObject();
+        c["ch"]   = ch;
+        c["name"] = xb.name + " Ch " + String(ch + 1);
+        ChannelReading& r = extraReadings[b][ch];
+        if (r.valid && r.mA >= 0) c["ma"] = round(r.mA * 100.0f) / 100.0f;
+        else                      c["ma"] = nullptr;
+        if (r.valid && r.hasValue) c["value"] = r.value;
+        else                       c["value"] = nullptr;
+        c["status"] = r.status;
+      }
+
+      if (extraBoardProfile[b].hasDigitalIO) {
+        JsonArray bdi = bo.createNestedArray("digitalInputs");
+        for (int i = 0; i < 4; i++) {
+          JsonObject d = bdi.createNestedObject();
+          d["ch"] = i;
+          if (extraDinReadings[b][i].valid) d["state"] = extraDinReadings[b][i].state;
+          else                              d["state"] = nullptr;
+          d["status"] = extraDinReadings[b][i].status;
+        }
+        JsonArray bdo = bo.createNestedArray("digitalOutputs");
+        for (int i = 0; i < 4; i++) {
+          JsonObject d = bdo.createNestedObject();
+          d["ch"] = i;
+          if (extraDoutReadings[b][i].valid) d["state"] = extraDoutReadings[b][i].state;
+          else                               d["state"] = nullptr;
+          d["status"] = extraDoutReadings[b][i].status;
+        }
       }
     }
 

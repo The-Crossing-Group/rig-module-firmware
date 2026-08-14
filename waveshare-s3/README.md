@@ -1,8 +1,36 @@
 # Rig Module Firmware — Waveshare ESP32-S3-RS485-CAN
 
-**Version:** rig-module-1.7.1 (ported, same version string/behavior as the LilyGo variant)
+**Version:** rig-module-1.9.0
 **Board:** Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, screw terminal)
 **Target:** Waveshare Modbus RTU Analog Input 8CH (B) or Eletechsup AMIDJ14 — auto-detected, same as LilyGo variant.
+
+## Advanced: Multi-Board RS485 (v1.9.0+)
+
+Hidden power-user page at `/advanced` (linked quietly from the bottom of
+`/system` — not in the main nav). Lets you wire up to 3 **additional**
+analog-to-Modbus boards on the same RS485 bus as the primary board, each
+at its own Modbus slave address — e.g. several Eletechsup AMIDJ14 units
+daisy-chained together for more digital I/O than one board provides.
+
+- Each extra board: enable checkbox, name, Slave ID (1-247, must be
+  unique across the whole bus — primary board included), Board Type
+  (AMIDJ14 or Waveshare 8AI). No auto-detect for these — set the type
+  explicitly.
+- Extra boards get **generic channel names** ("Board Ch 1", etc.) and the
+  standard 4-20mA linear map only — no per-channel calibration or tank
+  volume, unlike the primary board's `/channels` page. That's a
+  deliberate scope cut to keep this simple; the primary board is still
+  the one to use for anything needing real calibration.
+- Reported in the JSON payload as a separate top-level `extraBoards[]`
+  array (each entry has its own `channels`/`digitalInputs`/
+  `digitalOutputs`) — the primary board's existing `channels`/
+  `digitalInputs`/`digitalOutputs` shape is completely unchanged, so
+  nothing breaks for a Pi/dashboard that doesn't know about this feature.
+- **Slave ID Bus Scan** tool also lives on `/advanced` — probes the bus
+  for what's actually responding at each address (with Product ID if it
+  identifies as a known board). Use it to catch address typos/collisions
+  before they turn into a mysteriously silent board.
+- Changing a slave ID or board type reboots the module to apply.
 
 This is a **hardware port** of `rig-module-firmware.ino` (the LilyGo
 T-CAN485 sketch, in the sibling `rig-module-firmware/` folder) onto the
