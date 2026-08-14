@@ -24,10 +24,13 @@ extern unsigned long lastPostMs;
 extern bool lastPostOk;
 extern uint16_t rawModbus[8];
 extern ChannelReading readings[8];
+extern DigitalReading dinReadings[4];
+extern DigitalReading doutReadings[4];
 extern SemaphoreHandle_t stateMutex;
 extern SemaphoreHandle_t modbusBusMutex;
 long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud); // modbus.h
 BoardProfile modbusDetectBoard(uint8_t slaveId); // modbus.h
+bool modbusWriteDO(uint8_t slaveId, int doIndex, bool value); // modbus.h
 extern BoardProfile boardProfile; // rig-module-firmware.ino — detected once at boot
 extern NTPClient ntpClient;
 extern bool apModeActive;
@@ -72,6 +75,7 @@ static const char NAV[] PROGMEM = R"(
 <div class='nav'>
   <a href='/'>&#9881; Config</a>
   <a href='/channels'>&#128208; Channels</a>
+  <a href='/digital'>&#128268; Digital I/O</a>
   <a href='/live'>&#128202; Live</a>
   <a href='/system'>&#128295; System</a>
 </div>
@@ -411,6 +415,78 @@ function toggleVol(ch){
   return h;
 }
 
+// Digital I/O page — only meaningful on boards with hasDigitalIO=true
+// (AMIDJ14: 4 DI + 4 DO). On boards without it (Waveshare 8AI) this still
+// renders but says so plainly instead of showing 8 dead controls.
+static String digitalPage(ModuleConfig& cfg) {
+  String h = FPSTR(NAV);
+  h += "<div class='page'><h2>&#128268; Digital I/O</h2>";
+
+  if (!boardProfile.hasDigitalIO) {
+    h += "<p class='small'>Detected board: <b>" + String(boardProfile.name) +
+         "</b> — no digital I/O on this board. Digital inputs/outputs are only "
+         "available on the Eletechsup AMIDJ14 (6AI-4DI-4DO).</p></div>";
+    return h;
+  }
+
+  h += "<p class='small'>Detected board: <b>" + String(boardProfile.name) +
+       "</b> — 4 digital inputs (dry contact, DIx&harr;GND), 4 digital outputs "
+       "(open-collector, DOx&harr;VCC &mdash; use an intermediate relay to drive anything "
+       "beyond a small load). State auto-refreshes every 2s.</p>";
+
+  h += "<form method='POST' action='/api/config'>";
+  h += "<input type='hidden' name='fromDigitalPage' value='1'>";
+  h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save Names/Enabled</button>";
+
+  h += "<h3>Digital Inputs</h3>";
+  for (int i = 0; i < 4; i++) {
+    h += "<div class='card'><b>DI" + String(i+1) + "</b>&nbsp;<span class='small' id='diState" + String(i) + "'></span>";
+    h += "<label><input type='checkbox' name='di" + String(i) + "en'";
+    h += (cfg.din[i].enabled ? " checked" : "");
+    h += "> Enabled</label>";
+    h += "<label>Name</label><input name='di" + String(i) + "nm' value='" + cfg.din[i].name + "' placeholder='e.g. Low Level Switch'>";
+    h += "</div>";
+  }
+
+  h += "<h3>Digital Outputs</h3>";
+  for (int i = 0; i < 4; i++) {
+    h += "<div class='card'><b>DO" + String(i+1) + "</b>&nbsp;<span class='small' id='doState" + String(i) + "'></span>";
+    h += "<label><input type='checkbox' name='do" + String(i) + "en'";
+    h += (cfg.dout[i].enabled ? " checked" : "");
+    h += "> Enabled</label>";
+    h += "<label>Name</label><input name='do" + String(i) + "nm' value='" + cfg.dout[i].name + "' placeholder='e.g. Alarm Beacon'>";
+    h += "<div class='row' style='margin-top:8px'>";
+    h += "<button type='button' onclick='writeDO(" + String(i) + ",true)'>ON</button>&nbsp;";
+    h += "<button type='button' onclick='writeDO(" + String(i) + ",false)'>OFF</button></div>";
+    h += "</div>";
+  }
+
+  h += "<button type='submit' style='margin-top:6px'>&#128190; Save Names/Enabled</button>";
+  h += "</form>";
+
+  h += R"(
+<script>
+function fetchDigital(){
+  fetch('/api/digital').then(r=>r.json()).then(d=>{
+    d.din.forEach(c=>{
+      let el=document.getElementById('diState'+c.ch);
+      if(el) el.textContent = c.status!=='ok' ? '(stale)' : (c.state ? 'ON' : 'OFF');
+    });
+    d.dout.forEach(c=>{
+      let el=document.getElementById('doState'+c.ch);
+      if(el) el.textContent = c.status!=='ok' ? '(stale)' : (c.state ? 'ON' : 'OFF');
+    });
+  });
+}
+setInterval(fetchDigital,2000); fetchDigital();
+function writeDO(ch,val){
+  fetch('/api/digital/write?ch='+ch+'&value='+(val?1:0),{method:'POST'}).then(()=>fetchDigital());
+}
+</script>)";
+  h += "</div>";
+  return h;
+}
+
 static String livePage() {
   String h = FPSTR(NAV);
   h += "<div class='page'><h2>&#128202; Live Status</h2><div id='liveData'>Loading...</div>";
@@ -504,7 +580,7 @@ function doOTA(){
 
 // ─── API handler helpers ──────────────────────────────────────────────────────
 static void handleApiStatus() {
-  DynamicJsonDocument doc(6144); // matches buildPayload()'s bumped size (multi-tank volume fields)
+  DynamicJsonDocument doc(7168); // matches buildPayload()'s size (multi-tank volume + digital I/O)
   String payload = buildPayload(false);
   deserializeJson(doc, payload);
   doc["system"]["uptime"]     = millis() / 1000;
@@ -601,6 +677,22 @@ static void handleConfig() {
     applyParam((pre+"vMLvl").c_str(), [i](String v){ _cfg->ch[i].volMaxLevel  = v.toFloat(); });
   }
 
+  // Digital I/O names/enabled — only ever submitted from /digital (its own
+  // page, own form, own "fromDigitalPage" marker — same all-at-once pattern
+  // as the channels page, for the same reason: without it, a checked box's
+  // absence on any other page's POST would look identical to "user
+  // unchecked it" and silently disable every DI/DO not present in that form).
+  if (_srv->hasArg("fromDigitalPage")) {
+    for (int i = 0; i < 4; i++) {
+      String preIn  = "di" + String(i);
+      String preOut = "do" + String(i);
+      _cfg->din[i].enabled  = _srv->hasArg((preIn+"en").c_str());
+      _cfg->dout[i].enabled = _srv->hasArg((preOut+"en").c_str());
+      applyParam((preIn+"nm").c_str(),  [i](String v){ _cfg->din[i].name  = v; });
+      applyParam((preOut+"nm").c_str(), [i](String v){ _cfg->dout[i].name = v; });
+    }
+  }
+
   saveConfig(*_prefs, *_cfg);
 
   if (wifiChanged) {
@@ -620,7 +712,10 @@ static void handleConfig() {
     // legacy "ch" hidden field (single-channel save) both mean this came
     // from /channels, so send the user back there instead of bouncing
     // them to / every time.
-    _srv->sendHeader("Location", (allChannels || which >= 0) ? "/channels" : "/");
+    String backTo = "/";
+    if (allChannels || which >= 0) backTo = "/channels";
+    else if (_srv->hasArg("fromDigitalPage")) backTo = "/digital";
+    _srv->sendHeader("Location", backTo);
     _srv->send(302, "text/plain", "");
   }
 }
@@ -726,6 +821,64 @@ static void handleModbusAutoDetect() {
   }
 }
 
+// Live DI/DO state for the /digital page's 2s poll — reads whatever the
+// poll task last stored (dinReadings/doutReadings), same pattern as
+// handleChannelRaw() for analog. No live bus round-trip here; that's what
+// the background poll task is already doing every cfg.pollIntervalS.
+static void handleApiDigital() {
+  DynamicJsonDocument doc(1024);
+  JsonArray din = doc.createNestedArray("din");
+  JsonArray dout = doc.createNestedArray("dout");
+  if (xSemaphoreTake(_mtx, pdMS_TO_TICKS(200)) == pdTRUE) {
+    for (int i = 0; i < 4; i++) {
+      JsonObject di = din.createNestedObject();
+      di["ch"] = i;
+      di["state"] = dinReadings[i].state;
+      di["status"] = dinReadings[i].status;
+      JsonObject dop = dout.createNestedObject();
+      dop["ch"] = i;
+      dop["state"] = doutReadings[i].state;
+      dop["status"] = doutReadings[i].status;
+    }
+    xSemaphoreGive(_mtx);
+  }
+  String out;
+  serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
+}
+
+// Writes a single digital output (FC05) — an immediate, non-persisted bus
+// write, same "instant action button" pattern as Set Zero/Set Max on
+// /channels. Holds modbusBusMutex since this is a genuine extra wire
+// transaction outside the poll task's own cycle.
+static void handleDigitalWrite() {
+  if (!boardProfile.hasDigitalIO) {
+    _srv->send(400, "application/json", "{\"ok\":false,\"error\":\"board has no digital I/O\"}");
+    return;
+  }
+  int ch = _srv->hasArg("ch") ? _srv->arg("ch").toInt() : -1;
+  bool value = _srv->hasArg("value") && _srv->arg("value").toInt() != 0;
+  if (ch < 0 || ch > 3) {
+    _srv->send(400, "application/json", "{\"ok\":false,\"error\":\"ch must be 0-3\"}");
+    return;
+  }
+  bool ok = false;
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    ok = modbusWriteDO(_cfg->modbusSlaveId, ch, value);
+    xSemaphoreGive(modbusBusMutex);
+  }
+  if (ok && xSemaphoreTake(_mtx, pdMS_TO_TICKS(200)) == pdTRUE) {
+    doutReadings[ch].valid = true;
+    doutReadings[ch].state = value;
+    doutReadings[ch].status = "ok";
+    xSemaphoreGive(_mtx);
+  }
+  String r = "{\"ok\":";
+  r += (ok ? "true" : "false");
+  r += "}";
+  _srv->send(ok ? 200 : 500, "application/json", r);
+}
+
 static void handleCalZero() {
   int ch = _srv->hasArg("ch") ? _srv->arg("ch").toInt() : -1;
   if (ch < 0 || ch > 7) { _srv->send(400,"application/json","{\"ok\":false}"); return; }
@@ -804,6 +957,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   };
   srv.on("/",            HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, cfgPage(*_cfg)); });
   srv.on("/channels",    HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, calPage(*_cfg)); });
+  srv.on("/digital",     HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, digitalPage(*_cfg)); });
   srv.on("/live",        HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, livePage()); });
   srv.on("/system",      HTTP_GET,  [noCacheHtml](){ noCacheHtml(200, sysPage(*_cfg)); });
   // /wifi removed — WiFi settings now live on the main Config page ("/"),
@@ -815,6 +969,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/channel-raw", HTTP_GET,  handleChannelRaw);
   srv.on("/api/wifi/scan",   HTTP_GET,  handleWifiScan);
   srv.on("/api/ota",         HTTP_GET,  handleOTA);
+  srv.on("/api/digital",     HTTP_GET,  handleApiDigital);
 
   // POST APIs
   srv.on("/api/config",        HTTP_POST, handleConfig);
@@ -822,6 +977,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/cal/zero",      HTTP_POST, handleCalZero);
   srv.on("/api/cal/max",       HTTP_POST, handleCalMax);
   srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);
+  srv.on("/api/digital/write", HTTP_POST, handleDigitalWrite);
 
   srv.on("/api/buffer/flush", HTTP_POST, [](){
     flushNow = true;

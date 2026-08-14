@@ -166,6 +166,134 @@ bool modbusWriteMultiple(uint8_t slaveId, uint16_t startAddr, uint8_t count, uin
   return true;
 }
 
+// FC02 — Read Discrete Inputs
+// Returns true on success, fills bits[count] with 0/1 (one bool per input)
+bool modbusReadDiscreteInputs(uint8_t slaveId, uint16_t startAddr, uint8_t count, bool* bits) {
+  if (!_mbSerial) return false;
+
+  while (_mbSerial->available()) _mbSerial->read();
+
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x02;             // FC02
+  req[2] = startAddr >> 8;
+  req[3] = startAddr & 0xFF;
+  req[4] = 0x00;
+  req[5] = count;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  modbusSend(req, 8);
+
+  // Response: slaveId + 0x02 + byteCount + packed bits + CRC(2)
+  uint8_t byteCount = (count + 7) / 8;
+  int expectedLen = 3 + byteCount + 2;
+  uint8_t resp[16];
+  int n = modbusReceive(resp, expectedLen, 300);
+
+  if (n < expectedLen) {
+    Serial.printf("[Modbus] FC02 timeout: got %d, expected %d\n", n, expectedLen);
+    return false;
+  }
+
+  uint16_t rxCrc   = resp[n-2] | ((uint16_t)resp[n-1] << 8);
+  uint16_t calcCrc = modbusCRC(resp, n-2);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x02) {
+    Serial.printf("[Modbus] FC02 bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
+    return false;
+  }
+
+  for (int i = 0; i < count; i++) {
+    uint8_t byteIdx = i / 8;
+    uint8_t bitIdx  = i % 8;
+    bits[i] = (resp[3 + byteIdx] >> bitIdx) & 0x01;
+  }
+  return true;
+}
+
+// FC01 — Read Coils
+// Returns true on success, fills bits[count] with 0/1 (one bool per coil)
+bool modbusReadCoils(uint8_t slaveId, uint16_t startAddr, uint8_t count, bool* bits) {
+  if (!_mbSerial) return false;
+
+  while (_mbSerial->available()) _mbSerial->read();
+
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x01;             // FC01
+  req[2] = startAddr >> 8;
+  req[3] = startAddr & 0xFF;
+  req[4] = 0x00;
+  req[5] = count;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  modbusSend(req, 8);
+
+  uint8_t byteCount = (count + 7) / 8;
+  int expectedLen = 3 + byteCount + 2;
+  uint8_t resp[16];
+  int n = modbusReceive(resp, expectedLen, 300);
+
+  if (n < expectedLen) {
+    Serial.printf("[Modbus] FC01 timeout: got %d, expected %d\n", n, expectedLen);
+    return false;
+  }
+
+  uint16_t rxCrc   = resp[n-2] | ((uint16_t)resp[n-1] << 8);
+  uint16_t calcCrc = modbusCRC(resp, n-2);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x01) {
+    Serial.printf("[Modbus] FC01 bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
+    return false;
+  }
+
+  for (int i = 0; i < count; i++) {
+    uint8_t byteIdx = i / 8;
+    uint8_t bitIdx  = i % 8;
+    bits[i] = (resp[3 + byteIdx] >> bitIdx) & 0x01;
+  }
+  return true;
+}
+
+// FC05 — Write Single Coil. value: true=ON (0xFF00), false=OFF (0x0000)
+bool modbusWriteCoil(uint8_t slaveId, uint16_t coilAddr, bool value) {
+  if (!_mbSerial) return false;
+
+  while (_mbSerial->available()) _mbSerial->read();
+
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x05;             // FC05
+  req[2] = coilAddr >> 8;
+  req[3] = coilAddr & 0xFF;
+  req[4] = value ? 0xFF : 0x00;
+  req[5] = 0x00;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  modbusSend(req, 8);
+
+  // Echo response: slaveId + 0x05 + addr(2) + value(2) + CRC(2) = 8 bytes
+  uint8_t resp[16];
+  int n = modbusReceive(resp, 8, 300);
+
+  if (n < 8) {
+    Serial.printf("[Modbus] FC05 timeout: got %d\n", n);
+    return false;
+  }
+
+  uint16_t rxCrc   = resp[6] | ((uint16_t)resp[7] << 8);
+  uint16_t calcCrc = modbusCRC(resp, 6);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x05) {
+    Serial.printf("[Modbus] FC05 bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
+    return false;
+  }
+  return true;
+}
+
 // Convenience: read the board's analog input channels. numChannels lets a
 // board with fewer real channels (e.g. the Eletechsup AMIDJ14 only has 6,
 // vs. 8 on the original board this firmware targeted) be read without
@@ -181,6 +309,28 @@ bool modbusReadAll(uint8_t slaveId, uint16_t* raw8, int numChannels = 8) {
   if (numChannels < 1) numChannels = 1;
   for (int i = numChannels; i < 8; i++) raw8[i] = 0;
   return modbusReadInputRegs(slaveId, 0x0000, (uint8_t)numChannels, raw8);
+}
+
+// AMIDJ14 digital I/O addresses — confirmed against real Modbus Poll
+// register captures for this board. DI is 0-based, DO is 1-based (not a
+// typo — the board's own coil numbering genuinely starts at 1 for outputs).
+static const uint16_t AMIDJ14_DI_START = 0; // DI1=0, DI2=1, DI3=2, DI4=3 (FC02)
+static const uint16_t AMIDJ14_DO_START = 1; // DO1=1, DO2=2, DO3=3, DO4=4 (FC01/FC05)
+
+// Convenience: read all 4 digital inputs in one FC02 request.
+bool modbusReadAllDI(uint8_t slaveId, bool* din4) {
+  return modbusReadDiscreteInputs(slaveId, AMIDJ14_DI_START, 4, din4);
+}
+
+// Convenience: read all 4 digital outputs' current state in one FC01 request.
+bool modbusReadAllDO(uint8_t slaveId, bool* dout4) {
+  return modbusReadCoils(slaveId, AMIDJ14_DO_START, 4, dout4);
+}
+
+// Convenience: write one digital output. doIndex is 0-3 (DO1-DO4).
+bool modbusWriteDO(uint8_t slaveId, int doIndex, bool value) {
+  if (doIndex < 0 || doIndex > 3) return false;
+  return modbusWriteCoil(slaveId, AMIDJ14_DO_START + doIndex, value);
 }
 
 // =============================================================================
@@ -204,10 +354,15 @@ struct BoardProfile {
   const char* name;
   int   numChannels;
   float rawDivisor;    // raw register value / rawDivisor = mA
+  // AMIDJ14 also exposes 4 digital inputs (FC02, addr 0-3) and 4 digital
+  // outputs (FC01/FC05, addr 1-4) alongside its 6 analog channels — the
+  // Waveshare 8AI board has no such hardware, so this stays false for it
+  // and the poll task/webUI simply skip digital I/O entirely.
+  bool  hasDigitalIO;
 };
 
-static const BoardProfile BOARD_WAVESHARE_8AI  = { "Waveshare 8AI (B)",  8, 1000.0f };
-static const BoardProfile BOARD_ELETECHSUP_AMIDJ14 = { "Eletechsup AMIDJ14", 6, 100.0f };
+static const BoardProfile BOARD_WAVESHARE_8AI  = { "Waveshare 8AI (B)",  8, 1000.0f, false };
+static const BoardProfile BOARD_ELETECHSUP_AMIDJ14 = { "Eletechsup AMIDJ14", 6, 100.0f, true };
 
 // Reads special-function register 0x00F7 (Product ID) via FC03. Returns the
 // matching BoardProfile, or Waveshare as the safe fallback if the read

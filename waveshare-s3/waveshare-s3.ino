@@ -158,6 +158,8 @@ SemaphoreHandle_t modbusBusMutex;
 ModuleConfig cfg;
 ChannelReading readings[8];  // latest scaled readings
 uint16_t rawModbus[8] = {0}; // latest raw register values from 8AI
+DigitalReading dinReadings[4];  // latest DI state (AMIDJ14 only)
+DigitalReading doutReadings[4]; // latest DO state (AMIDJ14 only)
 bool modbusOk = false;
 bool modbusInitDone = false; // true after mode-3 write on boot
 // Detected once at poll-task startup (modbusDetectBoard(), modbus.h) —
@@ -836,6 +838,21 @@ void pollTask(void* param) {
     }
     pollCount++;
 
+    // Digital I/O poll — only on boards that actually have DI/DO hardware
+    // (AMIDJ14). Separate FC02/FC01 requests, right after the analog read,
+    // still inside the same bus-mutex-protected section pattern (own
+    // acquire/release since the analog read above already released it).
+    bool din[4] = {false, false, false, false};
+    bool dout[4] = {false, false, false, false};
+    bool diOk = false, doOk = false;
+    if (boardProfile.hasDigitalIO) {
+      if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        diOk = modbusReadAllDI(cfg.modbusSlaveId, din);
+        doOk = modbusReadAllDO(cfg.modbusSlaveId, dout);
+        xSemaphoreGive(modbusBusMutex);
+      }
+    }
+
     if (ok) {
       ledSet(LED_DATA_OK);
     } else {
@@ -859,7 +876,28 @@ void pollTask(void* param) {
             readings[ch].valid = false;
           }
         }
+      }
 
+      if (boardProfile.hasDigitalIO) {
+        for (int i = 0; i < 4; i++) {
+          if (diOk) {
+            dinReadings[i].valid  = true;
+            dinReadings[i].state  = din[i];
+            dinReadings[i].status = "ok";
+          } else {
+            dinReadings[i].status = "stale";
+          }
+          if (doOk) {
+            doutReadings[i].valid  = true;
+            doutReadings[i].state  = dout[i];
+            doutReadings[i].status = "ok";
+          } else {
+            doutReadings[i].status = "stale";
+          }
+        }
+      }
+
+      if (ok) {
         // Debug print: actual engineering values per enabled channel (not
         // just raw mA) — so the real numbers (e.g. mud tank gallons) are
         // visible on Serial/USB with no Pi logger hooked up at all. First
@@ -923,11 +961,9 @@ void writeChannelModes() {
 // BUILD JSON PAYLOAD
 // =============================================================================
 String buildPayload(bool bufferedFlag) {
-  // Bumped from 4096 -> 6144: multiple channels can each now carry a
-  // nested "volume" object + "capacity" (multi-tank support), which no
-  // longer reliably fits in the old budget once several channels have
-  // "Compute Tank Volume" checked at once.
-  DynamicJsonDocument doc(6144);
+  // Bumped 4096 -> 6144 (multi-tank volume objects), then -> 7168 for the
+  // new digitalInputs/digitalOutputs arrays (AMIDJ14 DI/DO).
+  DynamicJsonDocument doc(7168);
 
   doc["moduleId"] = cfg.moduleId;   // primary key the Pi uses
   doc["type"]     = cfg.moduleType.isEmpty() ? "generic" : cfg.moduleType;  // configurable on /config
@@ -1024,6 +1060,31 @@ String buildPayload(bool bufferedFlag) {
       // same shape as the original tank spec.
       for (int i = 0; i < 8; i++) {
         if (cfg.ch[i].volumeEnabled) { doc["capacity"] = cfg.ch[i].capacity; break; }
+      }
+    }
+
+    // Digital I/O — only present in the payload on boards that actually
+    // have DI/DO hardware (AMIDJ14). Omitted entirely on boards without
+    // it (e.g. Waveshare 8AI), same "don't report phantom hardware"
+    // convention as the analog channel-count clamp above.
+    if (boardProfile.hasDigitalIO) {
+      JsonArray diArr = doc.createNestedArray("digitalInputs");
+      for (int i = 0; i < 4; i++) {
+        if (!cfg.din[i].enabled) continue;
+        JsonObject d = diArr.createNestedObject();
+        d["ch"]     = i;
+        d["name"]   = cfg.din[i].name;
+        d["state"]  = dinReadings[i].valid ? dinReadings[i].state : nullptr;
+        d["status"] = dinReadings[i].status;
+      }
+      JsonArray doArr = doc.createNestedArray("digitalOutputs");
+      for (int i = 0; i < 4; i++) {
+        if (!cfg.dout[i].enabled) continue;
+        JsonObject d = doArr.createNestedObject();
+        d["ch"]     = i;
+        d["name"]   = cfg.dout[i].name;
+        d["state"]  = doutReadings[i].valid ? doutReadings[i].state : nullptr;
+        d["status"] = doutReadings[i].status;
       }
     }
 

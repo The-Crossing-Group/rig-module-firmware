@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.7.1"
+#define FW_VERSION "rig-module-1.8.0"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -51,6 +51,15 @@ struct ChannelConfig {
   float  volMaxLevel   = 1.0f;   // this channel's eng. reading at full
 };
 
+// Digital I/O config — only meaningful on boards with hasDigitalIO=true
+// (currently just the Eletechsup AMIDJ14: 4 DI + 4 DO). Plug-and-play
+// default-enabled, same convention as the analog channels — uncheck
+// whichever DI/DO aren't actually wired up on /digital.
+struct DigitalChannelConfig {
+  bool   enabled = true;
+  String name    = "";
+};
+
 // Full module config
 struct ModuleConfig {
   String moduleId       = "";    // built from MAC: MODULE-ABC123
@@ -75,6 +84,10 @@ struct ModuleConfig {
   String wifiPass       = "";
 
   ChannelConfig ch[8];
+
+  // Digital I/O — only polled/shown when boardProfile.hasDigitalIO is true.
+  DigitalChannelConfig din[4];
+  DigitalChannelConfig dout[4];
 };
 
 // Per-channel live reading
@@ -84,6 +97,14 @@ struct ChannelReading {
   float  mA       = 0.0f;
   float  value    = 0.0f;
   String status   = "stale";
+};
+
+// Live digital I/O state — kept separate from the analog ChannelReading
+// since these are simple booleans, not scaled engineering values.
+struct DigitalReading {
+  bool   valid = false;   // false until the first successful poll
+  bool   state = false;   // current on/off
+  String status = "stale";
 };
 
 // Build MODULE-ABC123 from MAC (always, no manual unit-number scheme —
@@ -143,6 +164,15 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
     c.ch[i].volZeroLevel  = p.getFloat((pre + "vZLvl").c_str(), 0.0f);
     c.ch[i].volMaxLevel   = p.getFloat((pre + "vMLvl").c_str(), 1.0f);
   }
+
+  for (int i = 0; i < 4; i++) {
+    String preIn  = "di" + String(i);
+    String preOut = "do" + String(i);
+    c.din[i].enabled  = p.getBool((preIn + "en").c_str(), true);
+    c.din[i].name     = p.getString((preIn + "nm").c_str(), "DI " + String(i+1));
+    c.dout[i].enabled = p.getBool((preOut + "en").c_str(), true);
+    c.dout[i].name    = p.getString((preOut + "nm").c_str(), "DO " + String(i+1));
+  }
 }
 
 // Save all config to NVS
@@ -177,6 +207,15 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
     p.putString((pre + "capUt").c_str(), c.ch[i].capacityUnit);
     p.putFloat((pre + "vZLvl").c_str(), c.ch[i].volZeroLevel);
     p.putFloat((pre + "vMLvl").c_str(), c.ch[i].volMaxLevel);
+  }
+
+  for (int i = 0; i < 4; i++) {
+    String preIn  = "di" + String(i);
+    String preOut = "do" + String(i);
+    p.putBool((preIn + "en").c_str(), c.din[i].enabled);
+    p.putString((preIn + "nm").c_str(), c.din[i].name);
+    p.putBool((preOut + "en").c_str(), c.dout[i].enabled);
+    p.putString((preOut + "nm").c_str(), c.dout[i].name);
   }
   p.end();
 }
