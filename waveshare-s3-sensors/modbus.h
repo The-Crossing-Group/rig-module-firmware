@@ -151,7 +151,18 @@ static bool modbusIsBroadcastAddr(uint8_t addr) { return addr == 0 || addr == 25
 
 int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
                     uint8_t count, uint16_t* regValues, bool verbose = false,
-                    int timeoutMs = 600, uint8_t* actualSlaveIdOut = nullptr) {
+                    int timeoutMs = 600, uint8_t* actualSlaveIdOut = nullptr,
+                    // How many registers into the SLAVE'S REPLY to skip
+                    // before extracting `count` values. Needed for
+                    // sensors (confirmed: SM7779 radar) that always
+                    // answer with the same fixed multi-register block
+                    // regardless of startAddr — e.g. reply is always
+                    // [distance, level, status], and to get "level"
+                    // instead of "distance" you don't change startAddr
+                    // (the sensor ignores it), you change WHICH register
+                    // of its fixed reply you read out. Defaults to 0 =
+                    // old behavior (take the front of the reply).
+                    uint8_t respRegOffset = 0) {
   if (!_mbSerial) return MB_TIMEOUT;
   if (count < 1) count = 1;
   if (count > 16) count = 16;
@@ -267,11 +278,14 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
   // reply, already confirmed above (0x03 or 0x04, no exception bit).
 
   uint8_t regsInResponse = byteCount / 2;
-  if (regsInResponse < count) {
-    // Sensor sent back fewer registers than we asked for — genuinely
-    // can't satisfy the request, unlike the "sent more than asked"
-    // case which we just take the front slice of below.
-    if (verbose) Serial.printf("[Modbus] Bad response: got %d registers, need %d\n", regsInResponse, count);
+  if (regsInResponse < (int)respRegOffset + count) {
+    // Sensor sent back fewer registers than we need to satisfy
+    // respRegOffset + count — genuinely can't satisfy the request,
+    // unlike the "sent more than needed" case which we just take a
+    // slice of below. (respRegOffset=0 reproduces the original check
+    // exactly: regsInResponse < count.)
+    if (verbose) Serial.printf("[Modbus] Bad response: got %d registers, need offset %d + count %d\n",
+      regsInResponse, respRegOffset, count);
     modbusLogTransaction(slaveId, funcCode, req, 8, resp, n, MB_BAD_RESPONSE);
     return MB_BAD_RESPONSE;
   }
@@ -279,9 +293,12 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
   // regValues[] is sized by the CALLER for `count` registers — even if
   // the sensor sent back more (e.g. always answers with a fixed 3-reg
   // block regardless of what was requested), only copy out `count` of
-  // them so we never write past the caller's buffer.
+  // them, STARTING at respRegOffset registers into the reply, so we
+  // never write past the caller's buffer and can pull any register out
+  // of a sensor's fixed-shape reply (not just the first one).
+  int base = 3 + (int)respRegOffset * 2;
   for (int i = 0; i < count; i++) {
-    regValues[i] = ((uint16_t)resp[3 + i*2] << 8) | resp[4 + i*2];
+    regValues[i] = ((uint16_t)resp[base + i*2] << 8) | resp[base + i*2 + 1];
   }
   modbusLogTransaction(slaveId, funcCode, req, 8, resp, frameLen, MB_OK);
   return MB_OK;
@@ -349,7 +366,7 @@ uint8_t modbusRegCount(uint8_t dataType) {
 int modbusPollSensor(SensorConfig& s, float& rawOut, float& valueOut, bool verbose = false) {
   uint8_t n = modbusRegCount(s.dataType);
   uint16_t regs[2] = {0, 0};
-  int rc = modbusReadRegs(s.slaveId, s.funcCode, s.regAddr, n, regs, verbose);
+  int rc = modbusReadRegs(s.slaveId, s.funcCode, s.regAddr, n, regs, verbose, 600, nullptr, s.respRegOffset);
   if (rc != MB_OK) return rc;
   float raw = modbusDecodeValue(regs, s.dataType, s.wordOrder);
   rawOut = raw;
@@ -414,22 +431,39 @@ long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud) {
 // worst) — the caller (web handler) should only invoke it on demand, not
 // from the poll loop, and should hold modbusBusMutex for the whole call.
 //
-// timeoutMs per probe defaults to 400 — some sensors (radar/ultrasonic
-// level sensors especially) take noticeably longer than a simple
-// pressure/temp transducer to answer a query. Too short a timeout here
-// doesn't just slow the scan down, it can cause outright MISSED
-// detections (sensor's real answer arrives after we've already given up
-// and moved to the next address) — worth the extra time per address.
+// timeoutMs per probe defaults to 700 (bumped from 400 on 2026-08-17 —
+// confirmed too short in practice: SM7779 radar sensors have a ~6s
+// internal measurement cycle and only answer promptly on SOME polls;
+// 400ms was tight enough that a legit, alive sensor could silently get
+// skipped by the bus scan depending on scan timing vs. its cycle, even
+// though the regular per-sensor poll (600ms timeout, ~7s between polls)
+// finds it fine every time). Some sensors (radar/ultrasonic level
+// sensors especially) take noticeably longer than a simple pressure/temp
+// transducer to answer a query. Too short a timeout here doesn't just
+// slow the scan down, it can cause outright MISSED detections (sensor's
+// real answer arrives after we've already given up and moved to the next
+// address) — worth the extra time per address, especially since a scan
+// only runs on-demand or every few minutes in the background, never on
+// the hot per-poll path.
+//
+// Also now retries each address up to 2x before giving up — a single
+// missed window on a slow-cycle sensor no longer means a missed
+// detection for the whole scan; only two misses in a row does.
 template<typename FoundFn>
-void modbusScanSlaves(int maxAddr, FoundFn onFound, int timeoutMs = 400, bool verbose = true) {
+void modbusScanSlaves(int maxAddr, FoundFn onFound, int timeoutMs = 700, bool verbose = true) {
   uint16_t regs[1];
   for (int addr = 1; addr <= maxAddr; addr++) {
     if (verbose) Serial.printf("[Scan] Probing addr %d...\n", addr);
-    if (modbusReadRegs((uint8_t)addr, 4, 0x0000, 1, regs, verbose, timeoutMs) == MB_OK) {
-      onFound(addr, 4);
-    } else if (modbusReadRegs((uint8_t)addr, 3, 0x0000, 1, regs, verbose, timeoutMs) == MB_OK) {
-      onFound(addr, 3);
+    bool found = false;
+    int foundFc = 4;
+    for (int attempt = 0; attempt < 2 && !found; attempt++) {
+      if (modbusReadRegs((uint8_t)addr, 4, 0x0000, 1, regs, verbose, timeoutMs) == MB_OK) {
+        found = true; foundFc = 4;
+      } else if (modbusReadRegs((uint8_t)addr, 3, 0x0000, 1, regs, verbose, timeoutMs) == MB_OK) {
+        found = true; foundFc = 3;
+      }
     }
+    if (found) onFound(addr, foundFc);
   }
 }
 

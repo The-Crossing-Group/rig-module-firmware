@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.9.3"
+#define FW_VERSION "rig-module-sensors-1.10.0"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -65,6 +65,17 @@ struct SensorConfig {
   uint16_t regAddr   = 0;       // starting register address
   uint8_t dataType   = MB_UINT16;
   uint8_t wordOrder  = MB_WORD_HIGH_FIRST; // only matters for 32-bit types
+  // Some real sensors (confirmed: SM7779 radar level) ignore the register
+  // address in the request entirely and always reply with the SAME fixed
+  // multi-register block starting from their own register 0 — e.g. SM7779
+  // always sends back [distance, level, status] no matter what you ask
+  // for. For a sensor like that, regAddr above is really just "what I
+  // asked for" (mostly irrelevant to what comes back); THIS is "how many
+  // registers into that fixed reply block the value I actually want
+  // starts at" — e.g. 0 = distance, 1 = level, 2 = status for SM7779.
+  // Defaults to 0, which reproduces the old always-take-the-front
+  // behavior exactly — existing configs are unaffected.
+  uint8_t respRegOffset = 0;
   float  scale       = 1.0f;    // engineering value = raw * scale + offset
   float  offset      = 0.0f;
   int    decimals    = 2;       // rounding for display/report
@@ -211,6 +222,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
     c.sensors[i].regAddr     = (uint16_t)p.getInt((pre + "reg").c_str(), 0);
     c.sensors[i].dataType    = (uint8_t)p.getInt((pre + "dt").c_str(), MB_UINT16);
     c.sensors[i].wordOrder   = (uint8_t)p.getInt((pre + "wo").c_str(), MB_WORD_HIGH_FIRST);
+    c.sensors[i].respRegOffset = (uint8_t)p.getInt((pre + "ro").c_str(), 0);
     c.sensors[i].scale       = p.getFloat((pre + "sc").c_str(), 1.0f);
     c.sensors[i].offset      = p.getFloat((pre + "of").c_str(), 0.0f);
     c.sensors[i].decimals    = p.getInt((pre + "dec").c_str(), 2);
@@ -311,6 +323,7 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
     p.putInt((pre + "reg").c_str(), c.sensors[i].regAddr);
     p.putInt((pre + "dt").c_str(), c.sensors[i].dataType);
     p.putInt((pre + "wo").c_str(), c.sensors[i].wordOrder);
+    p.putInt((pre + "ro").c_str(), c.sensors[i].respRegOffset);
     p.putFloat((pre + "sc").c_str(), c.sensors[i].scale);
     p.putFloat((pre + "of").c_str(), c.sensors[i].offset);
     p.putInt((pre + "dec").c_str(), c.sensors[i].decimals);

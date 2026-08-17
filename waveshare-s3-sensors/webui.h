@@ -304,8 +304,13 @@ static String sensorsPage(ModuleConfig& cfg) {
     h += "<option value='0'" + String(s.wordOrder == 0 ? " selected" : "") + ">High word first</option>";
     h += "<option value='1'" + String(s.wordOrder == 1 ? " selected" : "") + ">Low word first</option>";
     h += "</select></div>";
+    h += "<div><label>Reply Register Offset</label><input name='s" + String(i) + "ro' type='number' min='0' max='15' value='" + String(s.respRegOffset) + "'></div>";
     h += "<div><label>Scale (value = raw * scale + offset)</label><input name='s" + String(i) + "sc' type='number' step='any' value='" + _f(s.scale) + "'></div>";
     h += "<div><label>Offset</label><input name='s" + String(i) + "of' type='number' step='any' value='" + _f(s.offset) + "'></div></div>";
+    h += "<div class='small'>Reply Register Offset: for sensors that always answer with the same fixed multi-register "
+         "block regardless of Register Addr (e.g. SM7779 radar always replies [distance, level, status] from its own "
+         "reg 0) &mdash; set this to pick which register OF THE REPLY to use (0=1st, 1=2nd...), leave Register Addr at 0. "
+         "Normal sensors: leave at 0.</div>";
 
     h += "<label style='margin-top:8px'><input type='checkbox' name='s" + String(i) + "volEn' id='volEn" + String(i) + "' onchange='toggleVol(" + String(i) + ")'";
     if (s.volumeEnabled) h += " checked";
@@ -353,8 +358,9 @@ function probeSensor(i){
   let reg = document.querySelector('[name=s'+i+'reg]').value;
   let dt  = document.querySelector('[name=s'+i+'dt]').value;
   let wo  = document.querySelector('[name=s'+i+'wo]').value;
+  let ro  = document.querySelector('[name=s'+i+'ro]').value;
   let el = document.getElementById('live'+i);
-  probeWithRetry('/api/modbus/probe?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&dataType='+dt+'&wordOrder='+wo, el,
+  probeWithRetry('/api/modbus/probe?slaveId='+sid+'&funcCode='+fc+'&reg='+reg+'&dataType='+dt+'&wordOrder='+wo+'&respOffset='+ro, el,
     (d)=>'Probe OK: raw='+d.raw+' decoded='+d.decoded.toFixed(3),
     (d)=>'Probe FAILED: '+d.error);
 }
@@ -706,11 +712,12 @@ static void handleModbusProbe() {
   uint16_t regAddr = (uint16_t)strtol(regStr.c_str(), nullptr, 0);
   uint8_t dataType = _p("dataType").toInt();
   uint8_t wordOrder = _p("wordOrder").toInt();
+  uint8_t respOffset = _p("respOffset").isEmpty() ? 0 : (uint8_t)_p("respOffset").toInt();
 
   uint8_t n = modbusRegCount(dataType);
   uint16_t regs[2] = {0, 0};
   uint8_t actualSlaveId = 0;
-  int rc = modbusReadRegs(slaveId, funcCode, regAddr, n, regs, true, 600, &actualSlaveId);
+  int rc = modbusReadRegs(slaveId, funcCode, regAddr, n, regs, true, 600, &actualSlaveId, respOffset);
   xSemaphoreGive(modbusBusMutex);
 
   DynamicJsonDocument doc(512);
@@ -862,6 +869,7 @@ static void handleSensorsSave() {
     if (_srv->hasArg((pre + "reg").c_str())) s.regAddr = (uint16_t)strtol(_srv->arg((pre + "reg").c_str()).c_str(), nullptr, 0);
     if (_srv->hasArg((pre + "dt").c_str()))  s.dataType = (uint8_t)_srv->arg((pre + "dt").c_str()).toInt();
     if (_srv->hasArg((pre + "wo").c_str()))  s.wordOrder = (uint8_t)_srv->arg((pre + "wo").c_str()).toInt();
+    if (_srv->hasArg((pre + "ro").c_str()))  s.respRegOffset = (uint8_t)constrain(_srv->arg((pre + "ro").c_str()).toInt(), 0, 15);
     if (_srv->hasArg((pre + "sc").c_str()))  s.scale = _srv->arg((pre + "sc").c_str()).toFloat();
     if (_srv->hasArg((pre + "of").c_str()))  s.offset = _srv->arg((pre + "of").c_str()).toFloat();
     s.volumeEnabled = _srv->hasArg((pre + "volEn").c_str());
