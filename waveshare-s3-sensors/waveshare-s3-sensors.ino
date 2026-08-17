@@ -55,6 +55,7 @@
 #include "can.h"
 #include "scaling.h"
 #include "webui.h"
+#include "cli.h"
 
 // =============================================================================
 // PIN DEFINITIONS — Waveshare ESP32-S3-RS485-CAN
@@ -213,6 +214,8 @@ void setup() {
   Serial.println("[BOOT] Starting Modbus poll task...");
   xTaskCreatePinnedToCore(pollTask, "poll", 8192, NULL, 1, NULL, 1);
 
+  cliInit();
+
   Serial.println("========================================");
   Serial.println("[BOOT] Ready! Open the web UI to configure sensors.");
   Serial.println("========================================\n");
@@ -225,6 +228,7 @@ void loop() {
   ArduinoOTA.handle();
   webServer.handleClient();
   ntpClient.update();
+  cliPoll();
 
   // Drain any pending CAN frames — cheap no-op if CAN isn't enabled.
   canPoll(cfg, canReadings, stateMutex);

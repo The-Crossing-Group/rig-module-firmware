@@ -40,6 +40,24 @@ production bus.
 Use `waveshare-s3/` for adapter-board deployments already in the field;
 use this (`waveshare-s3-sensors/`) for new direct-Modbus-sensor + CAN work.
 
+## Serial CLI
+
+Every setting on the web UI also has a short serial command, for
+configuring/debugging over USB when WiFi/web isn't reachable. Open the
+Arduino IDE Serial Monitor (115200 baud, newline line-ending) and type
+`h` for the full command list. Quick reference:
+
+- `h` / `st` / `lv` / `sv` / `rb` — help, status, live values, save, reboot
+- `cm ...` — module config (name, poll interval, RS485 baud, CAN enable/bitrate, etc.)
+- `cw ...` — WiFi SSID/password
+- `cs ...` — sensor slots (`cs list`, `cs get <n>`, `cs en/dis <n>`, `cs set <n> <field> <value>`)
+- `cc ...` — CAN signal slots (same pattern as `cs`)
+
+`set`/`en`/`dis` commands only change the in-memory config — run `sv` to
+persist to NVS (same "nothing saved until you save" behavior as the web
+UI). Type `cm h`, `cw h`, `cs h`, or `cc h` for the full field list on
+each.
+
 ## Pages
 
 - **/** — Module info, RS485 baud (shared bus-wide), CAN enable/bitrate, WiFi
