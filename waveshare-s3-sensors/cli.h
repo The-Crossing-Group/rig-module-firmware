@@ -22,7 +22,11 @@ extern Preferences prefs;
 extern SensorReading sensorReadings[MAX_SENSORS];
 extern CanSignalReading canReadings[MAX_CAN_SIGNALS];
 extern SemaphoreHandle_t stateMutex;
+extern SemaphoreHandle_t modbusBusMutex;
 void saveConfig(Preferences& p, ModuleConfig& c); // config.h
+// modbusReadRegs(), modbusScanSlaves(), modbusRegCount(), modbusDecodeValue(),
+// MB_OK/MB_TIMEOUT/MB_CRC_ERROR/MB_BAD_RESPONSE are declared+defined in
+// modbus.h, already included before this file via the main .ino.
 
 static String _cliBuf = "";
 static bool _cliDirty = false; // true once something's changed but not yet `sv`'d
@@ -76,6 +80,31 @@ static void _cliHelp() {
     "WiFi config:          cw ...        (type `cw h`)\n"
     "Sensor config:       cs ...        (type `cs h`)\n"
     "CAN signal config:   cc ...        (type `cc h`)\n"
+    "RS485 bus diagnostics: bs / pr     (type `bs h` / `pr h`)\n"
+  ));
+}
+
+static void _cliBsHelp() {
+  Serial.println(F(
+    "\n"
+    "=== bs — RS485 bus scan (live, doesn't touch saved config) ===\n"
+    "  bs [maxAddr]   scan addresses 1..maxAddr (default 16, max 247)\n"
+    "                 at the CURRENT configured baud, print every hit\n"
+    "  e.g. bs         scan 1-16\n"
+    "       bs 50      scan 1-50\n"
+  ));
+}
+
+static void _cliPrHelp() {
+  Serial.println(F(
+    "\n"
+    "=== pr — probe one register right now (live, doesn't touch saved config) ===\n"
+    "  pr <slave> <fc> <reg> [type]\n"
+    "    fc:   3 or 4, sent exactly as given (no fallback)\n"
+    "    type: u16(default)/i16/u32/i32/f32\n"
+    "  Prints raw TX/RX hex and the decoded value (or the failure reason).\n"
+    "  e.g. pr 2 4 0        probe slave 2, FC04, register 0, u16\n"
+    "       pr 2 3 0 f32    probe slave 2, FC03, register 0, float32\n"
   ));
 }
 
@@ -433,6 +462,75 @@ static void _cliCc(String* tok, int n) {
   _cliErr("unknown cc subcommand, try `cc h`");
 }
 
+// ---- bs: live RS485 bus scan ------------------------------------------------
+// Scans at whatever baud is currently active in RAM (cfg.modbusBaud, as
+// last set/loaded) — does NOT touch saved config, does NOT change baud.
+// Blocking for a few hundred ms per address (700ms timeout x up to 2
+// retries per modbusScanSlaves()), holds modbusBusMutex for the duration
+// so it doesn't collide with the poll task.
+static void _cliBs(String* tok, int n) {
+  if (n >= 2 && (tok[1] == "h" || tok[1] == "help")) { _cliBsHelp(); return; }
+  int maxAddr = 16;
+  if (n >= 2) maxAddr = tok[1].toInt();
+  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr > 247) maxAddr = 247;
+
+  Serial.printf("[cli] Scanning addresses 1-%d at %ld baud (current config, live bus)...\n",
+    maxAddr, cfg.modbusBaud);
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    _cliErr("bus busy, try again");
+    return;
+  }
+  int hits = 0;
+  modbusScanSlaves(maxAddr, [&](int addr, int fc) {
+    Serial.printf("[cli]   FOUND: slave=%d answered FC%02d\n", addr, fc);
+    hits++;
+  }, 700, false); // verbose=false — bs/pr's own printf lines are enough; no need for the raw TX/RX dump on top
+  xSemaphoreGive(modbusBusMutex);
+  Serial.printf("[cli] Scan done: %d found out of %d addresses probed.\n", hits, maxAddr);
+}
+
+// ---- pr: probe one register right now --------------------------------------
+static void _cliPr(String* tok, int n) {
+  if (n >= 2 && (tok[1] == "h" || tok[1] == "help")) { _cliPrHelp(); return; }
+  if (n < 4) { _cliErr("usage: pr <slave> <fc> <reg> [type]"); return; }
+
+  uint8_t slaveId = (uint8_t)tok[1].toInt();
+  uint8_t funcCode = (uint8_t)tok[2].toInt();
+  if (funcCode != 3 && funcCode != 4) { _cliErr("fc must be 3 or 4"); return; }
+  uint16_t regAddr = (uint16_t)strtol(tok[3].c_str(), nullptr, 0); // accepts 0x-hex or decimal
+  uint8_t dataType = MB_UINT16;
+  if (n >= 5 && !_cliDataTypeFromStr(tok[4], dataType)) { _cliErr("type must be u16/i16/u32/i32/f32"); return; }
+
+  uint8_t regCount = modbusRegCount(dataType);
+  uint16_t regs[2] = {0, 0};
+  uint8_t actualSlaveId = 0;
+
+  Serial.printf("[cli] Probing slave=%d fc=%d reg=%d type=%s (verbose TX/RX below)...\n",
+    slaveId, funcCode, regAddr, tok[4].c_str());
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    _cliErr("bus busy, try again");
+    return;
+  }
+  int rc = modbusReadRegs(slaveId, funcCode, regAddr, regCount, regs, true, 600, &actualSlaveId, 0);
+  xSemaphoreGive(modbusBusMutex);
+
+  if (rc == MB_OK) {
+    float decoded = modbusDecodeValue(regs, dataType, MB_WORD_HIGH_FIRST);
+    Serial.printf("[cli] OK: raw regs=[%u", regs[0]);
+    if (regCount > 1) Serial.printf(", %u", regs[1]);
+    Serial.printf("] decoded=%g\n", decoded);
+  } else {
+    const char* why = (rc == MB_TIMEOUT) ? "timeout — no response" :
+                      (rc == MB_CRC_ERROR) ? "CRC error" : "bad response";
+    Serial.printf("[cli] FAIL: %s\n", why);
+    if (rc == MB_BAD_RESPONSE && actualSlaveId != 0 && actualSlaveId != slaveId) {
+      Serial.printf("[cli]   (but got a CRC-valid reply FROM address %d instead of %d — sensor is alive, just answering as a different address)\n",
+        actualSlaveId, slaveId);
+    }
+  }
+}
+
 // ---- top-level dispatch -----------------------------------------------------
 static void _cliDispatch(const String& line) {
   String trimmed = line;
@@ -465,6 +563,8 @@ static void _cliDispatch(const String& line) {
   else if (cmd == "cw") { _cliCw(tok, n); }
   else if (cmd == "cs") { _cliCs(tok, n); }
   else if (cmd == "cc") { _cliCc(tok, n); }
+  else if (cmd == "bs") { _cliBs(tok, n); }
+  else if (cmd == "pr") { _cliPr(tok, n); }
   else { Serial.println("[cli] Unknown command \"" + cmd + "\" — type `h` for help"); }
 }
 

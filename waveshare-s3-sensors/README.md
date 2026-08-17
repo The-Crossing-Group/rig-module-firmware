@@ -52,6 +52,8 @@ Arduino IDE Serial Monitor (115200 baud, newline line-ending) and type
 - `cw ...` — WiFi SSID/password
 - `cs ...` — sensor slots (`cs list`, `cs get <n>`, `cs en/dis <n>`, `cs set <n> <field> <value>`)
 - `cc ...` — CAN signal slots (same pattern as `cs`)
+- `bs [maxAddr]` — live RS485 bus scan (doesn't touch saved config), prints every slave address that answers
+- `pr <slave> <fc> <reg> [type]` — probe one register right now, prints raw TX/RX hex + decoded value or failure reason
 
 `set`/`en`/`dis` commands only change the in-memory config — run `sv` to
 persist to NVS (same "nothing saved until you save" behavior as the web
