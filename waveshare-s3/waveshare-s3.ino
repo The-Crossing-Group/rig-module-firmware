@@ -1019,14 +1019,18 @@ void pollTask(void* param) {
         }
       }
 
-      // Debug print cadence — first 10 polls always, then every 30. Shared
-      // by analog (below, only if the analog read itself succeeded) AND
+      // Debug print cadence — every poll. Was throttled to first 10 then
+      // every 30th, but each poll is already rate-limited by
+      // cfg.pollIntervalS (default 7s), so printing all of them doesn't
+      // flood Serial — just gives visibility into every cycle instead of
+      // sampling roughly 1 in 30 (Sarah's request, 2026-08-17). Shared by
+      // analog (below, only if the analog read itself succeeded) AND
       // digital I/O (further below) — digital gets its own gate on
       // boardProfile.hasDigitalIO rather than `ok`, since `ok` only
       // reflects the analog read and shouldn't suppress DI/DO debug output
       // on a board where the analog read failed but digital is fine (or
       // vice versa).
-      bool debugCadence = (pollCount <= 10 || pollCount % 30 == 0);
+      bool debugCadence = true;
 
       if (ok) {
         // Debug print: actual engineering values per enabled channel (not
