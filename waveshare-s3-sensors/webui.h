@@ -285,8 +285,8 @@ static String sensorsPage(ModuleConfig& cfg) {
     h += "<div class='grid4'>";
     h += "<div><label>Slave ID (1-247)</label><input name='s" + String(i) + "sid' type='number' min='1' max='247' value='" + String(s.slaveId) + "'></div>";
     h += "<div><label>Function Code</label><select name='s" + String(i) + "fc'>";
-    h += "<option value='4'" + String(s.funcCode == 4 ? " selected" : "") + ">04 - Read Input Regs</option>";
     h += "<option value='3'" + String(s.funcCode == 3 ? " selected" : "") + ">03 - Read Holding Regs</option>";
+    h += "<option value='4'" + String(s.funcCode == 4 ? " selected" : "") + ">04 - Read Input Regs</option>";
     h += "</select></div>";
     h += "<div><label>Register Addr (hex or dec)</label><input name='s" + String(i) + "reg' value='" + String(s.regAddr) + "'></div>";
     h += "<div><label>Data Type</label><select name='s" + String(i) + "dt'>";

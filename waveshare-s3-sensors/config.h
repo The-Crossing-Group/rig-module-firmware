@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.13.0"
+#define FW_VERSION "rig-module-sensors-1.13.1"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -61,7 +61,12 @@ struct SensorConfig {
   String kind        = "";      // free text: pressure, temp, flow, level...
   String unit        = "";      // e.g. psi, degC, gpm
   uint8_t slaveId    = 1;       // Modbus slave address, 1-247
-  uint8_t funcCode   = 4;       // 3 = Read Holding Registers, 4 = Read Input Registers
+  uint8_t funcCode   = 3;       // 3 = Read Holding Registers, 4 = Read Input Registers
+                                 // Default is 3, not 4: most real-world sensors we've hit
+                                 // (SM7779 radar included) only answer FC03 and stay
+                                 // completely silent on FC04 — see 2026-08-18 incident where
+                                 // three new sensor slots timed out 100% on FC04 while a bus
+                                 // scan showed them replying instantly and cleanly to FC03.
   uint16_t regAddr   = 0;       // starting register address
   uint8_t dataType   = MB_UINT16;
   uint8_t wordOrder  = MB_WORD_HIGH_FIRST; // only matters for 32-bit types
@@ -218,7 +223,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
     c.sensors[i].kind        = p.getString((pre + "kd").c_str(), "");
     c.sensors[i].unit        = p.getString((pre + "ut").c_str(), "");
     c.sensors[i].slaveId     = (uint8_t)p.getInt((pre + "sid").c_str(), 1);
-    c.sensors[i].funcCode    = (uint8_t)p.getInt((pre + "fc").c_str(), 4);
+    c.sensors[i].funcCode    = (uint8_t)p.getInt((pre + "fc").c_str(), 3);
     c.sensors[i].regAddr     = (uint16_t)p.getInt((pre + "reg").c_str(), 0);
     c.sensors[i].dataType    = (uint8_t)p.getInt((pre + "dt").c_str(), MB_UINT16);
     c.sensors[i].wordOrder   = (uint8_t)p.getInt((pre + "wo").c_str(), MB_WORD_HIGH_FIRST);
