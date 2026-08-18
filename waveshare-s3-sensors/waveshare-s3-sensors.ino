@@ -54,8 +54,7 @@
 #include "modbus.h"
 #include "can.h"
 #include "scaling.h"
-#include "bitscope.h"
-#include "debugtools.h"
+
 #include "webui.h"
 #include "cli.h"
 
@@ -159,16 +158,10 @@ void setup() {
   Serial.printf("[BOOT] RS485 pins: RX=%d TX=%d DE=%d baud=%ld\n",
     RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
   modbusInit(RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
-  debugToolsInit(RS485_RXD, RS485_TXD);
-  bitscopeInit(RS485_RXD);
 
-  // Auto-detect & enable now runs from pollTask shortly after startup
-  // instead of blocking here — a from-scratch scan (16 addresses x every
-  // standard baud, 600ms timeout each) can take tens of seconds, which
-  // used to delay the AP/web UI coming up that whole time. Now the AP
-  // and web server start immediately below, and the scan happens ~2s
-  // later in the background (see pollTask()).
-  Serial.println("[BOOT] RS485 sensor auto-detect deferred to background poll task (won't block AP/web UI startup)");
+  // No automatic bus scan at boot — sensors already saved/enabled in
+  // config just start polling normally below. Use the "Auto-Detect &
+  // Enable Now" button on /sensors if you ever need to find new ones.
 
   // CAN only comes up if explicitly enabled on the Config page — listen-
   // only mode (see can.h), so an unconfigured/unused CAN bus is never
@@ -556,41 +549,15 @@ void pollTask(void* param) {
   delay(2000);
 
   int cycleCount = 0;
-  // Backdated so the very first loop iteration's "> 300000UL" check below
-  // is already true — runs the first auto-detect scan almost immediately
-  // (a couple seconds after boot) instead of waiting the full 5-minute
-  // period. AP/web UI is already up by this point (setup() no longer
-  // blocks on this scan), so there's no downside to doing it right away.
-  unsigned long lastAutoDetectMs = millis() - 300000UL;
+  // Background periodic auto-detect scan removed 2026-08-18 at Sarah's
+  // request — it interrupted regular polling every ~5 min while hunting
+  // for new sensors on any free slot. New sensors can still be added via
+  // the "Auto-Detect & Enable" button on /sensors (modbusAutoDetectAndEnable,
+  // still in modbus.h) — this just stops it running unattended in the
+  // background and stealing bus time from live polls.
   for (;;) {
     cycleCount++;
     int okCount = 0, failCount = 0;
-
-    // Periodic background auto-detect: every ~5 min, and only if a free
-    // sensor slot actually exists (skip the bus-hogging scan entirely
-    // once all slots are full — nothing more it could do anyway). Runs
-    // between poll cycles rather than interleaved with per-sensor polls,
-    // so a slow/empty scan doesn't stall live sensors that are already
-    // reporting fine.
-    if (millis() - lastAutoDetectMs > 300000UL) {
-      lastAutoDetectMs = millis();
-      bool hasFreeSlot = false;
-      for (int i = 0; i < MAX_SENSORS; i++) {
-        if (!cfg.sensors[i].enabled) { hasFreeSlot = true; break; }
-      }
-      if (hasFreeSlot) {
-        if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-          int found = modbusAutoDetectAndEnable(cfg, 16);
-          xSemaphoreGive(modbusBusMutex);
-          if (found > 0) {
-            Serial.printf("[Poll] Background auto-detect found %d new sensor(s)\n", found);
-            prefs.begin("rigmod", false);
-            saveConfig(prefs, cfg);
-            prefs.end();
-          }
-        }
-      }
-    }
 
     for (int i = 0; i < MAX_SENSORS; i++) {
       SensorConfig& s = cfg.sensors[i];

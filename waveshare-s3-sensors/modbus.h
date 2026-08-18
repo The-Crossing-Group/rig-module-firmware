@@ -312,11 +312,13 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
 // undocumented registers accepted the write but put the sensor into a
 // state it couldn't recover from without a factory reset.
 //
-// UPDATE (v1.13.0): register write IS available on this board now, but
-// ONLY via debugtools.h's debugWriteReg(), used exclusively by the
-// /debug page's explicit-confirm "Write Register" tool and the SM7779
-// recovery sweep — never by the automatic poll loop or auto-detect. See
-// debugtools.h's header comment for the full rationale.
+// UPDATE (v1.14.0): the /debug page and debugtools.h (which briefly added
+// a confirm-gated FC06 write tool for SM7779 recovery) were removed —
+// root cause of the sensor timeout issue turned out to be FC03 vs FC04,
+// not a hardware problem, so the write/recovery tooling was no longer
+// needed day-to-day. There is still no FC06 write path anywhere in this
+// firmware. The standalone sensor-debug/sensor-debug-lilygo tools still
+// exist separately if deep RS485 recovery is ever needed again.
 
 // Decodes 1 or 2 raw registers into a float per the sensor's configured
 // data type + word order. This is the whole point of making sensors

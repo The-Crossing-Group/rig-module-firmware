@@ -8,15 +8,10 @@
 //   /can         Add/edit/remove CAN signals
 //   /live        Live values table (sensors + CAN signals)
 //   /system      Firmware info, OTA, buffer, reboot/factory-reset
-//   /debug       RS485/Modbus debugger (scan/read/write/raw/sniff/bitscope/
-//                sweep/recovery + live traffic log + register reference
-//                tables) — ported from the standalone LilyGo sensor-debug
-//                tool onto this page (see debugtools.h). Includes FC06
-//                register write and the SM7779 recovery sweep — both of
-//                which CAN corrupt a sensor if misused (one already was,
-//                2026-08-10/11) — kept on this one page, behind confirm
-//                dialogs, at Sarah's explicit request rather than requiring
-//                a second board wired in parallel just to debug.
+// (Debug page removed 2026-08-18 — root-caused sensor issue was FC03 vs
+//  FC04, not a hardware/wiring problem. No longer needed day-to-day; the
+//  standalone sensor-debug/sensor-debug-lilygo tools still exist separately
+//  if deep RS485 debugging is ever needed again.)
 // =============================================================================
 #pragma once
 #include <WebServer.h>
@@ -108,7 +103,6 @@ static const char NAV[] PROGMEM = R"(
   <a href='/can'>&#128225; CAN</a>
   <a href='/live'>&#128202; Live</a>
   <a href='/system'>&#128295; System</a>
-  <a href='/debug'>&#128268; Debug</a>
 </div>
 )";
 
@@ -186,8 +180,8 @@ static String cfgPage(ModuleConfig& cfg) {
     h += "<div class='small ok'>&#128274; Baud is locked — auto-detect will not change this without you setting it again "
          "or using Auto-Detect Baud on a sensor.</div>";
   } else {
-    h += "<div class='small warn'>&#128275; Baud not yet locked — background auto-detect may still adjust this "
-         "automatically if no sensor is enabled yet. Save this form (or run Auto-Detect Baud on a sensor) to lock it.</div>";
+    h += "<div class='small warn'>&#128275; Baud not yet locked — running Auto-Detect & Enable Now on /sensors may still "
+         "adjust this automatically if no sensor is enabled yet. Save this form (or run Auto-Detect Baud on a sensor) to lock it.</div>";
   }
 
   h += "<h3>CAN Bus</h3>";
@@ -618,170 +612,6 @@ function doOTA(){
   return h;
 }
 
-// ─── /debug  RS485 DEBUGGER PAGE ─────────────────────────────────────────────
-// Ported from the standalone LilyGo sensor-debug tool (see debugtools.h
-// header for the full write-capability warning). Everything here shares
-// the live bus with the poll task via modbusBusMutex — a slow tool
-// (bitscope, recovery sweep) held open will delay live sensor polls
-// while it runs, same as any other modbusBusMutex holder.
-static String debugPage() {
-  DebugSerialCfg sc = debugGetSerialCfg();
-  String h = FPSTR(NAV);
-  h += "<div class='page'><h2>&#128268; RS485 Debugger</h2>";
-  h += "<div class='card'><span class='warn'>&#9888; Advanced tool.</span> Shares the live sensor bus — "
-       "changing baud/parity/stop here affects live polling until you restore normal operation. "
-       "Register WRITE (FC06) and the SM7779 recovery sweep are enabled on this page and can permanently "
-       "corrupt a misbehaving sensor if aimed at the wrong register — that's exactly what happened to one "
-       "SM7779 before. Confirm before you click.</div>";
-
-  h += "<div class='card'><b>Current serial config:</b> " + String(sc.baud) + " baud, 8" + String(sc.parity) + String(sc.stopBits)
-       + "&nbsp; <button onclick='restoreNormal()'>Restore Normal Operation</button></div>";
-
-  h += "<h3>Serial Framing</h3><div class='card row'>"
-       "<div><label>Baud</label><select id='dbBaud'>";
-  for (uint32_t b : {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200}) {
-    h += "<option value='" + String(b) + "'" + (b == sc.baud ? " selected" : "") + ">" + String(b) + "</option>";
-  }
-  h += "</select></div><div><label>Parity</label><select id='dbParity'>"
-       "<option value='N'" + String(sc.parity=='N'?" selected":"") + ">None</option>"
-       "<option value='E'" + String(sc.parity=='E'?" selected":"") + ">Even</option>"
-       "<option value='O'" + String(sc.parity=='O'?" selected":"") + ">Odd</option>"
-       "</select></div><div><label>Stop bits</label><select id='dbStop'>"
-       "<option value='1'" + String(sc.stopBits==1?" selected":"") + ">1</option>"
-       "<option value='2'" + String(sc.stopBits==2?" selected":"") + ">2</option>"
-       "</select></div><div style='flex:0'><label>&nbsp;</label><button onclick='applyFraming()'>Apply</button></div></div>";
-
-  h += "<h3>Bus Scan</h3><div class='card row'>"
-       "<div><label>Max address</label><input id='dbScanMax' value='20'></div>"
-       "<div style='flex:0'><label>&nbsp;</label><button onclick='doScan()'>Scan</button></div></div>";
-
-  h += "<h3>Read Registers</h3><div class='card row'>"
-       "<div><label>Slave</label><input id='dbReadSid' value='1'></div>"
-       "<div><label>FC</label><select id='dbReadFc'><option value='3'>03</option><option value='4'>04</option></select></div>"
-       "<div><label>Reg</label><input id='dbReadReg' value='0x0000'></div>"
-       "<div><label>Count</label><input id='dbReadCount' value='1'></div>"
-       "<div style='flex:0'><label>&nbsp;</label><button onclick='doRead()'>Read</button></div></div>";
-
-  h += "<h3>Write Register (FC06)</h3><div class='card row'>"
-       "<div><label>Slave</label><input id='dbWriteSid' value='1'></div>"
-       "<div><label>Reg</label><input id='dbWriteReg' value='0x0000'></div>"
-       "<div><label>Value</label><input id='dbWriteVal' value='0'></div>"
-       "<div style='flex:0'><label>&nbsp;</label><button class='btn-red' onclick='doWrite()'>Write</button></div></div>";
-
-  h += "<h3>Raw Hex Send</h3><div class='card row'>"
-       "<div><label>Hex bytes</label><input id='dbRawHex' value='01 03 00 00 00 01 84 0A' style='width:100%'></div>"
-       "<div style='flex:0'><label>&nbsp;</label><button onclick='doRaw()'>Send</button></div></div>";
-
-  h += "<h3>Passive Sniff (no TX)</h3><div class='card row'>"
-       "<div><label>Seconds</label><input id='dbSniffSecs' value='5'></div>"
-       "<div style='flex:0'><label>&nbsp;</label><button onclick='doSniff()'>Sniff</button></div></div>";
-
-  h += "<h3>Bitscope (raw electrical capture)</h3><div class='card'>"
-       "<div class='small'>Bypasses UART framing entirely — measures the real bit period off the wire and "
-       "brute-forces every byte alignment against Modbus CRC16. Window must be longer than the sensor's "
-       "auto-report period or it may capture nothing.</div>"
-       "<div class='row'><div><label>Window (ms)</label><input id='dbBsMs' value='6000'></div>"
-       "<div style='flex:0'><label>&nbsp;</label><button onclick='doBitscope()'>Capture</button></div></div></div>";
-
-  h += "<h3>Baud Sweep</h3><div class='card'>"
-       "<div class='small'>Tries a register read at 8N1 across every standard baud, stops at the first clean reply.</div>"
-       "<div class='row'><div><label>Slave</label><input id='dbSwSid' value='1'></div>"
-       "<div><label>FC</label><select id='dbSwFc'><option value='3'>03</option><option value='4'>04</option></select></div>"
-       "<div><label>Reg</label><input id='dbSwReg' value='0x0000'></div>"
-       "<div><label>Count</label><input id='dbSwCount' value='1'></div>"
-       "<div style='flex:0'><label>&nbsp;</label><button onclick='doSweep()'>Sweep</button></div></div></div>";
-
-  h += "<h3>SM7779 Recovery Sweep</h3><div class='card'>"
-       "<div class='small'>For a sensor stuck outputting garbage after writes to 0x0068/0x0069. Cycles all 6 "
-       "parity/stop combos at 9600, writing reset values to address 1 at each, checking for a real ack. Up to ~15s.</div>"
-       "<button class='btn-red' onclick=\"if(confirm('Broadcast reset writes across all framing combos?'))doRecover()\">Run Recovery Sweep</button></div>";
-
-  h += "<h3>Result</h3><pre id='dbResult' class='mono' style='min-height:60px'>(nothing yet)</pre>";
-
-  h += "<h3>Live Traffic Log <span class='small'>(shared with live polling — updates every second)</span></h3>"
-       "<pre id='dbLog' class='mono'>Loading...</pre>";
-
-  // ── Register reference tables ──────────────────────────────────────────
-  h += "<h3>SM7779 / XM7779 Radar Level Sensor — Register Map</h3>"
-       "<div class='card small'>80GHz radar, always replies FC03/3-register fixed block [distance, level, status] "
-       "regardless of requested register. Default slave 1, 9600 8N1.</div>"
-       "<table><tr><th>Register</th><th>Name</th><th>Notes</th></tr>";
-  for (int i = 0; i < SM7779_REGS_COUNT; i++) {
-    h += "<tr><td class='mono'>" + String(SM7779_REGS[i].reg) + "</td><td>" + String(SM7779_REGS[i].name)
-       + "</td><td class='small'>" + String(SM7779_REGS[i].notes) + "</td></tr>";
-  }
-  h += "</table>";
-
-  h += "<h3>QDW90A / QDY30A / QDW50A / QDF70B Pressure Sensor — Register Map</h3>"
-       "<div class='card small'>FC03 holding registers, 7 registers starting at 0x0000. Requires genuine 24V power "
-       "— will not respond at 12V. Default slave 1, 9600 8N1 (collides with SM7779 default).</div>"
-       "<table><tr><th>Register</th><th>Name</th><th>Notes</th></tr>";
-  for (int i = 0; i < QDW90A_REGS_COUNT; i++) {
-    h += "<tr><td class='mono'>" + String(QDW90A_REGS[i].reg) + "</td><td>" + String(QDW90A_REGS[i].name)
-       + "</td><td class='small'>" + String(QDW90A_REGS[i].notes) + "</td></tr>";
-  }
-  h += "</table>";
-
-  h += R"(
-<script>
-function setResult(t){ document.getElementById('dbResult').textContent = t; }
-function api(url, cb){
-  fetch(url).then(r=>r.text()).then(t=>{ try{ cb(JSON.parse(t)); }catch(e){ setResult(t); } });
-}
-function restoreNormal(){
-  fetch('/api/debug/restore',{method:'POST'}).then(()=>location.reload());
-}
-function applyFraming(){
-  let q = 'baud='+dbBaud.value+'&parity='+dbParity.value+'&stop='+dbStop.value;
-  fetch('/api/debug/framing?'+q,{method:'POST'}).then(()=>location.reload());
-}
-function doScan(){
-  setResult('Scanning...');
-  api('/api/debug/scan?max='+dbScanMax.value, d=>setResult(d.result||JSON.stringify(d)));
-}
-function doRead(){
-  setResult('Reading...');
-  let q='sid='+dbReadSid.value+'&fc='+dbReadFc.value+'&reg='+dbReadReg.value+'&count='+dbReadCount.value;
-  api('/api/debug/read?'+q, d=>setResult(d.result||JSON.stringify(d)));
-}
-function doWrite(){
-  if(!confirm('Write register '+dbWriteReg.value+' = '+dbWriteVal.value+' on slave '+dbWriteSid.value+'? This can corrupt a misconfigured sensor.'))return;
-  setResult('Writing...');
-  let q='sid='+dbWriteSid.value+'&reg='+dbWriteReg.value+'&val='+dbWriteVal.value;
-  fetch('/api/debug/write?'+q,{method:'POST'}).then(r=>r.text()).then(t=>{try{setResult(JSON.parse(t).result);}catch(e){setResult(t);}});
-}
-function doRaw(){
-  setResult('Sending...');
-  api('/api/debug/raw?hex='+encodeURIComponent(dbRawHex.value), d=>setResult(d.result||JSON.stringify(d)));
-}
-function doSniff(){
-  setResult('Sniffing for '+dbSniffSecs.value+'s...');
-  api('/api/debug/sniff?secs='+dbSniffSecs.value, d=>setResult(d.result||JSON.stringify(d)));
-}
-function doBitscope(){
-  setResult('Capturing for '+dbBsMs.value+'ms...');
-  api('/api/debug/bitscope?ms='+dbBsMs.value, d=>setResult(d.result||JSON.stringify(d)));
-}
-function doSweep(){
-  setResult('Sweeping...');
-  let q='sid='+dbSwSid.value+'&fc='+dbSwFc.value+'&reg='+dbSwReg.value+'&count='+dbSwCount.value;
-  api('/api/debug/sweep?'+q, d=>setResult(d.result||JSON.stringify(d)));
-}
-function doRecover(){
-  setResult('Running recovery sweep (up to ~15s)...');
-  api('/api/debug/recover', d=>setResult(d.result||JSON.stringify(d)));
-}
-function pollLog(){
-  fetch('/api/debug/log').then(r=>r.text()).then(t=>{document.getElementById('dbLog').textContent=t;});
-  setTimeout(pollLog,1000);
-}
-pollLog();
-</script>)";
-
-  h += "</div>";
-  return h;
-}
-
 // ─── API handler helpers ──────────────────────────────────────────────────────
 static void handleApiStatus() {
   DynamicJsonDocument doc(8192);
@@ -1175,178 +1005,6 @@ static void handleOTA() {
   http.end();
 }
 
-// ─── /debug API handlers ──────────────────────────────────────────────────────
-// Every handler here takes modbusBusMutex before touching the shared bus,
-// same rule as every other bus-touching handler in this file. Long ones
-// (bitscope, recovery sweep, full-range scan) hold it for their whole
-// duration, which will delay live sensor polling until they finish —
-// acceptable for an on-demand diagnostic page, not something to automate.
-
-static void handleDebugRestore() {
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-    debugSerialRestore(_cfg->modbusBaud);
-    xSemaphoreGive(modbusBusMutex);
-  }
-  _srv->send(200, "application/json", "{\"ok\":true}");
-}
-
-static void handleDebugFraming() {
-  uint32_t baud = _p("baud").isEmpty() ? 9600 : (uint32_t)_p("baud").toInt();
-  char parity = _p("parity").isEmpty() ? 'N' : _p("parity")[0];
-  int stop = _p("stop").isEmpty() ? 1 : _p("stop").toInt();
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-    debugSerialApply(baud, parity, stop);
-    xSemaphoreGive(modbusBusMutex);
-  }
-  _srv->send(200, "application/json", "{\"ok\":true}");
-}
-
-static void handleDebugScan() {
-  int maxAddr = _p("max").isEmpty() ? 20 : _p("max").toInt();
-  String result;
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(60000)) == pdTRUE) {
-    result = debugScan(maxAddr);
-    xSemaphoreGive(modbusBusMutex);
-  } else result = "bus busy";
-  DynamicJsonDocument doc(1024);
-  doc["result"] = result;
-  String out; serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-static void handleDebugRead() {
-  uint8_t sid = _p("sid").isEmpty() ? 1 : _p("sid").toInt();
-  uint8_t fc = _p("fc").isEmpty() ? 3 : _p("fc").toInt();
-  uint16_t reg = (uint16_t)strtol(_p("reg").c_str(), nullptr, 0);
-  uint8_t count = _p("count").isEmpty() ? 1 : _p("count").toInt();
-  String result;
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-    DebugResult r = debugReadRegs(sid, fc, reg, count);
-    xSemaphoreGive(modbusBusMutex);
-    if (r.ok) {
-      result = "OK — reply from slave " + String(r.actualSlaveId) + ":\n";
-      for (int i = 0; i < r.regCount; i++) {
-        char line[64]; snprintf(line, sizeof(line), "  #%d = %u (0x%04X)\n", i, r.regs[i], r.regs[i]);
-        result += line;
-      }
-    } else {
-      result = "FAILED — " + r.error + "\n";
-    }
-    result += "TX: " + r.txHex + "\n";
-    if (r.rxHex.length()) result += "RX: " + r.rxHex;
-  } else result = "bus busy";
-  DynamicJsonDocument doc(1024);
-  doc["result"] = result;
-  String out; serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-static void handleDebugWrite() {
-  uint8_t sid = _p("sid").isEmpty() ? 1 : _p("sid").toInt();
-  uint16_t reg = (uint16_t)strtol(_p("reg").c_str(), nullptr, 0);
-  uint16_t val = (uint16_t)strtol(_p("val").c_str(), nullptr, 0);
-  String result;
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-    DebugResult r = debugWriteReg(sid, reg, val);
-    xSemaphoreGive(modbusBusMutex);
-    result = (r.ok ? "OK — " : "FAILED — ") + r.error + "\n";
-    result += "TX: " + r.txHex + "\n";
-    if (r.rxHex.length()) result += "RX: " + r.rxHex;
-  } else result = "bus busy";
-  DynamicJsonDocument doc(1024);
-  doc["result"] = result;
-  String out; serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-static void handleDebugRaw() {
-  String hex = _p("hex");
-  String result;
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-    String rx = debugRawHexSend(hex);
-    xSemaphoreGive(modbusBusMutex);
-    result = "Sent: " + hex + "\n" + (rx.length() ? ("Reply: " + rx) : String("No reply."));
-  } else result = "bus busy";
-  DynamicJsonDocument doc(1024);
-  doc["result"] = result;
-  String out; serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-static void handleDebugSniff() {
-  int secs = _p("secs").isEmpty() ? 5 : _p("secs").toInt();
-  if (secs < 1) secs = 1;
-  if (secs > 30) secs = 30;
-  String result;
-  // secs*1000ms + margin — sniff itself blocks for the full duration.
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS((secs + 2) * 1000)) == pdTRUE) {
-    result = "Sniffing " + String(secs) + "s (no TX)...\n" + debugSniffCapture(secs);
-    xSemaphoreGive(modbusBusMutex);
-  } else result = "bus busy";
-  DynamicJsonDocument doc(2048);
-  doc["result"] = result;
-  String out; serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-static void handleDebugBitscope() {
-  int ms = _p("ms").isEmpty() ? 6000 : _p("ms").toInt();
-  if (ms < 50) ms = 50;
-  if (ms > 15000) ms = 15000;
-  String result;
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(ms + 3000)) == pdTRUE) {
-    bitscopeCapture(ms);
-    BitscopeResult r = bitscopeAnalyze();
-    xSemaphoreGive(modbusBusMutex);
-    result = "Edges captured: " + String(r.edgeCount) + "\n";
-    if (r.minPulseUs > 0) {
-      result += "Shortest pulse: " + String(r.minPulseUs) + "us -> estimated real baud: " + String(r.estimatedBaud) + "\n";
-      result += "Raw bitstream (first up to 400 bit-units):\n  " + r.bitstream + "\n";
-    }
-    result += "Byte-alignment sweep (checked against Modbus CRC16 at every bit offset 0-10):\n" + r.bestDecodeReport;
-  } else result = "bus busy";
-  DynamicJsonDocument doc(4096);
-  doc["result"] = result;
-  String out; serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-static void handleDebugSweep() {
-  uint8_t sid = _p("sid").isEmpty() ? 1 : _p("sid").toInt();
-  uint8_t fc = _p("fc").isEmpty() ? 3 : _p("fc").toInt();
-  uint16_t reg = (uint16_t)strtol(_p("reg").c_str(), nullptr, 0);
-  uint8_t count = _p("count").isEmpty() ? 1 : _p("count").toInt();
-  String result;
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(10000)) == pdTRUE) {
-    result = debugBaudSweep(sid, fc, reg, count);
-    xSemaphoreGive(modbusBusMutex);
-  } else result = "bus busy";
-  DynamicJsonDocument doc(2048);
-  doc["result"] = result;
-  String out; serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-static void handleDebugRecover() {
-  String result;
-  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(20000)) == pdTRUE) {
-    result = debugRecoverySweep();
-    xSemaphoreGive(modbusBusMutex);
-  } else result = "bus busy";
-  DynamicJsonDocument doc(4096);
-  doc["result"] = result;
-  String out; serializeJson(doc, out);
-  _srv->send(200, "application/json", out);
-}
-
-static void handleDebugLog() {
-  // Read-only against the ring buffer — modbus.h's log array is plain
-  // SRAM, no mutex needed to read stale-but-safe snapshots of it (worst
-  // case: one entry mid-write, cosmetic only, matches how the /sensors
-  // live poll already reads sensorReadings without a lock in some paths).
-  _srv->send(200, "text/plain", debugLogHumanText(60));
-}
-
 // ─── Route setup ─────────────────────────────────────────────────────────────
 void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
                     SensorReading* sReadings, CanSignalReading* cReadings,
@@ -1367,7 +1025,6 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/can",      HTTP_GET, [noCacheHtml](){ noCacheHtml(200, canPage(*_cfg)); });
   srv.on("/live",     HTTP_GET, [noCacheHtml](){ noCacheHtml(200, livePage()); });
   srv.on("/system",   HTTP_GET, [noCacheHtml](){ noCacheHtml(200, sysPage(*_cfg)); });
-  srv.on("/debug",    HTTP_GET, [noCacheHtml](){ noCacheHtml(200, debugPage()); });
 
   // GET APIs
   srv.on("/api/status",       HTTP_GET, handleApiStatus);
@@ -1385,18 +1042,6 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);
   srv.on("/api/modbus/autodetect-enable", HTTP_POST, handleAutoDetectEnable);
 
-  // /debug page APIs
-  srv.on("/api/debug/restore",  HTTP_POST, handleDebugRestore);
-  srv.on("/api/debug/framing",  HTTP_POST, handleDebugFraming);
-  srv.on("/api/debug/scan",     HTTP_GET,  handleDebugScan);
-  srv.on("/api/debug/read",     HTTP_GET,  handleDebugRead);
-  srv.on("/api/debug/write",    HTTP_POST, handleDebugWrite);
-  srv.on("/api/debug/raw",      HTTP_GET,  handleDebugRaw);
-  srv.on("/api/debug/sniff",    HTTP_GET,  handleDebugSniff);
-  srv.on("/api/debug/bitscope", HTTP_GET,  handleDebugBitscope);
-  srv.on("/api/debug/sweep",    HTTP_GET,  handleDebugSweep);
-  srv.on("/api/debug/recover",  HTTP_GET,  handleDebugRecover);
-  srv.on("/api/debug/log",      HTTP_GET,  handleDebugLog);
 
   srv.on("/api/buffer/flush", HTTP_POST, [](){
     flushNow = true;
