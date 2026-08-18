@@ -259,8 +259,8 @@ static String sensorsPage(ModuleConfig& cfg) {
   h += "<p class='small'>Any Modbus RTU sensor on the RS485 bus. Don't know its slave ID/register? Use "
        "\"Probe Now\" below to check, or \"Auto-Detect &amp; Enable\" to find new sensors.</p>";
   h += "<div class='card' style='border-color:#27ae60'><b>&#9889; Auto-Detect &amp; Enable</b><br>"
-       "<span class='small'>Scans addresses 1-16, auto-enables new sensors with starter defaults. Also runs "
-       "on boot and every few minutes.</span><br><br>"
+       "<span class='small'>Scans addresses 1-16, auto-enables new sensors with starter defaults (fc=03). "
+       "Manual only — press the button below.</span><br><br>"
        "<button type='button' class='btn-green' onclick='autoDetectEnable()' id='adeBtn'>&#9889; Auto-Detect &amp; Enable Now</button>"
        "<div id='adeResult' class='small' style='margin-top:8px'></div></div>";
   h += "<form method='POST' action='/api/sensors/save'>";
@@ -875,6 +875,28 @@ static void handleSensorsSave() {
     if (_srv->hasArg((pre + "vm").c_str()))  s.volMaxLevel = _srv->arg((pre + "vm").c_str()).toFloat();
   }
   saveConfig(*_prefs, *_cfg);
+
+  // Readback verification — same idea as the mbBaud check in saveConfig():
+  // confirm what's ACTUALLY in flash for each enabled slot's function
+  // code right after writing it, not just what's in the RAM struct we
+  // just wrote from. Added 2026-08-18 to chase down a report of fc
+  // reverting to 4 after a save — if this fires, the write itself is
+  // failing (NVS full/corrupt), not a logic bug in the save/load code.
+  _prefs->begin("rigmod", false);
+  for (int i = 0; i < MAX_SENSORS; i++) {
+    if (!_cfg->sensors[i].enabled) continue;
+    String pre = "s" + String(i) + "_";
+    int readBack = _prefs->getInt((pre + "fc").c_str(), -1);
+    if (readBack != (int)_cfg->sensors[i].funcCode) {
+      Serial.printf("[Sensors] MISMATCH slot %d: wrote fc=%d, flash readback=%d — NVS write may have failed!\n",
+        i, _cfg->sensors[i].funcCode, readBack);
+    } else {
+      Serial.printf("[Sensors] slot %d saved OK: fc=%d (slaveId=%d)\n",
+        i, readBack, _cfg->sensors[i].slaveId);
+    }
+  }
+  _prefs->end();
+
   _srv->sendHeader("Location", "/sensors");
   _srv->send(302, "text/plain", "");
 }

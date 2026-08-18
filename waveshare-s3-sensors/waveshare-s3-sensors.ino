@@ -149,7 +149,14 @@ void setup() {
   Serial.printf("[BOOT] Poll int : %d s\n", cfg.pollIntervalS);
 
   int nSensors = 0;
-  for (int i = 0; i < MAX_SENSORS; i++) if (cfg.sensors[i].enabled) nSensors++;
+  for (int i = 0; i < MAX_SENSORS; i++) {
+    if (cfg.sensors[i].enabled) {
+      nSensors++;
+      Serial.printf("[BOOT]   slot %d: \"%s\" slaveId=%d fc=%d reg=0x%04X\n",
+        i, cfg.sensors[i].name.c_str(), cfg.sensors[i].slaveId,
+        cfg.sensors[i].funcCode, cfg.sensors[i].regAddr);
+    }
+  }
   Serial.printf("[BOOT] Configured sensors: %d / %d slots\n", nSensors, MAX_SENSORS);
 
   stateMutex = xSemaphoreCreateMutex();
