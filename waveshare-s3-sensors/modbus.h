@@ -305,15 +305,18 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
 }
 
 // NOTE: There is deliberately no modbusWriteReg()/FC06 write support in
-// this production firmware variant. Writing to a sensor's own config
-// registers (comm mode, protocol type, etc.) is exactly what corrupted
-// the SM7779 radar sensor's internal state during earlier debugging
-// (2026-08-10/11) — undocumented registers accepted the write but put the
-// sensor into a state it couldn't recover from without a factory reset.
-// If a sensor genuinely needs a register written (address, baud, etc.)
-// do it in isolation with the LilyGo sensor-debug tool before wiring it
-// onto the shared production bus — keep write capability off hardware
-// that's actively running three-plus sensors you can't afford to lose.
+// this file, and the normal poll path (modbusPollSensor() etc.) never
+// writes anything. Writing to a sensor's own config registers (comm
+// mode, protocol type, etc.) is exactly what corrupted the SM7779 radar
+// sensor's internal state during earlier debugging (2026-08-10/11) —
+// undocumented registers accepted the write but put the sensor into a
+// state it couldn't recover from without a factory reset.
+//
+// UPDATE (v1.13.0): register write IS available on this board now, but
+// ONLY via debugtools.h's debugWriteReg(), used exclusively by the
+// /debug page's explicit-confirm "Write Register" tool and the SM7779
+// recovery sweep — never by the automatic poll loop or auto-detect. See
+// debugtools.h's header comment for the full rationale.
 
 // Decodes 1 or 2 raw registers into a float per the sensor's configured
 // data type + word order. This is the whole point of making sensors

@@ -54,6 +54,8 @@
 #include "modbus.h"
 #include "can.h"
 #include "scaling.h"
+#include "bitscope.h"
+#include "debugtools.h"
 #include "webui.h"
 #include "cli.h"
 
@@ -157,6 +159,8 @@ void setup() {
   Serial.printf("[BOOT] RS485 pins: RX=%d TX=%d DE=%d baud=%ld\n",
     RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
   modbusInit(RS485_RXD, RS485_TXD, RS485_DE, cfg.modbusBaud);
+  debugToolsInit(RS485_RXD, RS485_TXD);
+  bitscopeInit(RS485_RXD);
 
   // Auto-detect & enable now runs from pollTask shortly after startup
   // instead of blocking here — a from-scratch scan (16 addresses x every
