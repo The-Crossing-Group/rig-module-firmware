@@ -1,6 +1,6 @@
 # Rig Module Firmware — Waveshare ESP32-S3-RS485-CAN
 
-**Version:** rig-module-1.10.0
+**Version:** rig-module-1.11.0
 **Board:** Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, screw terminal)
 **Target:** Waveshare Modbus RTU Analog Input 8CH (B) or Eletechsup AMIDJ14 — auto-detected, same as LilyGo variant.
 
@@ -23,7 +23,18 @@ pass once per revolution).
   → reports 0 (stopped) instead of freezing on a stale value.
 - **Per-DI config:** enable, pulses-per-revolution (1 for a single
   trigger point on the shaft; higher for e.g. gear teeth), stopped
-  timeout (s).
+  timeout (s), fast-poll read timeout (ms, v1.11.0+ — see below).
+- **Speeding this up (v1.11.0+):** the RS485 baud rate (`/` Config page)
+  is shared by the whole bus, so raising it (the AMIDJ14 officially
+  supports up to 115200 — 1200/2400/4800/9600/19200/38400/57600/115200)
+  speeds up the pulse-counter reads along with everything else, no code
+  change needed. Once baud is raised, the per-DI "Fast-Poll Read Timeout"
+  field on `/digital` can be lowered from its 60ms default (try 20-30ms)
+  to recover faster from a missed/slow reply — a good reply always
+  returns immediately regardless of this setting, it only bounds how
+  long a bad one is waited on before moving on and trying again. Check
+  the live measured Hz on `/digital` after changing either setting to
+  confirm it actually helped.
 - **Honest limitation — read this before relying on it at speed:**
   accuracy is capped by how fast this device can round-trip a single-bit
   Modbus read over RS485, not open-ended like a hardware interrupt would

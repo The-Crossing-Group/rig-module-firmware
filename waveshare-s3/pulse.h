@@ -119,7 +119,8 @@ void pulsePollTask(void* param) {
       // again next loop, rather than stalling the whole fast-poll rate on
       // a slow-owning task.
       if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        ok = modbusReadOneDI(cfg->modbusSlaveId, i, &state, /*quiet=*/true, /*timeoutMs=*/60);
+        ok = modbusReadOneDI(cfg->modbusSlaveId, i, &state, /*quiet=*/true,
+                              /*timeoutMs=*/cfg->din[i].pulseTimeoutMs);
         xSemaphoreGive(modbusBusMutex);
       }
 

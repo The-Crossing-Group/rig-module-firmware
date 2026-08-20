@@ -493,6 +493,12 @@ static String digitalPage(ModuleConfig& cfg) {
          "sensor sees multiple points per revolution (e.g. gear teeth).</div>";
     h += "<label>Stopped Timeout (s)</label><input name='di" + String(i) + "pto' type='number' min='0.1' step='0.1' value='" + String(cfg.din[i].timeoutS) + "'>";
     h += "<div class='small' style='margin-top:-6px'>No transition for this long &rarr; reports 0 RPM (stopped) instead of holding the last reading.</div>";
+    h += "<label>Fast-Poll Read Timeout (ms)</label><input name='di" + String(i) + "pms' type='number' min='5' max='300' value='" + String(cfg.din[i].pulseTimeoutMs) + "'>";
+    h += "<div class='small' style='margin-top:-6px'>Per-read timeout for the RPM fast-poll loop. Only matters on a missed/slow "
+         "reply &mdash; a good reply still returns immediately either way. Lower this (try 20-30) after raising RS485 Baud Rate "
+         "above 9600 on the <a href='/'>Config</a> page &mdash; a faster bus means a missed read can be given up on and retried "
+         "sooner, which raises the measured Hz below and the safe RPM ceiling with it. Don't go below ~15-20 on 9600 baud, a "
+         "healthy single-bit reply there genuinely takes close to that long.</div>";
     h += "</div>";
     h += "</div>";
   }
@@ -884,6 +890,7 @@ static void handleConfig() {
       _cfg->din[i].pulseModeEnabled = _srv->hasArg((preIn+"pmEn").c_str());
       applyParam((preIn+"ppr").c_str(), [i](String v){ _cfg->din[i].pulsesPerRev = max(1, (int)v.toInt()); });
       applyParam((preIn+"pto").c_str(), [i](String v){ _cfg->din[i].timeoutS = max(0.1f, v.toFloat()); });
+      applyParam((preIn+"pms").c_str(), [i](String v){ _cfg->din[i].pulseTimeoutMs = constrain((int)v.toInt(), 5, 300); });
     }
     // Clear any stale edge-timing state for channels no longer in pulse
     // mode (see pulse.h pulseConfigChanged() for why).

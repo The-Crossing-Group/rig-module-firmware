@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-1.10.0"
+#define FW_VERSION "rig-module-1.11.0"
 
 // =============================================================================
 // WIFI — no hardcoded network anymore.
@@ -71,6 +71,15 @@ struct DigitalChannelConfig {
   bool   pulseModeEnabled = false; // DI-only: interpret ON/OFF transitions as rotation pulses
   int    pulsesPerRev     = 1;     // trigger points per revolution (1 = single point, e.g. one bolt/target)
   float  timeoutS         = 3.0f;  // no transition for this long -> report 0 RPM (stopped)
+  // Per-read timeout (ms) for the fast-poll loop's single-bit FC02 request
+  // (pulse.h). Only matters on a MISSED/slow response — a healthy reply
+  // still returns as soon as its bytes arrive, well under this ceiling.
+  // Lower = faster recovery from a dropped read = more read attempts per
+  // second at high RPM, at the cost of possibly giving up early on a
+  // genuinely slow-but-still-coming reply from a loaded bus. Default (60)
+  // matches the previous hardcoded value; tune down once RS485 baud is
+  // bumped above 9600, since round-trip time drops accordingly.
+  int    pulseTimeoutMs   = 60;
 };
 
 // Live RPM reading derived from a DI's Modbus-polled transitions (see
@@ -238,6 +247,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
     c.din[i].pulseModeEnabled = p.getBool((preIn + "pmEn").c_str(), false);
     c.din[i].pulsesPerRev     = p.getInt((preIn + "ppr").c_str(), 1);
     c.din[i].timeoutS         = p.getFloat((preIn + "pto").c_str(), 3.0f);
+    c.din[i].pulseTimeoutMs   = p.getInt((preIn + "pms").c_str(), 60);
     c.dout[i].enabled = p.getBool((preOut + "en").c_str(), true);
     c.dout[i].name    = p.getString((preOut + "nm").c_str(), "DO " + String(i+1));
   }
@@ -295,6 +305,7 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
     p.putBool((preIn + "pmEn").c_str(), c.din[i].pulseModeEnabled);
     p.putInt((preIn + "ppr").c_str(), c.din[i].pulsesPerRev);
     p.putFloat((preIn + "pto").c_str(), c.din[i].timeoutS);
+    p.putInt((preIn + "pms").c_str(), c.din[i].pulseTimeoutMs);
     p.putBool((preOut + "en").c_str(), c.dout[i].enabled);
     p.putString((preOut + "nm").c_str(), c.dout[i].name);
   }
