@@ -1136,7 +1136,16 @@ static void handleApiDigital() {
     for (int i = 0; i < 4; i++) {
       JsonObject di = din.createNestedObject();
       di["ch"] = i;
-      di["state"] = dinReadings[i].state;
+      // .valid is false when the last poll failed (see waveshare-s3.ino
+      // pollTask bug fix, 2026-08-21) — send null rather than echoing a
+      // stale .state value, same convention buildPayload() already uses.
+      // The /digital page's JS already gates on .status!=='ok' before
+      // reading .state, so this didn't affect what Sarah saw on that
+      // page, only raw Serial output + the Pi-bound JSON payload — but
+      // fixing it here too so /api/digital can't mislead a future direct
+      // consumer that trusts .state without checking .status first.
+      if (dinReadings[i].valid) di["state"] = dinReadings[i].state;
+      else                      di["state"] = nullptr;
       di["status"] = dinReadings[i].status;
       // Pulse Counter Mode (pulse.h) — computed fresh here (cheap, no
       // bus I/O) rather than reusing a stored value, same as buildPayload().
@@ -1151,7 +1160,8 @@ static void handleApiDigital() {
       }
       JsonObject dop = dout.createNestedObject();
       dop["ch"] = i;
-      dop["state"] = doutReadings[i].state;
+      if (doutReadings[i].valid) dop["state"] = doutReadings[i].state;
+      else                       dop["state"] = nullptr;
       dop["status"] = doutReadings[i].status;
     }
     xSemaphoreGive(_mtx);

@@ -1,8 +1,24 @@
 # Rig Module Firmware — Waveshare ESP32-S3-RS485-CAN
 
-**Version:** rig-module-1.11.0
+**Version:** rig-module-1.11.1
 **Board:** Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, screw terminal)
 **Target:** Waveshare Modbus RTU Analog Input 8CH (B) or Eletechsup AMIDJ14 — auto-detected, same as LilyGo variant.
+
+## Bug fix (v1.11.1): DI/DO stuck showing stale ON/OFF after Modbus dropout
+
+If the RS485/Modbus link went down (bus unplugged, board powered off,
+etc.), a digital input or output would keep reporting its **last known
+ON/OFF state forever** — on raw Serial output, in the JSON payload sent
+to the Pi, and via `/api/digital` — even though `status` correctly said
+`"stale"` right next to it. Root cause: on a failed DI/DO poll, only
+`.status` was set to `"stale"`; `.valid` (which every consumer actually
+checks before trusting `.state`) was left at whatever it was on the
+last successful read. The `/digital` web page itself was unaffected —
+its JS already checked `status!=='ok'` before displaying state — but
+anything reading raw state directly (Serial, the Pi payload,
+`/api/digital`) could be fooled. Fixed by clearing `.valid` alongside
+`.status` on every failed poll, for both the primary board's DI/DO and
+any Advanced/hidden extra boards.
 
 ## RPM / Pulse Counter Mode (v1.10.0+) — AMIDJ14 Digital Inputs only
 

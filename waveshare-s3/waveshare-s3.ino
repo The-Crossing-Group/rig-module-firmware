@@ -970,6 +970,16 @@ void pollTask(void* param) {
             dinReadings[i].state  = din[i];
             dinReadings[i].status = "ok";
           } else {
+            // BUG FIX (2026-08-21, Sarah): a failed read left .valid still
+            // true from the last successful poll, so every consumer that
+            // checks .valid before trusting .state (Serial debug print,
+            // /live, /api/digital, the JSON payload) kept reporting the
+            // stale ON/OFF value forever after the Modbus bus went away —
+            // .status correctly said "stale" right next to it, but nothing
+            // actually looked at .status to decide whether .state was
+            // trustworthy. Same fix as the analog channels a few lines up
+            // (readings[ch].valid = false on failure) — now DI mirrors that.
+            dinReadings[i].valid  = false;
             dinReadings[i].status = "stale";
           }
           if (doOk) {
@@ -977,6 +987,7 @@ void pollTask(void* param) {
             doutReadings[i].state  = dout[i];
             doutReadings[i].status = "ok";
           } else {
+            doutReadings[i].valid  = false;
             doutReadings[i].status = "stale";
           }
         }
@@ -1006,6 +1017,8 @@ void pollTask(void* param) {
               extraDinReadings[b][i].state  = extraDin[b][i];
               extraDinReadings[b][i].status = "ok";
             } else {
+              // Same stale-state bug fix as the primary board's DI above.
+              extraDinReadings[b][i].valid  = false;
               extraDinReadings[b][i].status = "stale";
             }
             if (extraDoOk[b]) {
@@ -1013,6 +1026,7 @@ void pollTask(void* param) {
               extraDoutReadings[b][i].state  = extraDout[b][i];
               extraDoutReadings[b][i].status = "ok";
             } else {
+              extraDoutReadings[b][i].valid  = false;
               extraDoutReadings[b][i].status = "stale";
             }
           }

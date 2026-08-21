@@ -1,6 +1,6 @@
 # Rig Module Firmware — LilyGo T-CAN485 (Bench Testing)
 
-**Version:** rig-module-1.11.0
+**Version:** rig-module-1.11.1
 **Board:** LilyGo T-CAN485 / XY-32 CAN+RS485 (plain ESP32, WROOM-32)
 **Target:** Waveshare Modbus RTU Analog Input 8CH (B) or Eletechsup AMIDJ14 — auto-detected.
 
