@@ -1,0 +1,554 @@
+// =============================================================================
+// modbus.h — Manual Modbus RTU over HardwareSerial (RS485)
+//
+// Uses direct HardwareSerial with DE/RE pin toggling.
+// No external Modbus library needed — avoids DE timing issues.
+// =============================================================================
+#pragma once
+#include <Arduino.h>
+
+static int _RS485_DE_PIN = -1;
+static HardwareSerial* _mbSerial = nullptr;
+
+// CRC16 for Modbus RTU
+static uint16_t modbusCRC(const uint8_t* buf, int len) {
+  uint16_t crc = 0xFFFF;
+  for (int i = 0; i < len; i++) {
+    crc ^= (uint16_t)buf[i];
+    for (int j = 0; j < 8; j++) {
+      if (crc & 1) crc = (crc >> 1) ^ 0xA001;
+      else         crc >>= 1;
+    }
+  }
+  return crc;
+}
+
+// Init RS485
+// baud: configurable from the webUI (/config, "RS485 Baud Rate") — different
+// analog-to-Modbus boards ship with different factory defaults (Waveshare
+// 8AI (B) = 9600bps, SDSIN SN-3002 clone = 4800bps), so this is NOT hardcoded.
+void modbusInit(int rxPin, int txPin, int dePin, uint32_t baud) {
+  _RS485_DE_PIN = dePin;
+  pinMode(dePin, OUTPUT);
+  digitalWrite(dePin, LOW); // receive mode by default
+
+  _mbSerial = &Serial2;
+  _mbSerial->begin(baud, SERIAL_8N1, rxPin, txPin);
+  Serial.printf("[Modbus] Init on Serial2 RX=%d TX=%d DE=%d baud=%u\n", rxPin, txPin, dePin, baud);
+}
+
+// Send bytes, toggle DE high during TX. `quiet=true` skips the hex-dump
+// Serial print — used by the DI pulse-counter fast-poll loop (webui.h/
+// waveshare-s3.ino "Pulse Counter Mode"), which hammers this as fast as
+// the bus allows; printing every single TX/RX at that rate would flood
+// Serial and (worse) the printf() calls themselves would slow the loop
+// down enough to hurt the exact timing accuracy the feature depends on.
+// Every other caller is unaffected (defaults to the old always-print
+// behavior).
+static void modbusSend(const uint8_t* buf, int len, bool quiet = false) {
+  if (!quiet) {
+    Serial.printf("[RS485] TX (%d bytes):", len);
+    for (int i = 0; i < len; i++) Serial.printf(" %02X", buf[i]);
+    Serial.println();
+  }
+
+  digitalWrite(_RS485_DE_PIN, HIGH);
+  delayMicroseconds(100); // DE propagation delay
+  _mbSerial->write(buf, len);
+  _mbSerial->flush(); // wait for TX to complete
+  delayMicroseconds(100);
+  digitalWrite(_RS485_DE_PIN, LOW); // back to receive
+}
+
+// Read response with timeout (ms). See modbusSend() above re: `quiet`.
+static int modbusReceive(uint8_t* buf, int maxLen, int timeoutMs, bool quiet = false) {
+  unsigned long deadline = millis() + timeoutMs;
+  int n = 0;
+  while (millis() < deadline && n < maxLen) {
+    if (_mbSerial->available()) {
+      buf[n++] = _mbSerial->read();
+      deadline = millis() + 20; // inter-byte timeout 20ms
+    }
+  }
+  if (!quiet) {
+    if (n > 0) {
+      Serial.printf("[RS485] RX (%d bytes):", n);
+      for (int i = 0; i < n; i++) Serial.printf(" %02X", buf[i]);
+      Serial.println();
+    } else {
+      Serial.println("[RS485] RX: no bytes received");
+    }
+  }
+  return n;
+}
+
+// FC04 — Read Input Registers
+// Returns true on success, fills regValues[count]
+bool modbusReadInputRegs(uint8_t slaveId, uint16_t startAddr, uint8_t count, uint16_t* regValues) {
+  if (!_mbSerial) return false;
+
+  // Flush RX
+  while (_mbSerial->available()) _mbSerial->read();
+
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x04;             // FC04
+  req[2] = startAddr >> 8;
+  req[3] = startAddr & 0xFF;
+  req[4] = 0x00;
+  req[5] = count;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  modbusSend(req, 8);
+
+  // Expected response: slaveId + 0x04 + byteCount + (count*2 bytes) + CRC
+  int expectedLen = 3 + count * 2 + 2;
+  uint8_t resp[64];
+  int n = modbusReceive(resp, expectedLen, 300);
+
+  if (n < expectedLen) {
+    Serial.printf("[Modbus] FC04 timeout: got %d, expected %d\n", n, expectedLen);
+    return false;
+  }
+
+  // Validate CRC
+  uint16_t rxCrc = resp[n-2] | ((uint16_t)resp[n-1] << 8);
+  uint16_t calcCrc = modbusCRC(resp, n-2);
+  if (rxCrc != calcCrc) {
+    Serial.printf("[Modbus] CRC error: got %04X, calc %04X\n", rxCrc, calcCrc);
+    return false;
+  }
+
+  // Validate function code
+  if (resp[0] != slaveId || resp[1] != 0x04) {
+    Serial.printf("[Modbus] Bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
+    return false;
+  }
+
+  // Extract register values
+  for (int i = 0; i < count; i++) {
+    regValues[i] = ((uint16_t)resp[3 + i*2] << 8) | resp[4 + i*2];
+  }
+  return true;
+}
+
+// FC16 — Write Multiple Holding Registers
+bool modbusWriteMultiple(uint8_t slaveId, uint16_t startAddr, uint8_t count, uint16_t* values) {
+  if (!_mbSerial) return false;
+
+  while (_mbSerial->available()) _mbSerial->read();
+
+  int pduLen = 7 + count * 2;
+  uint8_t req[32];
+  req[0] = slaveId;
+  req[1] = 0x10;             // FC16
+  req[2] = startAddr >> 8;
+  req[3] = startAddr & 0xFF;
+  req[4] = 0x00;
+  req[5] = count;
+  req[6] = count * 2;        // byte count
+  for (int i = 0; i < count; i++) {
+    req[7 + i*2]     = values[i] >> 8;
+    req[7 + i*2 + 1] = values[i] & 0xFF;
+  }
+  uint16_t crc = modbusCRC(req, pduLen);
+  req[pduLen]     = crc & 0xFF;
+  req[pduLen + 1] = crc >> 8;
+
+  modbusSend(req, pduLen + 2);
+
+  // Response: slaveId + 0x10 + startAddr(2) + count(2) + CRC(2) = 8 bytes
+  uint8_t resp[16];
+  int n = modbusReceive(resp, 8, 300);
+
+  if (n < 8) {
+    Serial.printf("[Modbus] FC16 timeout: got %d\n", n);
+    return false;
+  }
+
+  uint16_t rxCrc   = resp[6] | ((uint16_t)resp[7] << 8);
+  uint16_t calcCrc = modbusCRC(resp, 6);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x10) {
+    Serial.println("[Modbus] FC16 bad response");
+    return false;
+  }
+  return true;
+}
+
+// FC02 — Read Discrete Inputs
+// Returns true on success, fills bits[count] with 0/1 (one bool per input)
+// `quiet`/`timeoutMs`: used by the DI pulse-counter fast-poll loop (see
+// modbusSend()/modbusReceive() above) to hammer a single DI as fast as
+// possible without flooding Serial, and with a shorter timeout than the
+// normal 300ms default (still generous for a healthy bus, but a fast-poll
+// loop calling this hundreds of times a second can't afford to eat a
+// full 300ms stall on every single missed/slow response).
+bool modbusReadDiscreteInputs(uint8_t slaveId, uint16_t startAddr, uint8_t count, bool* bits,
+                               bool quiet = false, int timeoutMs = 300) {
+  if (!_mbSerial) return false;
+
+  while (_mbSerial->available()) _mbSerial->read();
+
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x02;             // FC02
+  req[2] = startAddr >> 8;
+  req[3] = startAddr & 0xFF;
+  req[4] = 0x00;
+  req[5] = count;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  modbusSend(req, 8, quiet);
+
+  // Response: slaveId + 0x02 + byteCount + packed bits + CRC(2)
+  uint8_t byteCount = (count + 7) / 8;
+  int expectedLen = 3 + byteCount + 2;
+  uint8_t resp[16];
+  int n = modbusReceive(resp, expectedLen, timeoutMs, quiet);
+
+  if (n < expectedLen) {
+    if (!quiet) Serial.printf("[Modbus] FC02 timeout: got %d, expected %d\n", n, expectedLen);
+    return false;
+  }
+
+  uint16_t rxCrc   = resp[n-2] | ((uint16_t)resp[n-1] << 8);
+  uint16_t calcCrc = modbusCRC(resp, n-2);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x02) {
+    if (!quiet) Serial.printf("[Modbus] FC02 bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
+    return false;
+  }
+
+  for (int i = 0; i < count; i++) {
+    uint8_t byteIdx = i / 8;
+    uint8_t bitIdx  = i % 8;
+    bits[i] = (resp[3 + byteIdx] >> bitIdx) & 0x01;
+  }
+  return true;
+}
+
+// FC01 — Read Coils
+// Returns true on success, fills bits[count] with 0/1 (one bool per coil)
+bool modbusReadCoils(uint8_t slaveId, uint16_t startAddr, uint8_t count, bool* bits) {
+  if (!_mbSerial) return false;
+
+  while (_mbSerial->available()) _mbSerial->read();
+
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x01;             // FC01
+  req[2] = startAddr >> 8;
+  req[3] = startAddr & 0xFF;
+  req[4] = 0x00;
+  req[5] = count;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  modbusSend(req, 8);
+
+  uint8_t byteCount = (count + 7) / 8;
+  int expectedLen = 3 + byteCount + 2;
+  uint8_t resp[16];
+  int n = modbusReceive(resp, expectedLen, 300);
+
+  if (n < expectedLen) {
+    Serial.printf("[Modbus] FC01 timeout: got %d, expected %d\n", n, expectedLen);
+    return false;
+  }
+
+  uint16_t rxCrc   = resp[n-2] | ((uint16_t)resp[n-1] << 8);
+  uint16_t calcCrc = modbusCRC(resp, n-2);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x01) {
+    Serial.printf("[Modbus] FC01 bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
+    return false;
+  }
+
+  for (int i = 0; i < count; i++) {
+    uint8_t byteIdx = i / 8;
+    uint8_t bitIdx  = i % 8;
+    bits[i] = (resp[3 + byteIdx] >> bitIdx) & 0x01;
+  }
+  return true;
+}
+
+// FC05 — Write Single Coil. value: true=ON (0xFF00), false=OFF (0x0000)
+bool modbusWriteCoil(uint8_t slaveId, uint16_t coilAddr, bool value) {
+  if (!_mbSerial) return false;
+
+  while (_mbSerial->available()) _mbSerial->read();
+
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x05;             // FC05
+  req[2] = coilAddr >> 8;
+  req[3] = coilAddr & 0xFF;
+  req[4] = value ? 0xFF : 0x00;
+  req[5] = 0x00;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  modbusSend(req, 8);
+
+  // Echo response: slaveId + 0x05 + addr(2) + value(2) + CRC(2) = 8 bytes
+  uint8_t resp[16];
+  int n = modbusReceive(resp, 8, 300);
+
+  if (n < 8) {
+    Serial.printf("[Modbus] FC05 timeout: got %d\n", n);
+    return false;
+  }
+
+  uint16_t rxCrc   = resp[6] | ((uint16_t)resp[7] << 8);
+  uint16_t calcCrc = modbusCRC(resp, 6);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x05) {
+    Serial.printf("[Modbus] FC05 bad response: slave=%02X fc=%02X\n", resp[0], resp[1]);
+    return false;
+  }
+  return true;
+}
+
+// Convenience: read the board's analog input channels. numChannels lets a
+// board with fewer real channels (e.g. the Eletechsup AMIDJ14 only has 6,
+// vs. 8 on the original board this firmware targeted) be read without
+// requesting registers past what it actually implements — asking for more
+// registers than a board has causes it to return a Modbus exception or no
+// response at all, which would otherwise fail the ENTIRE read (all 8
+// channels going stale) just because channels 6/7 don't exist on that
+// hardware. Any channels beyond numChannels are zero-filled (reads as
+// "open circuit", same as a real unwired channel — a reasonable default
+// for "this channel doesn't exist on this board").
+bool modbusReadAll(uint8_t slaveId, uint16_t* raw8, int numChannels = 8) {
+  if (numChannels > 8) numChannels = 8;
+  if (numChannels < 1) numChannels = 1;
+  for (int i = numChannels; i < 8; i++) raw8[i] = 0;
+  return modbusReadInputRegs(slaveId, 0x0000, (uint8_t)numChannels, raw8);
+}
+
+// AMIDJ14 digital I/O addresses — confirmed against real Modbus Poll
+// register captures for this board. DI is 0-based, DO is 1-based (not a
+// typo — the board's own coil numbering genuinely starts at 1 for outputs).
+static const uint16_t AMIDJ14_DI_START = 0; // DI1=0, DI2=1, DI3=2, DI4=3 (FC02)
+static const uint16_t AMIDJ14_DO_START = 1; // DO1=1, DO2=2, DO3=3, DO4=4 (FC01/FC05)
+
+// Convenience: read all 4 digital inputs in one FC02 request.
+bool modbusReadAllDI(uint8_t slaveId, bool* din4) {
+  return modbusReadDiscreteInputs(slaveId, AMIDJ14_DI_START, 4, din4);
+}
+
+// Convenience: read a SINGLE digital input — used by the DI pulse-
+// counter fast-poll loop (webui.h/waveshare-s3.ino "Pulse Counter Mode"),
+// which only cares about one DI's transitions at a time and wants each
+// round-trip as short as possible (1 bit vs. 4) since round-trip time
+// directly caps the highest RPM this method can measure without aliasing.
+bool modbusReadOneDI(uint8_t slaveId, int diIndex, bool* state, bool quiet = true, int timeoutMs = 60) {
+  return modbusReadDiscreteInputs(slaveId, AMIDJ14_DI_START + diIndex, 1, state, quiet, timeoutMs);
+}
+
+// Convenience: read all 4 digital outputs' current state in one FC01 request.
+bool modbusReadAllDO(uint8_t slaveId, bool* dout4) {
+  return modbusReadCoils(slaveId, AMIDJ14_DO_START, 4, dout4);
+}
+
+// Convenience: write one digital output. doIndex is 0-3 (DO1-DO4).
+bool modbusWriteDO(uint8_t slaveId, int doIndex, bool value) {
+  if (doIndex < 0 || doIndex > 3) return false;
+  return modbusWriteCoil(slaveId, AMIDJ14_DO_START + doIndex, value);
+}
+
+// =============================================================================
+// BOARD AUTO-DETECTION
+//
+// Different analog-to-Modbus boards use a different raw-value scale and a
+// different channel count, but ALL of them we support expose the same
+// "Product ID" special-function register at 0x00F7 (247) — reading it via
+// FC03 identifies the connected board with no jumpers, dropdown, or manual
+// selection needed at all:
+//   0 (or read fails)  -> unknown/legacy -> assume Waveshare (safe default,
+//                         matches every board this firmware originally
+//                         targeted before Product ID detection existed)
+//   2308               -> Waveshare 8AI (B):  8ch, raw is µA          (/1000)
+//   2814               -> Eletechsup AMIDJ14: 6ch, raw is 0.01mA      (/100)
+// Add more SKUs here as needed — this table is the ONLY place board-
+// specific behavior needs to be taught to the firmware; scaleChannel() and
+// the poll task just consume the resulting BoardProfile.
+// =============================================================================
+struct BoardProfile {
+  const char* name;
+  int   numChannels;
+  float rawDivisor;    // raw register value / rawDivisor = mA
+  // AMIDJ14 also exposes 4 digital inputs (FC02, addr 0-3) and 4 digital
+  // outputs (FC01/FC05, addr 1-4) alongside its 6 analog channels — the
+  // Waveshare 8AI board has no such hardware, so this stays false for it
+  // and the poll task/webUI simply skip digital I/O entirely.
+  bool  hasDigitalIO;
+};
+
+static const BoardProfile BOARD_WAVESHARE_8AI  = { "Waveshare 8AI (B)",  8, 1000.0f, false };
+static const BoardProfile BOARD_ELETECHSUP_AMIDJ14 = { "Eletechsup AMIDJ14", 6, 100.0f, true };
+
+// Resolves an ExtraBoardConfig.boardType string ("amidj14"/"waveshare") to
+// its BoardProfile. Used for extra/advanced boards, which are explicitly
+// typed by whoever wired them up rather than auto-probed like the primary
+// board (see config.h ExtraBoardConfig — deliberately no "auto" option
+// there to keep the advanced feature simple and predictable).
+BoardProfile boardProfileForType(const String& boardType) {
+  if (boardType == "waveshare") return BOARD_WAVESHARE_8AI;
+  return BOARD_ELETECHSUP_AMIDJ14; // default
+}
+// Used when the Product ID probe gets no/bad response at all (bus not
+// wired up yet, wrong baud, board unpowered) — deliberately shows
+// EVERYTHING (8 analog channels + digital I/O) rather than silently
+// defaulting to Waveshare's narrower profile. That old default meant the
+// /digital page would say "no digital I/O on this board" any time the
+// bus was simply unplugged or mis-wired, which looks exactly like "this
+// firmware doesn't support your board" instead of "check your wiring" —
+// showing every option during setup/debugging makes it obvious it's a
+// wiring problem, not a missing feature. Once the probe actually gets a
+// good response, this doesn't apply — a real Waveshare board still
+// detects correctly as BOARD_WAVESHARE_8AI as before.
+static const BoardProfile BOARD_UNKNOWN = { "Unknown (no response — check wiring)", 8, 1000.0f, true };
+
+// Reads special-function register 0x00F7 (Product ID) via FC03. Returns the
+// matching BoardProfile, or BOARD_UNKNOWN (everything enabled) if the read
+// fails (unplugged bus, board without this register, wrong baud, etc.) or
+// returns an ID we don't recognize yet.
+BoardProfile modbusDetectBoard(uint8_t slaveId) {
+  if (!_mbSerial) return BOARD_UNKNOWN;
+
+  while (_mbSerial->available()) _mbSerial->read();
+
+  uint8_t req[8];
+  req[0] = slaveId;
+  req[1] = 0x03;             // FC03 — read holding/special-function registers
+  req[2] = 0x00;
+  req[3] = 0xF7;             // register 247 = Product ID
+  req[4] = 0x00;
+  req[5] = 0x01;              // read 1 register
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF;
+  req[7] = crc >> 8;
+
+  modbusSend(req, 8);
+
+  uint8_t resp[16];
+  int n = modbusReceive(resp, 7, 300); // slave+fc+len+2 data+2 CRC = 7 bytes
+
+  if (n < 7) {
+    Serial.println("[Modbus] Board ID probe: no/short response — check wiring/baud/power. Showing all channels + digital I/O so nothing's hidden while you sort it out.");
+    return BOARD_UNKNOWN;
+  }
+  uint16_t rxCrc   = resp[n-2] | ((uint16_t)resp[n-1] << 8);
+  uint16_t calcCrc = modbusCRC(resp, n-2);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x03) {
+    Serial.println("[Modbus] Board ID probe: bad response — check wiring/baud/power. Showing all channels + digital I/O so nothing's hidden while you sort it out.");
+    return BOARD_UNKNOWN;
+  }
+
+  uint16_t productId = ((uint16_t)resp[3] << 8) | resp[4];
+  Serial.printf("[Modbus] Board ID probe: Product ID register = %u\n", productId);
+
+  switch (productId) {
+    case 2308: return BOARD_WAVESHARE_8AI;
+    case 2814: return BOARD_ELETECHSUP_AMIDJ14;
+    default:
+      Serial.printf("[Modbus] Unrecognized Product ID %u — showing all channels + digital I/O\n", productId);
+      return BOARD_UNKNOWN;
+  }
+}
+
+// =============================================================================
+// BAUD RATE AUTO-DETECTION
+//
+// Instead of guessing, actually probe the bus: try each standard baud rate
+// in turn, sending a real FC04 read at each and checking for a CRC-valid,
+// correctly-addressed response. Whichever baud gets a real answer from the
+// board is the right one. Order is most-likely-first based on the boards we
+// support (Waveshare 8AI (B) = 9600, SDSIN SN-3002 clone = 4800), covering
+// the full standard Modbus RTU range so any board just works.
+//
+// Reuses the already-open Serial2 (no re-init/pin changes) via
+// updateBaudRate() — safe to call any time after modbusInit(). Restores the
+// original baud if nothing answers, so a failed scan never leaves the bus
+// worse off than before.
+// =============================================================================
+static const uint32_t MODBUS_AUTODETECT_BAUDS[] = {
+  9600, 4800, 19200, 2400, 38400, 1200, 57600, 115200
+};
+static const int MODBUS_AUTODETECT_BAUDS_COUNT =
+  sizeof(MODBUS_AUTODETECT_BAUDS) / sizeof(MODBUS_AUTODETECT_BAUDS[0]);
+
+long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud) {
+  if (!_mbSerial) return -1;
+  Serial.println("[Modbus] ---- Auto-detecting baud rate ----");
+  for (int i = 0; i < MODBUS_AUTODETECT_BAUDS_COUNT; i++) {
+    uint32_t tryBaud = MODBUS_AUTODETECT_BAUDS[i];
+    Serial.printf("[Modbus]   Trying %u baud...\n", tryBaud);
+    _mbSerial->flush();
+    _mbSerial->updateBaudRate(tryBaud);
+    delay(20); // let the UART settle at the new rate before probing
+
+    // Read just 1 register — enough to confirm a real Modbus device is
+    // answering, cheaper/faster than a full 8-register probe per baud.
+    uint16_t regs[1];
+    bool ok = false;
+    // A couple of quick attempts per baud — occasionally the first probe
+    // right after a rate change gets missed by the board.
+    for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+      ok = modbusReadInputRegs(slaveId, 0x0000, 1, regs);
+    }
+    if (ok) {
+      Serial.printf("[Modbus] Auto-detect SUCCESS at %u baud (reg0=%u)\n", tryBaud, regs[0]);
+      return (long)tryBaud;
+    }
+  }
+  Serial.println("[Modbus] Auto-detect found nothing at any baud — restoring original");
+  _mbSerial->flush();
+  _mbSerial->updateBaudRate(originalBaud);
+  delay(20);
+  return -1;
+}
+
+// =============================================================================
+// SLAVE ID BUS SCAN (Advanced / hidden — /advanced page)
+//
+// Sanity-check tool for multi-board setups: probes addresses 1..maxAddr at
+// the CURRENT baud rate and reports which ones actually answer, plus their
+// Product ID (0x00F7) if it identifies as a known board. Exists so that if
+// a slave ID gets fat-fingered on /advanced (typo, duplicate address,
+// forgot which address a board was set to), it's a one-click way to see
+// what's really out there on the wire instead of guessing/re-wiring to
+// check.
+//
+// Synchronous/blocking — probes at ~300ms timeout per address, so a full
+// 1-247 scan can take over a minute. Caller (web handler) should cap
+// maxAddr to something reasonable for interactive use (default 32, covers
+// every sane multi-board setup) and MUST hold modbusBusMutex for the
+// whole call so the poll task can't interleave a read on top of it.
+//
+// Calls onFound(addr, productIdOrMinus1) for every address that answers a
+// basic FC04 read of register 0 — productIdOrMinus1 is the board's Product
+// ID (via a follow-up FC03 read of 0x00F7) if that also succeeds, or -1 if
+// the board answered analog reads but not the ID register (older/unknown
+// board — still a real device at that address, just unidentified).
+template<typename FoundFn>
+void modbusScanSlaves(int maxAddr, FoundFn onFound, int timeoutMs = 300) {
+  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr > 247) maxAddr = 247;
+  uint16_t regs[1];
+  for (int addr = 1; addr <= maxAddr; addr++) {
+    if (modbusReadInputRegs((uint8_t)addr, 0x0000, 1, regs)) {
+      // Got a live device — try to identify it via the Product ID
+      // register too (best-effort, doesn't affect the "found" result).
+      BoardProfile p = modbusDetectBoard((uint8_t)addr);
+      int productId = -1;
+      if (String(p.name) == BOARD_WAVESHARE_8AI.name) productId = 2308;
+      else if (String(p.name) == BOARD_ELETECHSUP_AMIDJ14.name) productId = 2814;
+      onFound(addr, productId);
+    }
+  }
+}
