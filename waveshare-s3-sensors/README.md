@@ -93,6 +93,37 @@ each.
    tool's sniffer if needed), set endianness/signedness/scale, save.
 3. Confirm on **/live** or the signal's own live readout on **/can**.
 
+## CANopen Bridge mode (2026-09-08)
+
+For encoders/sensors that stay factory-silent until they receive a real
+CANopen bring-up (SYNC/baud-detect + NMT Start) — confirmed necessary for
+the ditchwitch-logger project's EPC carriage-position encoder, see that
+project's `can_listener.py` for the same sequence. This mode:
+
+1. Switches the CAN controller from listen-only to **transmit-capable**
+   (`TWAI_MODE_NORMAL`) — only turn this on if you actually own the wire
+   you're plugged into, not a shared/tapped bus you don't control.
+2. Sends the bring-up sequence once at boot, and automatically retries
+   every 30s if no traffic has been seen (self-heal, same philosophy as
+   this firmware's WiFi/NVS self-heals — harmless if the encoder was
+   fine all along).
+3. Relays every raw CAN frame it captures to the Pi as a `canFrames[]`
+   array in the normal POST payload — **no decode happens on this
+   board.** Decode (J1939/CANopen interpretation) stays on the Pi side,
+   which already has tested logic for it — this board doesn't guess at
+   an unconfirmed byte layout.
+
+Enable on **/** under CAN Bus: check **CANopen Bridge**, set the
+**Encoder Node ID** (hex, default `7F` = EPC factory default), leave
+**target specific node** unchecked unless you specifically need to
+target one node instead of broadcasting (0x00 broadcast is the
+confirmed-working default). Save — this reboots the board, same as any
+other CAN setting change.
+
+CLI equivalent: `cm set copbr 1`, `cm set copnode 7F`, `sv`, `rb`. Use
+`cm bringup` to re-run the sequence on demand without a reboot (handy
+after power-cycling just the encoder, not this board).
+
 ## Wire format (Pi ingest)
 
 Same endpoint and shape as every other rig-module variant
@@ -104,6 +135,12 @@ needed**:
   enabled on that sensor.
 - CAN signals appear under a separate `canSignals[]` array, plus top-level
   `canEnabled`/`canFrameRate`/`canFrameTotal`.
+- **CANopen Bridge mode only:** raw captured frames also appear under a
+  `canFrames[]` array (`id`/`extended`/`dlc`/`data_hex`/`ms`) — new for
+  this mode, NOT part of the wire format other rig-module variants send.
+  A receiving Pi app that doesn't know this key can just ignore it (see
+  ditchwitch-logger's `local_server.py` for the one app that currently
+  reads it).
 
 ## Hardware
 

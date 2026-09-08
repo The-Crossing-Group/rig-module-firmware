@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.14.1"
+#define FW_VERSION "rig-module-sensors-1.15.0"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -186,6 +186,19 @@ struct ModuleConfig {
   bool   canEnabled     = false; // CAN controller only starts if this is on
   long   canBitrate     = 250000; // 250k = most common (J1939/drill CAN); 500k also common
 
+  // --- CANopen Bridge mode (2026-09-08) -------------------------------
+  // This board sits on the encoder's own dedicated CAN wire (not shared
+  // drill traffic) and has to actively wake it up — see can.h's header
+  // comment for the full story. Default false: canEnabled alone still
+  // means "safe passive listen-only tap", exactly like before. Turning
+  // THIS on additionally switches the TWAI driver to a transmit-capable
+  // mode and runs the CANopen bring-up sequence — only enable it on a
+  // bus you're actually supposed to be transmitting on.
+  bool   canopenBridge         = false;
+  uint8_t canopenNodeId        = 0x7F;  // EPC CANopen encoder factory default (confirmed)
+  bool   canopenTargetSpecific = false; // false = NMT Start targets "all nodes" (confirmed
+                                          // working on bench, the safe default)
+
   SensorConfig    sensors[MAX_SENSORS];
   CanSignalConfig canSignals[MAX_CAN_SIGNALS];
 };
@@ -215,6 +228,9 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.wifiPass      = p.getString("wifiPass", "");
   c.canEnabled    = p.getBool("canEn", false);
   c.canBitrate    = p.getLong("canBit", 250000);
+  c.canopenBridge = p.getBool("copBr", false);
+  c.canopenNodeId = (uint8_t)p.getInt("copNode", 0x7F);
+  c.canopenTargetSpecific = p.getBool("copTgtSp", false);
 
   for (int i = 0; i < MAX_SENSORS; i++) {
     String pre = "s" + String(i) + "_";
@@ -316,6 +332,9 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   p.putString("wifiPass", c.wifiPass);
   p.putBool("canEn", c.canEnabled);
   p.putLong("canBit", c.canBitrate);
+  p.putBool("copBr", c.canopenBridge);
+  p.putInt("copNode", c.canopenNodeId);
+  p.putBool("copTgtSp", c.canopenTargetSpecific);
 
   for (int i = 0; i < MAX_SENSORS; i++) {
     String pre = "s" + String(i) + "_";

@@ -122,6 +122,10 @@ static void _cliCmHelp() {
     "  cm set baud <rate>       RS485 baud (also sets baudManuallySet)\n"
     "  cm set canen <0|1>       CAN enable\n"
     "  cm set canbit <rate>     CAN bitrate (125000/250000/500000/1000000)\n"
+    "  cm set copbr <0|1>       CANopen Bridge (transmit bring-up, wake encoder)\n"
+    "  cm set copnode <hex>     encoder node ID, e.g. 7F\n"
+    "  cm set coptgt <0|1>      target specific node (0 = broadcast, confirmed default)\n"
+    "  cm bringup               re-run CANopen bring-up right now (no reboot)\n"
   ));
 }
 
@@ -234,6 +238,19 @@ static void _cliCm(String* tok, int n) {
     Serial.printf("baud   : %ld (manually set: %s)\n", cfg.modbusBaud, cfg.baudManuallySet ? "yes" : "no");
     Serial.printf("canen  : %s\n", cfg.canEnabled ? "1" : "0");
     Serial.printf("canbit : %ld\n", cfg.canBitrate);
+    Serial.printf("copbr  : %s\n", cfg.canopenBridge ? "1" : "0");
+    Serial.printf("copnode: 0x%02X\n", cfg.canopenNodeId);
+    Serial.printf("coptgt : %s\n", cfg.canopenTargetSpecific ? "1" : "0");
+    return;
+  }
+  if (tok[1] == "bringup") {
+    if (!cfg.canEnabled || !cfg.canopenBridge) {
+      _cliErr("CAN Bridge not enabled — set canen 1 and copbr 1, save, and reboot first");
+      return;
+    }
+    Serial.println("[cli] Re-running CANopen bring-up now...");
+    canopenBringup(cfg.canopenNodeId, cfg.canopenTargetSpecific);
+    Serial.println("[cli] Done.");
     return;
   }
   if (tok[1] == "set") {
@@ -255,8 +272,11 @@ static void _cliCm(String* tok, int n) {
       cfg.baudManuallySet = true;
       _cliOk("RS485 baud (locked — auto-detect won't override)");
     }
-    else if (field == "canen") { cfg.canEnabled = _cliBoolVal(val); _cliOk("CAN enable"); }
-    else if (field == "canbit") { cfg.canBitrate = val.toInt(); _cliOk("CAN bitrate"); }
+    else if (field == "canen") { cfg.canEnabled = _cliBoolVal(val); _cliOk("CAN enable (reboot to apply)"); }
+    else if (field == "canbit") { cfg.canBitrate = val.toInt(); _cliOk("CAN bitrate (reboot to apply)"); }
+    else if (field == "copbr") { cfg.canopenBridge = _cliBoolVal(val); _cliOk("CANopen Bridge (reboot to apply)"); }
+    else if (field == "copnode") { cfg.canopenNodeId = (uint8_t)strtol(val.c_str(), nullptr, 16); _cliOk("encoder node ID"); }
+    else if (field == "coptgt") { cfg.canopenTargetSpecific = _cliBoolVal(val); _cliOk("target specific node"); }
     else { _cliErr("unknown field: " + field); }
     return;
   }

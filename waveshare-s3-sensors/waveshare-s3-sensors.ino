@@ -171,11 +171,18 @@ void setup() {
   // Enable Now" button on /sensors if you ever need to find new ones.
 
   // CAN only comes up if explicitly enabled on the Config page — listen-
-  // only mode (see can.h), so an unconfigured/unused CAN bus is never
-  // touched at all unless you ask for it.
+  // only mode by default (see can.h), so an unconfigured/unused CAN bus
+  // is never touched at all unless you ask for it. canopenBridge on TOP
+  // of that switches to transmit-capable mode + runs CANopen bring-up
+  // (see can.h header comment) — this board's actual current job.
   if (cfg.canEnabled) {
-    Serial.printf("[BOOT] CAN pins: TX=%d RX=%d bitrate=%ld\n", CAN_TXD, CAN_RXD, cfg.canBitrate);
-    canStart(CAN_TXD, CAN_RXD, cfg.canBitrate);
+    bool bridgeMode = cfg.canopenBridge;
+    Serial.printf("[BOOT] CAN pins: TX=%d RX=%d bitrate=%ld mode=%s\n", CAN_TXD, CAN_RXD,
+      cfg.canBitrate, bridgeMode ? "CANopen Bridge (TX enabled)" : "listen-only");
+    canStart(CAN_TXD, CAN_RXD, cfg.canBitrate, /*listenOnly=*/!bridgeMode);
+    if (bridgeMode) {
+      canopenBringup(cfg.canopenNodeId, cfg.canopenTargetSpecific);
+    }
   } else {
     Serial.println("[BOOT] CAN disabled (enable on / to start it)");
   }
@@ -236,6 +243,13 @@ void loop() {
 
   // Drain any pending CAN frames — cheap no-op if CAN isn't enabled.
   canPoll(cfg, canReadings, stateMutex);
+
+  // CANopen Bridge self-heal — internally rate-limited, cheap no-op if
+  // canopenBridge is off or traffic is already flowing. See can.h's
+  // canopenBringupIfDue() comment.
+  if (cfg.canEnabled && cfg.canopenBridge) {
+    canopenBringupIfDue(cfg.canopenNodeId, cfg.canopenTargetSpecific);
+  }
 
   if (!apModeActive) {
     if (resolvedPiIp.isEmpty() || (millis() - lastPiResolve > 300000UL)) {
@@ -661,10 +675,19 @@ void pollTask(void* param) {
 // =============================================================================
 // BUILD JSON PAYLOAD
 // =============================================================================
+// Tracks the newest raw-frame millis() already included in a previous
+// POST, so canFrames below only ever sends NEW frames — see can.h's
+// canSerializeRecentFrames() comment for why this board's own millis()
+// is only used locally for this dedupe, never transmitted as a
+// timestamp (the PC times frames by its own receipt time instead).
+static unsigned long _lastCanFramesSentMs = 0;
+
 String buildPayload(bool bufferedFlag) {
   // Sized generously: up to MAX_SENSORS (16) + MAX_CAN_SIGNALS (16)
-  // entries, each with several fields + optional nested volume object.
-  DynamicJsonDocument doc(8192);
+  // entries, each with several fields + optional nested volume object,
+  // PLUS up to 40 raw CAN frames (canopenBridge mode) at ~50-60 bytes
+  // each once serialized.
+  DynamicJsonDocument doc(16384);
 
   doc["moduleId"] = cfg.moduleId;
   doc["type"]     = cfg.moduleType.isEmpty() ? "generic" : cfg.moduleType;
@@ -681,6 +704,17 @@ String buildPayload(bool bufferedFlag) {
   if (cfg.canEnabled) {
     doc["canFrameRate"] = canGetRecentFrameRate();
     doc["canFrameTotal"] = canGetFrameTotal();
+  }
+
+  // Raw CAN frame relay (CANopen Bridge mode only) — decode stays on the
+  // PC (ditchwitch-logger's can_listener.py, already handles both
+  // CANopen PDO and J1939-shaped frames), this board just forwards
+  // what's in the ring buffer since the last successful POST. Skipped
+  // entirely (no "canFrames" key at all) when not in bridge mode, same
+  // "don't touch what you didn't ask for" convention as canEnabled.
+  if (cfg.canEnabled && cfg.canopenBridge && !bufferedFlag) {
+    JsonArray frames = doc.createNestedArray("canFrames");
+    _lastCanFramesSentMs = canSerializeRecentFrames(frames, _lastCanFramesSentMs, 40);
   }
 
   if (ntpClient.isTimeSet() && ntpClient.getEpochTime() > 1000000000UL) {

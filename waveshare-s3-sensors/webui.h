@@ -201,7 +201,17 @@ static String cfgPage(ModuleConfig& cfg) {
     }
   }
   h += "</select>";
-  h += "<div class='small'>Listen-only.</div>";
+  h += "<div class='small'>Listen-only unless CANopen Bridge below is on.</div>";
+
+  h += "<label><input type='checkbox' name='canopenBridge'";
+  if (cfg.canopenBridge) h += " checked";
+  h += "> CANopen Bridge (transmit bring-up, wake the encoder)</label>";
+  h += "<div class='small'>Only for a bus you own — sends real frames.</div>";
+  h += "<label>Encoder Node ID (hex, e.g. 7F)</label><input name='canopenNodeId' value='" +
+       String(cfg.canopenNodeId, HEX) + "'>";
+  h += "<label><input type='checkbox' name='canopenTargetSpecific'";
+  if (cfg.canopenTargetSpecific) h += " checked";
+  h += "> Target specific node (unchecked = broadcast, confirmed working)</label>";
 
   h += "<h3>Pi Logger</h3>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
@@ -422,7 +432,9 @@ static String canPage(ModuleConfig& cfg) {
     h += "<div class='card' style='border-color:#f39c12'>CAN is currently <b>disabled</b>. Enable it on the "
          "<a href='/'>Config</a> page first.</div>";
   } else {
-    h += "<div class='card'>CAN running at " + String(cfg.canBitrate) + " bit/s, listen-only. "
+    h += "<div class='card'>CAN running at " + String(cfg.canBitrate) + " bit/s, " +
+         (cfg.canopenBridge ? "CANopen Bridge (transmitting bring-up, relaying raw frames to Pi)"
+                             : "listen-only") + ". "
          "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps.</div>";
   }
   h += "<p class='small'>Decodes a byte range from a specific CAN ID into a value.</p>";
@@ -549,7 +561,10 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<br><b>Module ID:</b> " + cfg.moduleId;
   h += "<br><b>MAC:</b> " + WiFi.macAddress();
   h += "<br><b>Chip:</b> " + String(ESP.getChipModel()) + " @ " + String(ESP.getCpuFreqMHz()) + "MHz";
-  h += "<br><b>CAN:</b> " + String(cfg.canEnabled ? ("enabled, " + String(cfg.canBitrate) + " bit/s") : "disabled") + "</div>";
+  h += "<br><b>CAN:</b> " + String(cfg.canEnabled ?
+    ("enabled, " + String(cfg.canBitrate) + " bit/s" +
+     (cfg.canopenBridge ? " (CANopen Bridge, node 0x" + String(cfg.canopenNodeId, HEX) + ")" : ", listen-only"))
+    : "disabled") + "</div>";
   {
     NvsStats st = getNvsStats();
     if (st.ok) {
@@ -798,6 +813,16 @@ static void handleConfig() {
   bool newCanEnabled = _srv->hasArg("canEnabled");
   if (newCanEnabled != _cfg->canEnabled) { _cfg->canEnabled = newCanEnabled; canChanged = true; }
   applyParam("canBitrate", [&](String v){ long nb = v.toInt(); if (nb != _cfg->canBitrate) { _cfg->canBitrate = nb; canChanged = true; } });
+  bool newCanopenBridge = _srv->hasArg("canopenBridge");
+  if (newCanopenBridge != _cfg->canopenBridge) { _cfg->canopenBridge = newCanopenBridge; canChanged = true; }
+  applyParam("canopenNodeId", [&](String v){
+    uint8_t nid = (uint8_t)strtol(v.c_str(), nullptr, 16);
+    if (nid != _cfg->canopenNodeId) { _cfg->canopenNodeId = nid; canChanged = true; }
+  });
+  bool newCanopenTargetSpecific = _srv->hasArg("canopenTargetSpecific");
+  if (newCanopenTargetSpecific != _cfg->canopenTargetSpecific) {
+    _cfg->canopenTargetSpecific = newCanopenTargetSpecific; canChanged = true;
+  }
 
   applyParam("pollIntervalS", [](String v){ _cfg->pollIntervalS = constrain(v.toInt(), 1, 30); });
   applyParam("piHost",        [](String v){ _cfg->piHost = v; });
