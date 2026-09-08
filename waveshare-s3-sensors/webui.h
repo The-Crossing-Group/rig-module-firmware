@@ -201,17 +201,26 @@ static String cfgPage(ModuleConfig& cfg) {
     }
   }
   h += "</select>";
-  h += "<div class='small'>Listen-only unless CANopen Bridge below is on.</div>";
+  h += "<div class='small'>Listen-only unless Carriage Position Sensor bridge below is on.</div>";
 
+  h += "<h3>Carriage Position Sensor (CANopen Encoder Bridge)</h3>";
+  h += "<div class='small'>This board's CAN link exists for one job right now: waking the "
+       "ditchwitch-logger carriage-position CANopen encoder and relaying its frames to the Pi "
+       "(decode happens there — see that project's <code>web/sensors.html</code>).</div>";
   h += "<label><input type='checkbox' name='canopenBridge'";
   if (cfg.canopenBridge) h += " checked";
-  h += "> CANopen Bridge (transmit bring-up, wake the encoder)</label>";
+  h += "> Enable bridge (transmit bring-up, wake the encoder)</label>";
   h += "<div class='small'>Only for a bus you own — sends real frames.</div>";
-  h += "<label>Encoder Node ID (hex, e.g. 7F)</label><input name='canopenNodeId' value='" +
+  h += "<label>Encoder Node ID (hex)</label><input name='canopenNodeId' value='" +
        String(cfg.canopenNodeId, HEX) + "'>";
+  h += "<div class='small'>Confirmed: EPC CANopen manual factory default = 0x7F — the only node "
+       "ever seen answering on this bus.</div>";
   h += "<label><input type='checkbox' name='canopenTargetSpecific'";
   if (cfg.canopenTargetSpecific) h += " checked";
   h += "> Target specific node (unchecked = broadcast, confirmed working)</label>";
+  h += "<div class='small'>Confirmed: encoder counts/rev = 16384 (EPC object 6001h factory "
+       "default 0x4000). Position-per-foot calibration is unconfirmed — set on the Pi's Sensor "
+       "Configuration page once the sensor is jogged a known distance, not here.</div>";
 
   h += "<h3>Pi Logger</h3>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
@@ -433,7 +442,7 @@ static String canPage(ModuleConfig& cfg) {
          "<a href='/'>Config</a> page first.</div>";
   } else {
     h += "<div class='card'>CAN running at " + String(cfg.canBitrate) + " bit/s, " +
-         (cfg.canopenBridge ? "CANopen Bridge (transmitting bring-up, relaying raw frames to Pi)"
+         (cfg.canopenBridge ? "Carriage Position Sensor bridge (transmitting bring-up, relaying raw frames to Pi)"
                              : "listen-only") + ". "
          "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps.</div>";
   }
@@ -563,7 +572,7 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<br><b>Chip:</b> " + String(ESP.getChipModel()) + " @ " + String(ESP.getCpuFreqMHz()) + "MHz";
   h += "<br><b>CAN:</b> " + String(cfg.canEnabled ?
     ("enabled, " + String(cfg.canBitrate) + " bit/s" +
-     (cfg.canopenBridge ? " (CANopen Bridge, node 0x" + String(cfg.canopenNodeId, HEX) + ")" : ", listen-only"))
+     (cfg.canopenBridge ? " (Carriage Position Sensor bridge, node 0x" + String(cfg.canopenNodeId, HEX) + ")" : ", listen-only"))
     : "disabled") + "</div>";
   {
     NvsStats st = getNvsStats();

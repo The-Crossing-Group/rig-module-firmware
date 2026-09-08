@@ -122,8 +122,8 @@ static void _cliCmHelp() {
     "  cm set baud <rate>       RS485 baud (also sets baudManuallySet)\n"
     "  cm set canen <0|1>       CAN enable\n"
     "  cm set canbit <rate>     CAN bitrate (125000/250000/500000/1000000)\n"
-    "  cm set copbr <0|1>       CANopen Bridge (transmit bring-up, wake encoder)\n"
-    "  cm set copnode <hex>     encoder node ID, e.g. 7F\n"
+    "  cm set copbr <0|1>       Carriage Position Sensor bridge (transmit bring-up, wake encoder)\n"
+    "  cm set copnode <hex>     encoder node ID, e.g. 7F (confirmed factory default)\n"
     "  cm set coptgt <0|1>      target specific node (0 = broadcast, confirmed default)\n"
     "  cm bringup               re-run CANopen bring-up right now (no reboot)\n"
   ));
@@ -245,7 +245,7 @@ static void _cliCm(String* tok, int n) {
   }
   if (tok[1] == "bringup") {
     if (!cfg.canEnabled || !cfg.canopenBridge) {
-      _cliErr("CAN Bridge not enabled — set canen 1 and copbr 1, save, and reboot first");
+      _cliErr("Carriage Position Sensor bridge not enabled — set canen 1 and copbr 1, save, and reboot first");
       return;
     }
     Serial.println("[cli] Re-running CANopen bring-up now...");
