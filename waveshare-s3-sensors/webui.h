@@ -34,18 +34,15 @@ extern CanSignalReading canReadings[MAX_CAN_SIGNALS];
 extern SemaphoreHandle_t stateMutex;
 extern SemaphoreHandle_t modbusBusMutex;
 // modbusAutoDetectBaud(), modbusReadRegs(), modbusRegCount(),
-// modbusDecodeValue(), modbusScanSlaves() are all already declared+defined
-// in modbus.h, included before this file in the .ino — no forward decls
-// here. (Previously duplicated declarations here caused "ambiguous
-// overload" compile errors once modbus.h's real signatures grew default
-// parameters that these stale copies didn't have.)
-bool canStart(int txPin, int rxPin, long bitrate); // can.h
-void canStop(); // can.h
-bool canIsRunning(); // can.h
-int canGetRecentFrames(struct CanFrameLog* out, int maxCount); // can.h
-unsigned long canGetFrameTotal(); // can.h
-unsigned long canGetLastFrameMs(); // can.h
-int canGetRecentFrameRate(); // can.h
+// modbusDecodeValue(), modbusScanSlaves(), canStart(), canStop(),
+// canIsRunning(), canGetRecentFrames(), canGetFrameTotal(),
+// canGetLastFrameMs(), canGetRecentFrameRate() are all already
+// declared+defined in modbus.h/can.h, included before this file in the
+// .ino — no forward decls here. (2026-09-09: removed a stale
+// canStart(int,int,long) forward decl left over from before the
+// CANopen bridge listenOnly param was added to the real one in can.h —
+// exactly the "ambiguous overload from a stale duplicate declaration"
+// trap this comment already warned about for modbus.h.)
 extern NTPClient ntpClient;
 extern bool apModeActive;
 extern String apSSID;
@@ -621,7 +618,10 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<h3>OTA Update</h3><div class='card'>";
   h += "<label>OTA from URL:</label><div class='row'><input id='otaUrl' placeholder='http://...'>&nbsp;";
   h += "<button onclick='doOTA()'>Update</button></div></div>";
-  h += "<h3>Buffer</h3><div class='card'><div id='bufInfo'>...</div><br>";
+  h += "<h3>Buffer</h3><div class='card'><div id='bufInfo'>...</div>";
+  h += "<div class='small'>File line count vs. tracked count are cross-checked live below — if they "
+       "ever disagree, the tracked number (used everywhere else, including this page) is wrong, not "
+       "the file. See countBufferEntries()/bufferCount comment in the .ino.</div><br>";
   h += "<button onclick='fetch(\"/api/buffer/flush\",{method:\"POST\"}).then(()=>alert(\"Flushing\"))'>Flush Now</button>&nbsp;";
   h += "<button class='btn-red' onclick='if(confirm(\"Clear all buffered data?\"))fetch(\"/api/buffer/clear\",{method:\"POST\"}).then(()=>location.reload())'>Clear Buffer</button></div>";
   h += "<h3>Danger Zone</h3><div class='card'>";
@@ -631,7 +631,10 @@ static String sysPage(ModuleConfig& cfg) {
 <script>
 fetch('/api/status').then(r=>r.json()).then(d=>{
   let sys=d.system||{};
-  document.getElementById('bufInfo').textContent = 'Buffered entries: '+(sys.bufCount||0);
+  let tracked=sys.bufCount||0, real=sys.bufCountReal||0;
+  let txt='Buffered entries (tracked): '+tracked+' | on disk right now: '+real;
+  if(tracked!==real) txt='<span style="color:#e74c3c">&#9888; MISMATCH — '+txt+' (tracked count is wrong, disk is the truth)</span>';
+  document.getElementById('bufInfo').innerHTML = txt;
 });
 function doOTA(){
   let url=document.getElementById('otaUrl').value;
@@ -665,7 +668,8 @@ static void handleApiStatus() {
   doc["system"]["piIp"]       = resolvedPiIp;
   doc["system"]["lastPostMs"] = lastPostMs ? (millis() - lastPostMs) : -1;
   doc["system"]["lastPostOk"] = lastPostOk;
-  doc["system"]["bufCount"]   = bufferCount;
+  doc["system"]["bufCount"]     = bufferCount; // in-RAM tracked count
+  doc["system"]["bufCountReal"] = countBufferEntries(); // actual /buffer.jsonl line count right now — should always match bufCount; see .ino comment on the 2026-09-09 accounting bug this line exists to catch
   doc["system"]["ntpOk"]      = ntpClient.isTimeSet();
   String out;
   serializeJson(doc, out);

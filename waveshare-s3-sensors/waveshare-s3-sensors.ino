@@ -808,12 +808,27 @@ String buildPayload(bool bufferedFlag) {
 // POST TO PI
 // =============================================================================
 void postToPi() {
+  // BUG FIXED 2026-09-09: this used to call popBufferEntry() — which
+  // DESTRUCTIVELY removes the line from disk — BEFORE knowing whether
+  // the resend actually succeeded. On failure it took the early
+  // `return`, meaning: the buffered entry was already gone from disk,
+  // bufferCount was never decremented (so it silently drifted away
+  // from what's actually on disk forever), AND this cycle's own live
+  // sensor reading was never even attempted/sent, since the function
+  // returned before reaching buildPayload() below. During a real
+  // multi-cycle Pi outage this meant almost every data point got
+  // silently discarded instead of buffered — the "Buffered entries"
+  // counter on /system kept climbing while the actual file barely
+  // grew. Fixed by peeking (non-destructive) and only removing the
+  // entry from disk + decrementing the count once httpPost() actually
+  // returns true.
   if (bufferCount > 0 || flushNow) {
     flushNow = false;
-    String buffered = popBufferEntry();
+    String buffered = peekBufferEntry();
     if (!buffered.isEmpty()) {
       bool ok = httpPost(resolvedPiIp, buffered);
       if (ok) {
+        removeBufferHead();
         bufferCount = max(0, bufferCount - 1);
       } else {
         resolvedPiIp = "";
@@ -869,7 +884,17 @@ int countBufferEntries() {
 void appendBufferEntry(const String& json) {
   int maxEntries = min(3600, (int)(3 * 3600 / max(1, cfg.pollIntervalS)));
   if (bufferCount >= maxEntries) {
-    trimBufferHead();
+    // BUG FIXED 2026-09-09: this called trimBufferHead() (removes the
+    // oldest line from disk) but never decremented bufferCount to
+    // match — every trim silently made bufferCount overcount the real
+    // number of lines in the file by one, forever (never
+    // self-correcting except across a reboot, which recounts from
+    // disk via countBufferEntries()). Harmless to the file itself
+    // (still correctly capped at maxEntries lines) but made the
+    // "Buffered entries" figure on /system meaningless during any
+    // outage long enough to fill the buffer.
+    removeBufferHead();
+    bufferCount = max(0, bufferCount - 1);
   }
   File f = LittleFS.open("/buffer.jsonl", "a");
   if (f) {
@@ -878,21 +903,39 @@ void appendBufferEntry(const String& json) {
   }
 }
 
-String popBufferEntry() {
+// Returns the OLDEST buffered entry WITHOUT removing it from disk — safe
+// to call every poll cycle even if the send that follows fails, unlike
+// the old popBufferEntry() which deleted on read regardless of whether
+// the resend actually succeeded (see postToPi() comment).
+String peekBufferEntry() {
   File f = LittleFS.open("/buffer.jsonl", "r");
   if (!f) return "";
-
   String first = "";
-  String rest  = "";
-  bool gotFirst = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (!line.isEmpty()) { first = line; break; }
+  }
+  f.close();
+  return first;
+}
 
+// Removes just the oldest line from the buffer file, rewriting the rest.
+// Only call this once you've confirmed that entry was actually delivered
+// (or intentionally discarding it, e.g. trimming a full buffer) — this
+// is the one place that destructively shrinks /buffer.jsonl.
+void removeBufferHead() {
+  File f = LittleFS.open("/buffer.jsonl", "r");
+  if (!f) return;
+
+  String rest = "";
+  bool skippedFirst = false;
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
     if (line.isEmpty()) continue;
-    if (!gotFirst) {
-      first = line;
-      gotFirst = true;
+    if (!skippedFirst) {
+      skippedFirst = true;
     } else {
       rest += line + "\n";
     }
@@ -904,11 +947,6 @@ String popBufferEntry() {
     fw.print(rest);
     fw.close();
   }
-  return first;
-}
-
-void trimBufferHead() {
-  popBufferEntry();
 }
 
 // =============================================================================
