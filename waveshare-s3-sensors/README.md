@@ -86,12 +86,14 @@ each.
 
 ## Workflow for CAN
 
-1. Enable CAN on **/** (pick the right bitrate — 250 kbit/s is the most
-   common default for drill/J1939-style CAN).
-2. Go to **/can**, add a signal with the CAN ID/byte offset/length you
+CAN is enabled by default (250 kbit/s, CANopen Bridge on) — same
+plug-and-play convention as RS485 sensors. Change the bitrate on **/**
+first if your bus isn't 250k.
+
+1. Go to **/can**, add a signal with the CAN ID/byte offset/length you
    already know (identify unknown frames with the LilyGo `sensor-debug`
    tool's sniffer if needed), set endianness/signedness/scale, save.
-3. Confirm on **/live** or the signal's own live readout on **/can**.
+2. Confirm on **/live** or the signal's own live readout on **/can**.
 
 ## CANopen Bridge mode (2026-09-08)
 

@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.4"
+#define FW_VERSION "rig-module-sensors-1.15.5"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -192,12 +192,14 @@ struct ModuleConfig {
   // --- CANopen Bridge mode (2026-09-08) -------------------------------
   // This board sits on the encoder's own dedicated CAN wire (not shared
   // drill traffic) and has to actively wake it up — see can.h's header
-  // comment for the full story. Default false: canEnabled alone still
-  // means "safe passive listen-only tap", exactly like before. Turning
-  // THIS on additionally switches the TWAI driver to a transmit-capable
-  // mode and runs the CANopen bring-up sequence — only enable it on a
-  // bus you're actually supposed to be transmitting on.
-  bool   canopenBridge         = false;
+  // comment for the full story. Default true (2026-09-09, was false):
+  // Sarah's rig-prototype setup always needs BOTH the RS485 sensors AND
+  // this CAN bridge running with zero manual setup, same as RS485
+  // already is — plug it in and go, no visiting / to check boxes first.
+  // Turning this off falls back to "safe passive listen-only tap" (still
+  // requires canEnabled itself on) for anyone who ever wires this board
+  // onto a bus they're not supposed to transmit on.
+  bool   canopenBridge         = true;
   uint8_t canopenNodeId        = 0x7F;  // EPC CANopen encoder factory default (confirmed)
   bool   canopenTargetSpecific = false; // false = NMT Start targets "all nodes" (confirmed
                                           // working on bench, the safe default)
@@ -239,9 +241,20 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   if (c.rigToken.isEmpty()) c.rigToken = "7804991970"; // self-heal, see other variants
   c.wifiSSID      = p.getString("wifiSSID", "");
   c.wifiPass      = p.getString("wifiPass", "");
-  c.canEnabled    = p.getBool("canEn", false);
+  // BUG FIXED 2026-09-09: these two both defaulted to false on a truly
+  // fresh module (before the very first save), even though the
+  // ModuleConfig struct's own in-RAM defaults above say canEnabled=true.
+  // On brand-new NVS the "canEn"/"copBr" keys don't exist yet, so
+  // getBool() falls back to whatever's passed here — NOT the struct
+  // default — meaning CAN (and the CANopen bridge that actually wakes
+  // the encoder) came up silently OFF out of the box, requiring one
+  // manual visit to / to check both boxes and Save before anything on
+  // the CAN side worked at all. Sarah wants both RS485 sensors AND CAN
+  // to be plug-and-play with zero manual setup, same as RS485 already
+  // is — so these fallbacks now match the struct defaults.
+  c.canEnabled    = p.getBool("canEn", true);
   c.canBitrate    = p.getLong("canBit", 250000);
-  c.canopenBridge = p.getBool("copBr", false);
+  c.canopenBridge = p.getBool("copBr", true);
   c.canopenNodeId = (uint8_t)p.getInt("copNode", 0x7F);
   c.canopenTargetSpecific = p.getBool("copTgtSp", false);
   c.nvsEraseSelfHealCount = p.getULong("nvsHealCnt", 0);
