@@ -638,9 +638,20 @@ function doOTA(){
 
 // ─── API handler helpers ──────────────────────────────────────────────────────
 static void handleApiStatus() {
-  DynamicJsonDocument doc(8192);
+  // Must be >= buildPayload()'s own doc size (16384) — buildPayload can
+  // include up to MAX_CAN_SIGNALS entries plus, in CANopen Bridge mode,
+  // up to 40 raw CAN frames. A smaller buffer here used to silently
+  // truncate deserializeJson() partway through (no error checked), which
+  // dropped whatever came after in the JSON — in practice the CAN
+  // section, since it's built after "channels". Bumped to match so /live
+  // (and anything else hitting this endpoint) actually sees CAN data.
+  DynamicJsonDocument doc(16384);
   String payload = buildPayload(false);
-  deserializeJson(doc, payload);
+  DeserializationError err = deserializeJson(doc, payload);
+  if (err) {
+    Serial.printf("[API] /api/status: buildPayload() JSON did not parse (%s) — "
+      "check MAX_SENSORS/MAX_CAN_SIGNALS growth vs buffer sizes\n", err.c_str());
+  }
   doc["system"]["uptime"]     = millis() / 1000;
   doc["system"]["freeHeap"]   = ESP.getFreeHeap();
   doc["system"]["rssi"]       = WiFi.RSSI();
