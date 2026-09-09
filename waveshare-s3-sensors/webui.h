@@ -626,7 +626,8 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<button class='btn-red' onclick='if(confirm(\"Clear all buffered data?\"))fetch(\"/api/buffer/clear\",{method:\"POST\"}).then(()=>location.reload())'>Clear Buffer</button></div>";
   h += "<h3>Danger Zone</h3><div class='card'>";
   h += "<button onclick='if(confirm(\"Reboot?\"))fetch(\"/api/reboot\",{method:\"POST\"})'>Reboot</button>&nbsp;";
-  h += "<button class='btn-red' onclick='if(confirm(\"Factory reset? ALL config will be lost.\"))fetch(\"/api/factory-reset\",{method:\"POST\"})'>Factory Reset</button></div>";
+  h += "<button class='btn-red' id='factoryResetBtn' onclick='doFactoryReset()'>Factory Reset</button>"
+       "<span id='factoryResetResult' class='small'></span></div>";
   h += R"(
 <script>
 fetch('/api/status').then(r=>r.json()).then(d=>{
@@ -640,6 +641,21 @@ function doOTA(){
   let url=document.getElementById('otaUrl').value;
   if(!url)return alert('Enter URL');
   fetch('/api/ota?url='+encodeURIComponent(url)).then(r=>r.text()).then(t=>alert(t));
+}
+function doFactoryReset(){
+  if(!confirm('Factory reset? ALL config will be lost.'))return;
+  let btn=document.getElementById('factoryResetBtn'), res=document.getElementById('factoryResetResult');
+  btn.disabled=true; res.textContent=' resetting...';
+  fetch('/api/factory-reset',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(!d.ok){
+      res.innerHTML=' <span style="color:#e74c3c">&#9888; reset did NOT fully succeed (clearOk='+d.clearOk+
+        ' fsOk='+d.fsOk+' anyKeyStillPresent='+d.anyKeyStillPresent+') — check Serial log</span>';
+      btn.disabled=false;
+    } else {
+      res.textContent=' done, rebooting...';
+      setTimeout(()=>location.reload(), 4000);
+    }
+  }).catch(e=>{ res.textContent=' request failed ('+e+'), device may still be rebooting'; setTimeout(()=>location.reload(), 4000); });
 }
 </script>)";
   h += "</div>";
@@ -1135,10 +1151,46 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
     delay(500); ESP.restart();
   });
   srv.on("/api/factory-reset", HTTP_POST, [](){
-    _srv->send(200,"application/json","{\"ok\":true}");
-    delay(200);
-    _prefs->begin("rigmod",false); _prefs->clear(); _prefs->end();
-    LittleFS.format();
+    // BUG FIXED 2026-09-09: clear()'s return value was never checked —
+    // same class of silent-failure blind spot this file already guards
+    // against for mbBaud/canEn writes in saveConfig(). If clear() ever
+    // silently fails/partially fails, every setting (canEnabled
+    // included) would read back whatever was left over instead of
+    // truly-unset, and Factory Reset would appear to do nothing.
+    // Verified with a fresh read-only Preferences handle + isKey() —
+    // NOT the same handle we just cleared, and NOT getBool()-with-a-
+    // default (which can't distinguish "key gone, using default" from
+    // "key still there, happens to equal the default").
+    _prefs->begin("rigmod",false);
+    bool clearOk = _prefs->clear();
+    _prefs->end();
+
+    Preferences verify;
+    verify.begin("rigmod", true);
+    bool canEnStillPresent = verify.isKey("canEn");
+    bool copBrStillPresent = verify.isKey("copBr");
+    bool anyKeyStillPresent = verify.isKey("modName") || canEnStillPresent || copBrStillPresent;
+    verify.end();
+
+    Serial.printf("[FactoryReset] clear()=%s canEn still present=%s copBr still present=%s "
+      "any key still present=%s\n",
+      clearOk ? "true" : "FALSE",
+      canEnStillPresent ? "TRUE (BUG)" : "false",
+      copBrStillPresent ? "TRUE (BUG)" : "false",
+      anyKeyStillPresent ? "TRUE (BUG — clear() did not actually clear)" : "false");
+
+    bool fsOk = LittleFS.format();
+    Serial.printf("[FactoryReset] LittleFS.format()=%s\n", fsOk ? "true" : "FALSE");
+
+    DynamicJsonDocument doc(256);
+    doc["ok"] = clearOk && fsOk && !anyKeyStillPresent;
+    doc["clearOk"] = clearOk;
+    doc["fsOk"] = fsOk;
+    doc["anyKeyStillPresent"] = anyKeyStillPresent;
+    String out;
+    serializeJson(doc, out);
+    _srv->send(200, "application/json", out);
+
     delay(500); ESP.restart();
   });
 }
