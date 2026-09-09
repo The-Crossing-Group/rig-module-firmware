@@ -574,6 +574,13 @@ static String sysPage(ModuleConfig& cfg) {
     ("enabled, " + String(cfg.canBitrate) + " bit/s" +
      (cfg.canopenBridge ? " (Carriage Position Sensor bridge, node 0x" + String(cfg.canopenNodeId, HEX) + ")" : ", listen-only"))
     : "disabled") + "</div>";
+  if (cfg.nvsEraseSelfHealCount > 0) {
+    h += "<div class='card' style='border-color:#e74c3c'><b>&#9888; NVS erase self-heal has fired " +
+         String(cfg.nvsEraseSelfHealCount) + " time(s)</b> — this WIFI driver recovery path wipes the "
+         "whole config namespace and restores it from RAM. If any setting (CAN, sensors, etc) has ever "
+         "reverted after a reboot, this is almost certainly why — the underlying WL_STOPPED WiFi issue "
+         "causing it needs fixing, not just the setting re-applied.</div>";
+  }
   {
     NvsStats st = getNvsStats();
     if (st.ok) {

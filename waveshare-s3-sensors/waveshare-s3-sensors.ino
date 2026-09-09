@@ -291,9 +291,18 @@ static bool ensureStaStarted() {
   if (!_nvsEraseAttempted) {
     _nvsEraseAttempted = true;
     Serial.println("[WiFi]   Attempting NVS erase + reinit as a self-heal...");
+    // This wipes the ENTIRE "rigmod" NVS namespace, not just WiFi state —
+    // every sensor slot, CAN settings, everything. Track how often this
+    // has ever fired so a setting that "reverts on reboot" can be traced
+    // back to this instead of assumed to be a compiled-in default —
+    // visible on /system. See nvsEraseSelfHealCount comment in config.h.
+    cfg.nvsEraseSelfHealCount++;
+    uint32_t healCountToRestore = cfg.nvsEraseSelfHealCount;
     esp_err_t erase_err = nvs_flash_erase();
     esp_err_t init_err = nvs_flash_init();
     Serial.printf("[WiFi]   nvs_flash_erase=0x%x nvs_flash_init=0x%x\n", erase_err, init_err);
+    Serial.printf("[WiFi]   NVS erase self-heal has now fired %u time(s) total.\n",
+      (unsigned)healCountToRestore);
     Serial.println("[WiFi]   Restoring saved module config into freshly-erased NVS...");
     prefs.begin("rigmod", false);
     saveConfig(prefs, cfg);

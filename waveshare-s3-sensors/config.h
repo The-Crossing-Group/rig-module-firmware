@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.2"
+#define FW_VERSION "rig-module-sensors-1.15.3"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -183,7 +183,10 @@ struct ModuleConfig {
   String wifiSSID       = "";
   String wifiPass       = "";
 
-  bool   canEnabled     = false; // CAN controller only starts if this is on
+  bool   canEnabled     = true; // CAN controller only starts if this is on —
+                                  // defaults on since Sarah's rig-prototype
+                                  // setup always wants the carriage-position
+                                  // CANopen bridge running (2026-09-09)
   long   canBitrate     = 250000; // 250k = most common (J1939/drill CAN); 500k also common
 
   // --- CANopen Bridge mode (2026-09-08) -------------------------------
@@ -198,6 +201,16 @@ struct ModuleConfig {
   uint8_t canopenNodeId        = 0x7F;  // EPC CANopen encoder factory default (confirmed)
   bool   canopenTargetSpecific = false; // false = NMT Start targets "all nodes" (confirmed
                                           // working on bench, the safe default)
+
+  // Bumps every time ensureStaStarted()'s NVS-erase self-heal actually
+  // fires (see waveshare-s3-sensors.ino) — that path wipes the WHOLE
+  // "rigmod" NVS namespace, not just WiFi state, then tries to restore
+  // everything from the in-RAM cfg struct. If settings (e.g. canEnabled)
+  // ever appear to "revert on reboot" with no explanation, check this on
+  // /system first — a non-zero count means something is repeatedly
+  // forcing a full config wipe+restore, which is a much bigger red flag
+  // than any single setting's default value.
+  uint32_t nvsEraseSelfHealCount = 0;
 
   SensorConfig    sensors[MAX_SENSORS];
   CanSignalConfig canSignals[MAX_CAN_SIGNALS];
@@ -231,6 +244,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.canopenBridge = p.getBool("copBr", false);
   c.canopenNodeId = (uint8_t)p.getInt("copNode", 0x7F);
   c.canopenTargetSpecific = p.getBool("copTgtSp", false);
+  c.nvsEraseSelfHealCount = p.getULong("nvsHealCnt", 0);
 
   for (int i = 0; i < MAX_SENSORS; i++) {
     String pre = "s" + String(i) + "_";
@@ -330,11 +344,17 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   p.putString("rigToken", c.rigToken);
   p.putString("wifiSSID", c.wifiSSID);
   p.putString("wifiPass", c.wifiPass);
-  p.putBool("canEn", c.canEnabled);
+  size_t wroteCanEn = p.putBool("canEn", c.canEnabled);
+  if (wroteCanEn == 0) {
+    Serial.printf("[Config] WARNING: NVS write FAILED for canEn (ret=0) — partition may be full. "
+      "canEnabled=%d did NOT get persisted, will read back stale/default on next boot.\n",
+      (int)c.canEnabled);
+  }
   p.putLong("canBit", c.canBitrate);
   p.putBool("copBr", c.canopenBridge);
   p.putInt("copNode", c.canopenNodeId);
   p.putBool("copTgtSp", c.canopenTargetSpecific);
+  p.putULong("nvsHealCnt", c.nvsEraseSelfHealCount);
 
   for (int i = 0; i < MAX_SENSORS; i++) {
     String pre = "s" + String(i) + "_";
