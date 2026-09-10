@@ -1,7 +1,7 @@
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
-//   /            Config (module info, RS485 baud, CAN enable/bitrate, WiFi)
+//   /            Config (module info, RS485 baud, CAN bitrate (always on), WiFi)
 //   /sensors     Add/edit/remove RS485 Modbus sensors (list, not fixed 8),
 //                includes per-sensor "Probe Now" + "Auto-Detect Baud" and
 //                bus-wide "Auto-Detect & Enable"
@@ -134,6 +134,34 @@ static String _f(float v) {
   return s;
 }
 
+// BUG FOUND 2026-09-10 (Sarah asked for a "spot sneaky bugs" pass): every
+// user-editable string field (module name/type/description, Pi host,
+// WiFi SSID/password, every sensor/CAN-signal name/kind/unit) was
+// interpolated RAW into single-quoted HTML attributes across every page
+// (cfgPage/sensorsPage/canPage) with zero escaping -- present on every
+// rig-module-firmware variant, not something introduced today. A value
+// containing a single quote (e.g. a sensor named "Driller's Pressure")
+// breaks out of the attribute early, silently corrupting the rest of
+// that page's HTML/form -- every field after it in the DOM renders
+// wrong or vanishes, with no error anywhere. Values containing '<' or
+// '>' can inject arbitrary markup into the page too (stored, since it's
+// round-tripped through saved config) -- low real-world severity given
+// this is a LAN-only device with no auth on the config page regardless,
+// but a genuinely silent failure mode worth closing since the fix is
+// cheap and mechanical. Used on every user-string field embedded as an
+// <input value='...'> (or any other single-quoted attribute) below.
+static String _esc(const String& v) {
+  String s = v;
+  // Order matters: & first, so escaping the other four doesn't double-
+  // escape the & this function itself just inserted.
+  s.replace("&", "&amp;");
+  s.replace("'", "&#39;");
+  s.replace("\"", "&quot;");
+  s.replace("<", "&lt;");
+  s.replace(">", "&gt;");
+  return s;
+}
+
 static const char* dataTypeName(uint8_t dt) {
   switch (dt) {
     case MB_UINT16: return "uint16";
@@ -152,11 +180,11 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<div class='page'><h2>&#9881; Module Configuration</h2>";
   h += "<div class='card'><b>Module ID:</b> " + cfg.moduleId + " <span class='small'>(fixed, derived from MAC)</span></div>";
   h += "<form method='POST' action='/api/config'>";
-  h += "<label>Module Name</label><input name='moduleName' value='" + cfg.moduleName + "' placeholder='e.g. Standpipe Pressure Skid'>";
-  h += "<label>Module Type</label><input name='moduleType' list='moduleTypeOpts' value='" + cfg.moduleType + "' placeholder='e.g. pressure, drill'>";
+  h += "<label>Module Name</label><input name='moduleName' value='" + _esc(cfg.moduleName) + "' placeholder='e.g. Standpipe Pressure Skid'>";
+  h += "<label>Module Type</label><input name='moduleType' list='moduleTypeOpts' value='" + _esc(cfg.moduleType) + "' placeholder='e.g. pressure, drill'>";
   h += "<datalist id='moduleTypeOpts'><option value='generic'><option value='pressure'><option value='tank'><option value='pump'><option value='drill'></datalist>";
   h += "<div class='small'>Shown on the rig dashboard.</div>";
-  h += "<label>Description</label><input name='description' value='" + cfg.description + "'>";
+  h += "<label>Description</label><input name='description' value='" + _esc(cfg.description) + "'>";
 
   h += "<h3>RS485 / Modbus Bus</h3>";
   h += "<label>RS485 Baud Rate</label><select name='modbusBaud'>";
@@ -219,20 +247,20 @@ static String cfgPage(ModuleConfig& cfg) {
 
   h += "<h3>Pi Logger</h3>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
-  h += "<label>Pi Host (blank = auto)</label><input name='piHost' value='" + cfg.piHost + "' placeholder='192.168.x.x or rig-logger.local'>";
+  h += "<label>Pi Host (blank = auto)</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.x.x or rig-logger.local'>";
   h += "<div class='small'>Blank = auto-discover.</div>";
-  h += "<label>X-Rig-Token</label><input name='rigToken' type='password' value='" + cfg.rigToken + "'>";
+  h += "<label>X-Rig-Token</label><input name='rigToken' type='password' value='" + _esc(cfg.rigToken) + "'>";
 
   h += "<h3>WiFi</h3>";
   if (apModeActive) {
-    h += "<div class='card'>Currently broadcasting setup AP: <b>" + apSSID + "</b><br>Not connected to any site network yet.</div>";
+    h += "<div class='card'>Currently broadcasting setup AP: <b>" + _esc(apSSID) + "</b><br>Not connected to any site network yet.</div>";
   } else {
-    h += "<div class='card'>Connected to: <b>" + cfg.wifiSSID + "</b><br>IP: " + WiFi.localIP().toString() + "  RSSI: " + String(WiFi.RSSI()) + " dBm</div>";
+    h += "<div class='card'>Connected to: <b>" + _esc(cfg.wifiSSID) + "</b><br>IP: " + WiFi.localIP().toString() + "  RSSI: " + String(WiFi.RSSI()) + " dBm</div>";
   }
   h += "<div class='row' style='margin-bottom:10px'><button type='button' onclick='doScan()' id='scanBtn'>&#128269; Scan for Networks</button></div>";
   h += "<div id='scanResults'></div>";
-  h += "<label>SSID</label><input name='wifiSSID' id='wifiSSID' value='" + cfg.wifiSSID + "' placeholder='site wifi network name'>";
-  h += "<label>Password</label><input name='wifiPass' id='wifiPass' type='password' value='" + cfg.wifiPass + "' placeholder='site wifi password'>";
+  h += "<label>SSID</label><input name='wifiSSID' id='wifiSSID' value='" + _esc(cfg.wifiSSID) + "' placeholder='site wifi network name'>";
+  h += "<label>Password</label><input name='wifiPass' id='wifiPass' type='password' value='" + _esc(cfg.wifiPass) + "' placeholder='site wifi password'>";
   h += "<div class='small'>Changing SSID/password reboots the unit.</div>";
   h += "<br><button type='submit'>Save</button>";
   h += "</form>";
@@ -287,9 +315,9 @@ static String sensorsPage(ModuleConfig& cfg) {
     h += "<label><input type='checkbox' name='s" + String(i) + "en'";
     if (s.enabled) h += " checked";
     h += "> Enabled</label>";
-    h += "<div class='row'><div><label>Name</label><input name='s" + String(i) + "nm' value='" + s.name + "' placeholder='e.g. Standpipe Pressure'></div>";
-    h += "<div><label>Kind</label><input name='s" + String(i) + "kd' value='" + s.kind + "' placeholder='e.g. pressure'></div>";
-    h += "<div><label>Unit</label><input name='s" + String(i) + "ut' value='" + s.unit + "' placeholder='e.g. psi'></div></div>";
+    h += "<div class='row'><div><label>Name</label><input name='s" + String(i) + "nm' value='" + _esc(s.name) + "' placeholder='e.g. Standpipe Pressure'></div>";
+    h += "<div><label>Kind</label><input name='s" + String(i) + "kd' value='" + _esc(s.kind) + "' placeholder='e.g. pressure'></div>";
+    h += "<div><label>Unit</label><input name='s" + String(i) + "ut' value='" + _esc(s.unit) + "' placeholder='e.g. psi'></div></div>";
     h += "<div class='grid4'>";
     h += "<div><label>Slave ID (1-247)</label><input name='s" + String(i) + "sid' type='number' min='1' max='247' value='" + String(s.slaveId) + "'></div>";
     h += "<div><label>Function Code</label><select name='s" + String(i) + "fc'>";
@@ -447,9 +475,9 @@ static String canPage(ModuleConfig& cfg) {
     h += "<label><input type='checkbox' name='c" + String(i) + "en'";
     if (sg.enabled) h += " checked";
     h += "> Enabled</label>";
-    h += "<div class='row'><div><label>Name</label><input name='c" + String(i) + "nm' value='" + sg.name + "' placeholder='e.g. Engine RPM'></div>";
-    h += "<div><label>Kind</label><input name='c" + String(i) + "kd' value='" + sg.kind + "' placeholder='e.g. rpm'></div>";
-    h += "<div><label>Unit</label><input name='c" + String(i) + "ut' value='" + sg.unit + "' placeholder='e.g. rpm'></div></div>";
+    h += "<div class='row'><div><label>Name</label><input name='c" + String(i) + "nm' value='" + _esc(sg.name) + "' placeholder='e.g. Engine RPM'></div>";
+    h += "<div><label>Kind</label><input name='c" + String(i) + "kd' value='" + _esc(sg.kind) + "' placeholder='e.g. rpm'></div>";
+    h += "<div><label>Unit</label><input name='c" + String(i) + "ut' value='" + _esc(sg.unit) + "' placeholder='e.g. rpm'></div></div>";
     h += "<div class='grid4'>";
     h += "<div><label>CAN ID (hex, e.g. 18FEF200)</label><input name='c" + String(i) + "id' value='" + String(sg.canId, HEX) + "'></div>";
     h += "<div><label>ID Type</label><select name='c" + String(i) + "ext'>";
@@ -935,9 +963,20 @@ static void handleConfig() {
   applyParam("piHost",        [](String v){ _cfg->piHost = v; });
   applyParam("rigToken",      [](String v){ _cfg->rigToken = v.isEmpty() ? "7804991970" : v; });
 
+  // BUG FOUND 2026-09-10 (Sarah asked for a "spot sneaky bugs" pass):
+  // wifiPass used to be applied with NO wifiChanged=true check at all --
+  // only wifiSSID set the flag. Changing JUST the password (same SSID,
+  // e.g. the site WiFi's password got rotated) saved the new password to
+  // NVS correctly, but handleConfig()'s dispatch below only reboots
+  // (which is what actually applies a new WiFi credential -- WiFi.begin()
+  // is only called from setup()/connectToWiFi(), never mid-session) when
+  // wifiChanged is true. Net effect: the page said "Saved" and redirected
+  // back to /, the OLD password kept running until some UNRELATED reboot
+  // happened to pick up the new one from flash -- a password change that
+  // silently doesn't take effect, with no error and no indication why.
   bool wifiChanged = false;
   applyParam("wifiSSID", [&](String v){ if (v != _cfg->wifiSSID) { _cfg->wifiSSID = v; wifiChanged = true; } });
-  applyParam("wifiPass", [](String v){ _cfg->wifiPass = v; });
+  applyParam("wifiPass", [&](String v){ if (v != _cfg->wifiPass) { _cfg->wifiPass = v; wifiChanged = true; } });
 
   saveConfig(*_prefs, *_cfg);
 
