@@ -159,12 +159,38 @@ Same pins as `waveshare-s3/`:
 
 ## Arduino IDE Board Settings
 
-Same as `waveshare-s3/`:
+Same as `waveshare-s3/`, EXCEPT this variant ships its own `partitions.csv`
+(sketch-folder file, auto-detected by the Arduino build system) that
+enlarges the NVS partition from the stock scheme's 20K to 64K — needed
+because this variant's config namespace can hold up to ~511 keys (16
+sensor slots + 16 CAN signal slots), enough to fill the stock 20K
+partition and cause new settings to silently fail to save (confirmed in
+the field 2026-09-10 — see `config.h`'s `saveConfig()`/`loadConfig()`
+comments):
 - **Board:** "ESP32S3 Dev Module" (esp32:esp32:esp32s3)
 - **USB CDC On Boot:** Enabled
 - **Flash Size:** 16MB (128Mb)
 - **Partition Scheme:** "16M Flash (3MB APP/9.9MB FATFS)" (`app3M_fat9M_16MB`)
+  — cosmetic/informational once `partitions.csv` exists in the sketch
+  folder; that file wins, not this menu selection. Leave it on this
+  setting anyway so app0/app1 sizes stay consistent with what's shown.
 - **PSRAM:** OPI PSRAM
+
+**First flash of the enlarged-NVS partitions.csv onto any given board**
+(i.e. any board previously flashed with an older version of this
+firmware, before `partitions.csv` existed): Tools menu → **Erase All
+Flash Before Sketch Upload** → **All Flash Contents** → Upload once →
+switch that setting back to **Disabled** for normal uploads afterward. A
+normal upload does NOT erase/relocate existing flash contents at the old
+partition offsets, so skipping this step on a previously-flashed board
+can leave stale data at the wrong addresses.
+
+**Verifying it actually took effect:** the sketch-folder `partitions.csv`
+mechanism is known to be silently ignored on some Arduino IDE/board-
+package combinations (compiles and uploads with zero error either way —
+see espressif/arduino-esp32#11579, #8502). Check **/system** → **NVS
+Storage** card after flashing: it reads the ACTUAL partition size at
+runtime and will explicitly warn if it's still the old 20K.
 
 Verified compiling clean with `arduino-cli` against these settings — 40%
 program storage, 17% dynamic memory, zero warnings.

@@ -575,8 +575,22 @@ static String sysPage(ModuleConfig& cfg) {
   bool nvsLow = false;
   if (st.ok) {
     nvsLow = st.freeEntries < 20;
+    size_t nvsPartBytes = getNvsPartitionSizeBytes();
     h += "<div class='card'><b>NVS Storage:</b> " + String(st.usedEntries) + " used / " +
          String(st.totalEntries) + " total entries (" + String(st.freeEntries) + " free)";
+    h += "<br>Partition size: " + String(nvsPartBytes) + " bytes";
+    if (nvsPartBytes > 0 && nvsPartBytes < 0x10000) {
+      // partitions.csv (nvs -> 64K) either hasn't been flashed yet, or was
+      // silently ignored by the IDE (see getNvsPartitionSizeBytes()
+      // comment) -- either way, this is proof, not a guess.
+      h += " <span class='warn'>&#9888; Still the OLD 20K size — the enlarged-NVS partitions.csv fix "
+           "either hasn't been flashed to THIS board yet, or the IDE silently ignored it (a known "
+           "Arduino-ESP32 issue). If you just flashed v1.15.8+, this means it didn't take — in Arduino "
+           "IDE, set Tools &gt; Erase All Flash Before Sketch Upload &gt; \"All Flash Contents\", then "
+           "re-flash. A normal upload does NOT move existing partition boundaries.</span>";
+    } else if (nvsPartBytes >= 0x10000) {
+      h += " <span class='ok'>&#10003; Enlarged partition confirmed active (64K).</span>";
+    }
     if (nvsLow) {
       h += "<br><span class='warn'>&#9888; Running low — new config keys may silently fail to save. "
            "If settings (e.g. baud rate) aren't sticking, this is likely why.</span>";

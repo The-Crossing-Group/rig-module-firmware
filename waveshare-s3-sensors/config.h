@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.7"
+#define FW_VERSION "rig-module-sensors-1.15.8"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -20,6 +20,7 @@
 #include <esp_mac.h>
 #include <nvs.h>
 #include <nvs_flash.h>
+#include <esp_partition.h>
 
 // Max number of independently-configured RS485 Modbus sensors on the bus.
 // Modbus RTU addressing goes up to 247 slaves, but polling time and NVS
@@ -328,6 +329,25 @@ NvsStats getNvsStats() {
     s.ok = true;
   }
   return s;
+}
+
+// Actual on-flash size of the "nvs" partition, read straight from the
+// partition TABLE at runtime (esp_partition_find_first) — not derived
+// from nvs_get_stats()'s entry counts, which only tell you usage WITHIN
+// whatever partition got mapped, not its real byte size. This exists
+// specifically to catch a documented Arduino-ESP32 footgun: a
+// partitions.csv file dropped in the sketch folder is SILENTLY IGNORED
+// on some IDE/board-package combinations (confirmed reports:
+// espressif/arduino-esp32#11579, #8502) — the sketch compiles and
+// uploads with zero error, but the board menu's "Partition Scheme"
+// selection wins instead of the custom file, so the NVS enlargement
+// this firmware's partitions.csv is supposed to provide (20K -> 64K,
+// see that file's header comment) may not actually be in effect. This
+// is the ONLY way to know for sure without a serial monitor + esptool
+// dump — surfaced on /system next to the entry-count stats.
+size_t getNvsPartitionSizeBytes() {
+  const esp_partition_t* p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, NULL);
+  return p ? p->size : 0;
 }
 
 // Save all config to NVS. Checks the two baud-related keys' actual write
