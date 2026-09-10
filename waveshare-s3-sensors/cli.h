@@ -120,8 +120,7 @@ static void _cliCmHelp() {
     "  cm set pihost <host>     Pi host override (blank = auto mDNS)\n"
     "  cm set token <text>      X-Rig-Token\n"
     "  cm set baud <rate>       RS485 baud (also sets baudManuallySet)\n"
-    "  cm set canen <0|1>       CAN enable\n"
-    "  cm set canbit <rate>     CAN bitrate (125000/250000/500000/1000000)\n"
+    "  cm set canbit <rate>     CAN bitrate (125000/250000/500000/1000000) -- CAN itself always on\n"
     "  cm set copbr <0|1>       Carriage Position Sensor bridge (transmit bring-up, wake encoder)\n"
     "  cm set copnode <hex>     encoder node ID, e.g. 7F (confirmed factory default)\n"
     "  cm set coptgt <0|1>      target specific node (0 = broadcast, confirmed default)\n"
@@ -193,7 +192,7 @@ static void _cliStatus() {
     WiFi.status() == WL_CONNECTED ? "connected" : "not connected",
     WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : cfg.wifiSSID.c_str());
   Serial.printf("RS485 baud : %ld (manually set: %s)\n", cfg.modbusBaud, cfg.baudManuallySet ? "yes" : "no");
-  Serial.printf("CAN        : %s @ %ld\n", cfg.canEnabled ? "enabled" : "disabled", cfg.canBitrate);
+  Serial.printf("CAN        : always on @ %ld\n", cfg.canBitrate);
   Serial.printf("Poll int   : %d s\n", cfg.pollIntervalS);
   int nS = 0; for (int i = 0; i < MAX_SENSORS; i++) if (cfg.sensors[i].enabled) nS++;
   int nC = 0; for (int i = 0; i < MAX_CAN_SIGNALS; i++) if (cfg.canSignals[i].enabled) nC++;
@@ -236,16 +235,15 @@ static void _cliCm(String* tok, int n) {
     Serial.printf("pihost : %s\n", cfg.piHost.isEmpty() ? "(auto)" : cfg.piHost.c_str());
     Serial.printf("token  : %s\n", cfg.rigToken.c_str());
     Serial.printf("baud   : %ld (manually set: %s)\n", cfg.modbusBaud, cfg.baudManuallySet ? "yes" : "no");
-    Serial.printf("canen  : %s\n", cfg.canEnabled ? "1" : "0");
-    Serial.printf("canbit : %ld\n", cfg.canBitrate);
+    Serial.printf("canbit : %ld (CAN always on, no enable toggle)\n", cfg.canBitrate);
     Serial.printf("copbr  : %s\n", cfg.canopenBridge ? "1" : "0");
     Serial.printf("copnode: 0x%02X\n", cfg.canopenNodeId);
     Serial.printf("coptgt : %s\n", cfg.canopenTargetSpecific ? "1" : "0");
     return;
   }
   if (tok[1] == "bringup") {
-    if (!cfg.canEnabled || !cfg.canopenBridge) {
-      _cliErr("Carriage Position Sensor bridge not enabled — set canen 1 and copbr 1, save, and reboot first");
+    if (!cfg.canopenBridge) {
+      _cliErr("Carriage Position Sensor bridge not enabled — set copbr 1, save, and reboot first");
       return;
     }
     Serial.println("[cli] Re-running CANopen bring-up now...");
@@ -272,7 +270,6 @@ static void _cliCm(String* tok, int n) {
       cfg.baudManuallySet = true;
       _cliOk("RS485 baud (locked — auto-detect won't override)");
     }
-    else if (field == "canen") { cfg.canEnabled = _cliBoolVal(val); _cliOk("CAN enable (reboot to apply)"); }
     else if (field == "canbit") { cfg.canBitrate = val.toInt(); _cliOk("CAN bitrate (reboot to apply)"); }
     else if (field == "copbr") { cfg.canopenBridge = _cliBoolVal(val); _cliOk("CANopen Bridge (reboot to apply)"); }
     else if (field == "copnode") { cfg.canopenNodeId = (uint8_t)strtol(val.c_str(), nullptr, 16); _cliOk("encoder node ID"); }

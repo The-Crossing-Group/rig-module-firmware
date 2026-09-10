@@ -182,9 +182,8 @@ static String cfgPage(ModuleConfig& cfg) {
   }
 
   h += "<h3>CAN Bus</h3>";
-  h += "<label><input type='checkbox' name='canEnabled'";
-  if (cfg.canEnabled) h += " checked";
-  h += "> Enable CAN</label>";
+  h += "<div class='small'>Always on — plug-and-play, no enable step. Listen-only unless Carriage "
+       "Position Sensor bridge below is on.</div>";
   h += "<label>CAN Bitrate</label><select name='canBitrate'>";
   {
     struct { long val; const char* label; } bauds[] = {
@@ -198,7 +197,6 @@ static String cfgPage(ModuleConfig& cfg) {
     }
   }
   h += "</select>";
-  h += "<div class='small'>Listen-only unless Carriage Position Sensor bridge below is on.</div>";
 
   h += "<h3>Carriage Position Sensor (CANopen Encoder Bridge)</h3>";
   h += "<div class='small'>This board's CAN link exists for one job right now: waking the "
@@ -434,15 +432,10 @@ function autoDetectEnable(){
 static String canPage(ModuleConfig& cfg) {
   String h = FPSTR(NAV);
   h += "<div class='page'><h2>&#128225; CAN Signals</h2>";
-  if (!cfg.canEnabled) {
-    h += "<div class='card' style='border-color:#f39c12'>CAN is currently <b>disabled</b>. Enable it on the "
-         "<a href='/'>Config</a> page first.</div>";
-  } else {
-    h += "<div class='card'>CAN running at " + String(cfg.canBitrate) + " bit/s, " +
-         (cfg.canopenBridge ? "Carriage Position Sensor bridge (transmitting bring-up, relaying raw frames to Pi)"
-                             : "listen-only") + ". "
-         "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps.</div>";
-  }
+  h += "<div class='card'>CAN running at " + String(cfg.canBitrate) + " bit/s, " +
+       (cfg.canopenBridge ? "Carriage Position Sensor bridge (transmitting bring-up, relaying raw frames to Pi)"
+                           : "listen-only") + ". "
+       "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps.</div>";
   h += "<p class='small'>Decodes a byte range from a specific CAN ID into a value.</p>";
   h += "<form method='POST' action='/api/can/save'>";
   h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save All Signals</button>";
@@ -567,29 +560,28 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<br><b>Module ID:</b> " + cfg.moduleId;
   h += "<br><b>MAC:</b> " + WiFi.macAddress();
   h += "<br><b>Chip:</b> " + String(ESP.getChipModel()) + " @ " + String(ESP.getCpuFreqMHz()) + "MHz";
-  h += "<br><b>CAN:</b> " + String(cfg.canEnabled ?
-    ("enabled, " + String(cfg.canBitrate) + " bit/s" +
-     (cfg.canopenBridge ? " (Carriage Position Sensor bridge, node 0x" + String(cfg.canopenNodeId, HEX) + ")" : ", listen-only"))
-    : "disabled") + "</div>";
-  if (cfg.nvsEraseSelfHealCount > 0) {
+  h += "<br><b>CAN:</b> always on, " + String(cfg.canBitrate) + " bit/s" +
+    (cfg.canopenBridge ? " (Carriage Position Sensor bridge, node 0x" + String(cfg.canopenNodeId, HEX) + ")" : ", listen-only") +
+    "</div>";
+  bool selfHealFired = cfg.nvsEraseSelfHealCount > 0;
+  if (selfHealFired) {
     h += "<div class='card' style='border-color:#e74c3c'><b>&#9888; NVS erase self-heal has fired " +
          String(cfg.nvsEraseSelfHealCount) + " time(s)</b> — this WIFI driver recovery path wipes the "
          "whole config namespace and restores it from RAM. If any setting (CAN, sensors, etc) has ever "
          "reverted after a reboot, this is almost certainly why — the underlying WL_STOPPED WiFi issue "
          "causing it needs fixing, not just the setting re-applied.</div>";
   }
-  {
-    NvsStats st = getNvsStats();
-    if (st.ok) {
-      bool low = st.freeEntries < 20;
-      h += "<div class='card'><b>NVS Storage:</b> " + String(st.usedEntries) + " used / " +
-           String(st.totalEntries) + " total entries (" + String(st.freeEntries) + " free)";
-      if (low) {
-        h += "<br><span class='warn'>&#9888; Running low — new config keys may silently fail to save. "
-             "If settings (e.g. baud rate) aren't sticking, this is likely why.</span>";
-      }
-      h += "</div>";
+  NvsStats st = getNvsStats();
+  bool nvsLow = false;
+  if (st.ok) {
+    nvsLow = st.freeEntries < 20;
+    h += "<div class='card'><b>NVS Storage:</b> " + String(st.usedEntries) + " used / " +
+         String(st.totalEntries) + " total entries (" + String(st.freeEntries) + " free)";
+    if (nvsLow) {
+      h += "<br><span class='warn'>&#9888; Running low — new config keys may silently fail to save. "
+           "If settings (e.g. baud rate) aren't sticking, this is likely why.</span>";
     }
+    h += "</div>";
   }
   {
     // Live ground-truth readback: read mbBaud/mbBaudSet straight from
@@ -597,19 +589,73 @@ static String sysPage(ModuleConfig& cfg) {
     // against what's currently in RAM. If these two ever disagree, it's
     // definitive proof of a save that didn't actually persist — no
     // guessing, no reboot-and-check-later.
+    //
+    // isKey() checked SEPARATELY from the value readback (2026-09-10 fix):
+    // a device that's simply never had its Config page saved yet will
+    // legitimately show flashBaud=-1 (the sentinel default, key absent)
+    // while RAM shows the loadConfig() default of 9600 -- that is NOT
+    // evidence of a broken save, it's evidence no save has ever been
+    // attempted. Only "key EXISTS but has the wrong value" is real proof
+    // of a save that silently failed.
     Preferences verify;
     verify.begin("rigmod", true);
+    bool baudKeyExists = verify.isKey("mbBaud");
+    bool baudSetKeyExists = verify.isKey("mbBaudSet");
     long flashBaud = verify.getLong("mbBaud", -1);
     bool flashBaudSet = verify.getBool("mbBaudSet", false);
     verify.end();
-    bool mismatch = (flashBaud != cfg.modbusBaud) || (flashBaudSet != cfg.baudManuallySet);
+    bool keysAbsent = !baudKeyExists && !baudSetKeyExists;
+    // NOTE: keysAbsent is genuinely AMBIGUOUS on its own -- it means either
+    // "Config page has never been saved on this device" OR "the self-heal
+    // wipe fired and its own restore-save also failed to recreate these
+    // keys" (nvs_flash_erase() -> saveConfig() right after, see
+    // ensureStaStarted() in the .ino). Do NOT assert "not a bug" here
+    // without checking the self-heal counter -- that was the mistake to
+    // avoid (2026-09-10).
+    bool mismatch = !keysAbsent && ((flashBaud != cfg.modbusBaud) || (flashBaudSet != cfg.baudManuallySet));
     h += "<div class='card'><b>Baud Persistence Check:</b>";
     h += "<br>In RAM right now: baud=" + String(cfg.modbusBaud) + " manuallySet=" + String(cfg.baudManuallySet ? "true" : "false");
-    h += "<br>On flash right now: baud=" + String(flashBaud) + " manuallySet=" + String(flashBaudSet ? "true" : "false");
-    if (mismatch) {
-      h += "<br><span class='warn'>&#9888; MISMATCH — flash does not match what's running. "
-           "This confirms the save isn't persisting; the values shown above as \"on flash\" are what "
-           "will come back after a reboot.</span>";
+    h += "<br>On flash right now: baud=" + String(flashBaud) + " manuallySet=" + String(flashBaudSet ? "true" : "false") +
+         (keysAbsent ? " <i>(keys don't exist on flash at all)</i>" : "");
+    if (keysAbsent) {
+      h += "<div style='margin-top:6px;padding:8px;background:#00000022;border-radius:6px'>";
+      if (selfHealFired) {
+        h += "<span class='warn'>&#9888; Likely cause: the NVS erase self-heal above has fired " +
+             String(cfg.nvsEraseSelfHealCount) + " time(s)</span> — that wipes this exact key, tries to "
+             "restore it from RAM immediately after, and that restore apparently didn't take either. "
+             "Fix the underlying WL_STOPPED WiFi issue (why the self-heal fires at all), not the baud "
+             "setting directly.";
+      } else if (nvsLow) {
+        h += "<span class='warn'>&#9888; Likely cause:</span> NVS Storage above shows only " +
+             String(st.freeEntries) + " free entries — a first-ever save attempt on this device may be "
+             "silently failing because the partition is already full. Check serial log at the moment "
+             "of Save for a '[Config] WARNING: NVS write FAILED' line to confirm.";
+      } else {
+        h += "&#8505; Ambiguous from this page alone: could mean this device has genuinely never had "
+             "its Config page saved (click Save once on / and re-check), OR a save attempt is silently "
+             "failing for a reason not covered by the other two diagnostics above (self-heal count is "
+             "0, NVS has " + String(st.freeEntries) + " free entries -- not low). If it STILL shows "
+             "these keys absent after clicking Save, that's a genuinely new failure mode — needs a "
+             "serial log captured at the exact moment Save is clicked to see the actual "
+             "putLong()/putBool() return values.";
+      }
+      h += "</div>";
+    } else if (mismatch) {
+      h += "<br><span class='warn'>&#9888; MISMATCH — flash has different VALUES than what's running "
+           "(keys exist, but disagree). This confirms a save silently failed to update them; the "
+           "values shown above as \"on flash\" are what will come back after a reboot.</span>";
+      h += "<div style='margin-top:6px;padding:8px;background:#00000022;border-radius:6px'>"
+           "<b>Likely cause:</b> ";
+      if (nvsLow) {
+        h += "NVS Storage above shows only " + String(st.freeEntries) + " free entries — the write is "
+             "almost certainly silently failing because the partition is full or nearly full. Check "
+             "serial log at the moment of Save for a '[Config] WARNING: NVS write FAILED' line to confirm.";
+      } else {
+        h += "NVS has " + String(st.freeEntries) + " free entries (not low) and self-heal hasn't fired "
+             "since boot — this is a genuinely new failure mode. Needs a serial log captured at the "
+             "exact moment Save is clicked to see the actual putLong()/putBool() return values.";
+      }
+      h += "</div>";
     } else {
       h += "<br><span class='ok'>&#10003; Match — flash agrees with what's running.</span>";
     }
@@ -856,9 +902,9 @@ static void handleConfig() {
     _cfg->baudManuallySet = true;
   });
 
+  // No canEnabled toggle -- CAN is unconditional (see waveshare-s3-sensors.ino
+  // setup()). Only canBitrate/canopenBridge/node settings remain configurable.
   bool canChanged = false;
-  bool newCanEnabled = _srv->hasArg("canEnabled");
-  if (newCanEnabled != _cfg->canEnabled) { _cfg->canEnabled = newCanEnabled; canChanged = true; }
   applyParam("canBitrate", [&](String v){ long nb = v.toInt(); if (nb != _cfg->canBitrate) { _cfg->canBitrate = nb; canChanged = true; } });
   bool newCanopenBridge = _srv->hasArg("canopenBridge");
   if (newCanopenBridge != _cfg->canopenBridge) { _cfg->canopenBridge = newCanopenBridge; canChanged = true; }
@@ -1153,30 +1199,30 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/factory-reset", HTTP_POST, [](){
     // BUG FIXED 2026-09-09: clear()'s return value was never checked —
     // same class of silent-failure blind spot this file already guards
-    // against for mbBaud/canEn writes in saveConfig(). If clear() ever
-    // silently fails/partially fails, every setting (canEnabled
-    // included) would read back whatever was left over instead of
-    // truly-unset, and Factory Reset would appear to do nothing.
-    // Verified with a fresh read-only Preferences handle + isKey() —
-    // NOT the same handle we just cleared, and NOT getBool()-with-a-
-    // default (which can't distinguish "key gone, using default" from
-    // "key still there, happens to equal the default").
+    // against for mbBaud writes in saveConfig(). If clear() ever
+    // silently fails/partially fails, every setting would read back
+    // whatever was left over instead of truly-unset, and Factory Reset
+    // would appear to do nothing. Verified with a fresh read-only
+    // Preferences handle + isKey() — NOT the same handle we just
+    // cleared, and NOT getBool()-with-a-default (which can't
+    // distinguish "key gone, using default" from "key still there,
+    // happens to equal the default").
     _prefs->begin("rigmod",false);
     bool clearOk = _prefs->clear();
     _prefs->end();
 
     Preferences verify;
     verify.begin("rigmod", true);
-    bool canEnStillPresent = verify.isKey("canEn");
     bool copBrStillPresent = verify.isKey("copBr");
-    bool anyKeyStillPresent = verify.isKey("modName") || canEnStillPresent || copBrStillPresent;
+    bool mbBaudStillPresent = verify.isKey("mbBaud");
+    bool anyKeyStillPresent = verify.isKey("modName") || copBrStillPresent || mbBaudStillPresent;
     verify.end();
 
-    Serial.printf("[FactoryReset] clear()=%s canEn still present=%s copBr still present=%s "
+    Serial.printf("[FactoryReset] clear()=%s copBr still present=%s mbBaud still present=%s "
       "any key still present=%s\n",
       clearOk ? "true" : "FALSE",
-      canEnStillPresent ? "TRUE (BUG)" : "false",
       copBrStillPresent ? "TRUE (BUG)" : "false",
+      mbBaudStillPresent ? "TRUE (BUG)" : "false",
       anyKeyStillPresent ? "TRUE (BUG — clear() did not actually clear)" : "false");
 
     bool fsOk = LittleFS.format();

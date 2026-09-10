@@ -20,9 +20,10 @@ scale/offset. Any Modbus RTU sensor works as long as you know those four
 things (check the sensor's datasheet, or use the per-sensor "Probe Now"
 button on /sensors to try a register/type combo before saving).
 
-**CAN is also enabled here** (wired but unused on `waveshare-s3/`) — the
-ESP32-S3's native TWAI controller runs in **listen-only mode** (this module
-never transmits on the CAN bus, only reads):
+**CAN is always on here** (wired but unused on `waveshare-s3/`), unconditionally
+— no config toggle, nothing to enable. The ESP32-S3's native TWAI controller
+runs in **listen-only mode** by default (this module never transmits on the
+CAN bus, only reads) unless CANopen Bridge mode is turned on:
 - A configurable list of up to 16 "CAN signals" — byte range + decode rule
   extracted from frames matching a given CAN ID, same idea as an RS485
   sensor but sourced from CAN.
@@ -48,7 +49,7 @@ Arduino IDE Serial Monitor (115200 baud, newline line-ending) and type
 `h` for the full command list. Quick reference:
 
 - `h` / `st` / `lv` / `sv` / `rb` — help, status, live values, save, reboot
-- `cm ...` — module config (name, poll interval, RS485 baud, CAN enable/bitrate, etc.)
+- `cm ...` — module config (name, poll interval, RS485 baud, CAN bitrate/CANopen bridge, etc.)
 - `cw ...` — WiFi SSID/password
 - `cs ...` — sensor slots (`cs list`, `cs get <n>`, `cs en/dis <n>`, `cs set <n> <field> <value>`)
 - `cc ...` — CAN signal slots (same pattern as `cs`)
@@ -62,7 +63,7 @@ each.
 
 ## Pages
 
-- **/** — Module info, RS485 baud (shared bus-wide), CAN enable/bitrate, WiFi
+- **/** — Module info, RS485 baud (shared bus-wide), CAN bitrate (always on), WiFi
 - **/sensors** — Add/edit/remove RS485 Modbus sensors (16 slots)
 - **/can** — Add/edit/remove CAN signals (16 slots)
 - **/live** — Live values table (sensors + CAN signals + system status)
@@ -86,9 +87,9 @@ each.
 
 ## Workflow for CAN
 
-CAN is enabled by default (250 kbit/s, CANopen Bridge on) — same
-plug-and-play convention as RS485 sensors. Change the bitrate on **/**
-first if your bus isn't 250k.
+CAN is always on (no way to disable it), 250 kbit/s + CANopen Bridge on by
+default — same plug-and-play convention as RS485 sensors. Change the
+bitrate on **/** first if your bus isn't 250k.
 
 1. Go to **/can**, add a signal with the CAN ID/byte offset/length you
    already know (identify unknown frames with the LilyGo `sensor-debug`
@@ -115,12 +116,12 @@ project's `can_listener.py` for the same sequence. This mode:
    which already has tested logic for it — this board doesn't guess at
    an unconfirmed byte layout.
 
-Enable on **/** under CAN Bus: check **CANopen Bridge**, set the
-**Encoder Node ID** (hex, default `7F` = EPC factory default), leave
-**target specific node** unchecked unless you specifically need to
-target one node instead of broadcasting (0x00 broadcast is the
-confirmed-working default). Save — this reboots the board, same as any
-other CAN setting change.
+On **/** under Carriage Position Sensor (CANopen Encoder Bridge): check
+**CANopen Bridge**, set the **Encoder Node ID** (hex, default `7F` = EPC
+factory default), leave **target specific node** unchecked unless you
+specifically need to target one node instead of broadcasting (0x00
+broadcast is the confirmed-working default). Save — this reboots the
+board, same as any other CAN setting change.
 
 CLI equivalent: `cm set copbr 1`, `cm set copnode 7F`, `sv`, `rb`. Use
 `cm bringup` to re-run the sequence on demand without a reboot (handy

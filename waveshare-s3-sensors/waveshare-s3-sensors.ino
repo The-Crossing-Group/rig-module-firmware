@@ -170,12 +170,13 @@ void setup() {
   // config just start polling normally below. Use the "Auto-Detect &
   // Enable Now" button on /sensors if you ever need to find new ones.
 
-  // CAN only comes up if explicitly enabled on the Config page — listen-
-  // only mode by default (see can.h), so an unconfigured/unused CAN bus
-  // is never touched at all unless you ask for it. canopenBridge on TOP
-  // of that switches to transmit-capable mode + runs CANopen bring-up
-  // (see can.h header comment) — this board's actual current job.
-  if (cfg.canEnabled) {
+  // CAN is unconditional — plug-and-play, no config toggle, no way to turn
+  // it off (Sarah 2026-09-10: doesn't want the OPTION to disable it, not
+  // just a default). canopenBridge still gates transmit-capable mode vs.
+  // safe listen-only tap (see can.h header comment) — that stays a real
+  // setting since it changes electrical behavior on someone else's bus,
+  // but the CAN controller itself always starts.
+  {
     bool bridgeMode = cfg.canopenBridge;
     Serial.printf("[BOOT] CAN pins: TX=%d RX=%d bitrate=%ld mode=%s\n", CAN_TXD, CAN_RXD,
       cfg.canBitrate, bridgeMode ? "CANopen Bridge (TX enabled)" : "listen-only");
@@ -183,8 +184,6 @@ void setup() {
     if (bridgeMode) {
       canopenBringup(cfg.canopenNodeId, cfg.canopenTargetSpecific);
     }
-  } else {
-    Serial.println("[BOOT] CAN disabled (enable on / to start it)");
   }
 
   connectWifi();
@@ -247,7 +246,7 @@ void loop() {
   // CANopen Bridge self-heal — internally rate-limited, cheap no-op if
   // canopenBridge is off or traffic is already flowing. See can.h's
   // canopenBringupIfDue() comment.
-  if (cfg.canEnabled && cfg.canopenBridge) {
+  if (cfg.canopenBridge) {
     canopenBringupIfDue(cfg.canopenNodeId, cfg.canopenTargetSpecific);
   }
 
@@ -709,19 +708,19 @@ String buildPayload(bool bufferedFlag) {
   doc["uptimeS"]  = (unsigned long)(millis() / 1000UL);
   doc["rssi"]     = WiFi.RSSI();
   doc["buffered"] = bufferedFlag;
-  doc["canEnabled"] = cfg.canEnabled;
-  if (cfg.canEnabled) {
-    doc["canFrameRate"] = canGetRecentFrameRate();
-    doc["canFrameTotal"] = canGetFrameTotal();
-  }
+  // CAN is unconditional (no toggle) — always report frame stats. Key kept
+  // as "canEnabled" (always true) for backward compat with any existing
+  // Pi-side dashboard code that reads it, rather than a wire-format change.
+  doc["canEnabled"] = true;
+  doc["canFrameRate"] = canGetRecentFrameRate();
+  doc["canFrameTotal"] = canGetFrameTotal();
 
   // Raw CAN frame relay (CANopen Bridge mode only) — decode stays on the
   // PC (ditchwitch-logger's can_listener.py, already handles both
   // CANopen PDO and J1939-shaped frames), this board just forwards
   // what's in the ring buffer since the last successful POST. Skipped
-  // entirely (no "canFrames" key at all) when not in bridge mode, same
-  // "don't touch what you didn't ask for" convention as canEnabled.
-  if (cfg.canEnabled && cfg.canopenBridge && !bufferedFlag) {
+  // entirely (no "canFrames" key at all) when not in bridge mode.
+  if (cfg.canopenBridge && !bufferedFlag) {
     JsonArray frames = doc.createNestedArray("canFrames");
     _lastCanFramesSentMs = canSerializeRecentFrames(frames, _lastCanFramesSentMs, 40);
   }
@@ -778,7 +777,8 @@ String buildPayload(bool bufferedFlag) {
     // CAN signals reported under their own "canSignals" array — kept
     // separate from "channels" since they're a genuinely different data
     // source (CAN bus, not Modbus/RS485), even though the shape is similar.
-    if (cfg.canEnabled) {
+    // Unconditional now (CAN always runs), same as canEnabled above.
+    {
       JsonArray canArr = doc.createNestedArray("canSignals");
       for (int i = 0; i < MAX_CAN_SIGNALS; i++) {
         CanSignalConfig& sig = cfg.canSignals[i];

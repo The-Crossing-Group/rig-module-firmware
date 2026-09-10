@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.6"
+#define FW_VERSION "rig-module-sensors-1.15.7"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -183,10 +183,10 @@ struct ModuleConfig {
   String wifiSSID       = "";
   String wifiPass       = "";
 
-  bool   canEnabled     = true; // CAN controller only starts if this is on —
-                                  // defaults on since Sarah's rig-prototype
-                                  // setup always wants the carriage-position
-                                  // CANopen bridge running (2026-09-09)
+  // No canEnabled field -- CAN is unconditional (2026-09-10, Sarah: doesn't
+  // want the OPTION to disable it, plug-and-play only). Controller always
+  // starts in setup() (waveshare-s3-sensors.ino); canopenBridge below still
+  // gates transmit-capable mode vs. a safe listen-only tap.
   long   canBitrate     = 250000; // 250k = most common (J1939/drill CAN); 500k also common
 
   // --- CANopen Bridge mode (2026-09-08) -------------------------------
@@ -196,9 +196,9 @@ struct ModuleConfig {
   // Sarah's rig-prototype setup always needs BOTH the RS485 sensors AND
   // this CAN bridge running with zero manual setup, same as RS485
   // already is — plug it in and go, no visiting / to check boxes first.
-  // Turning this off falls back to "safe passive listen-only tap" (still
-  // requires canEnabled itself on) for anyone who ever wires this board
-  // onto a bus they're not supposed to transmit on.
+  // Turning this off falls back to "safe passive listen-only tap" for
+  // anyone who ever wires this board onto a bus they're not supposed to
+  // transmit on -- CAN itself always runs (no way to fully disable it).
   bool   canopenBridge         = true;
   uint8_t canopenNodeId        = 0x7F;  // EPC CANopen encoder factory default (confirmed)
   bool   canopenTargetSpecific = false; // false = NMT Start targets "all nodes" (confirmed
@@ -207,11 +207,11 @@ struct ModuleConfig {
   // Bumps every time ensureStaStarted()'s NVS-erase self-heal actually
   // fires (see waveshare-s3-sensors.ino) — that path wipes the WHOLE
   // "rigmod" NVS namespace, not just WiFi state, then tries to restore
-  // everything from the in-RAM cfg struct. If settings (e.g. canEnabled)
-  // ever appear to "revert on reboot" with no explanation, check this on
-  // /system first — a non-zero count means something is repeatedly
-  // forcing a full config wipe+restore, which is a much bigger red flag
-  // than any single setting's default value.
+  // everything from the in-RAM cfg struct. If settings (e.g. canopenBridge,
+  // mbBaud) ever appear to "revert on reboot" with no explanation, check
+  // this on /system first — a non-zero count means something is
+  // repeatedly forcing a full config wipe+restore, which is a much
+  // bigger red flag than any single setting's default value.
   uint32_t nvsEraseSelfHealCount = 0;
 
   SensorConfig    sensors[MAX_SENSORS];
@@ -241,18 +241,17 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   if (c.rigToken.isEmpty()) c.rigToken = "7804991970"; // self-heal, see other variants
   c.wifiSSID      = p.getString("wifiSSID", "");
   c.wifiPass      = p.getString("wifiPass", "");
-  // BUG FIXED 2026-09-09: these two both defaulted to false on a truly
-  // fresh module (before the very first save), even though the
-  // ModuleConfig struct's own in-RAM defaults above say canEnabled=true.
-  // On brand-new NVS the "canEn"/"copBr" keys don't exist yet, so
-  // getBool() falls back to whatever's passed here — NOT the struct
-  // default — meaning CAN (and the CANopen bridge that actually wakes
-  // the encoder) came up silently OFF out of the box, requiring one
-  // manual visit to / to check both boxes and Save before anything on
-  // the CAN side worked at all. Sarah wants both RS485 sensors AND CAN
-  // to be plug-and-play with zero manual setup, same as RS485 already
-  // is — so these fallbacks now match the struct defaults.
-  c.canEnabled    = p.getBool("canEn", true);
+  // BUG FIXED 2026-09-09: copBr defaulted to false on a truly fresh module
+  // (before the very first save), even though the ModuleConfig struct's
+  // own in-RAM default above says canopenBridge=true. On brand-new NVS
+  // the "copBr" key doesn't exist yet, so getBool() falls back to
+  // whatever's passed here — NOT the struct default — meaning the
+  // CANopen bridge that actually wakes the encoder came up silently OFF
+  // out of the box, requiring one manual visit to / to check the box and
+  // Save before anything on the CAN side worked at all. Sarah wants both
+  // RS485 sensors AND CAN to be plug-and-play with zero manual setup, so
+  // this fallback now matches the struct default. (2026-09-10: canEnabled
+  // removed entirely -- CAN itself is unconditional, no toggle exists.)
   c.canBitrate    = p.getLong("canBit", 250000);
   c.canopenBridge = p.getBool("copBr", true);
   c.canopenNodeId = (uint8_t)p.getInt("copNode", 0x7F);
@@ -357,12 +356,10 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   p.putString("rigToken", c.rigToken);
   p.putString("wifiSSID", c.wifiSSID);
   p.putString("wifiPass", c.wifiPass);
-  size_t wroteCanEn = p.putBool("canEn", c.canEnabled);
-  if (wroteCanEn == 0) {
-    Serial.printf("[Config] WARNING: NVS write FAILED for canEn (ret=0) — partition may be full. "
-      "canEnabled=%d did NOT get persisted, will read back stale/default on next boot.\n",
-      (int)c.canEnabled);
-  }
+  // No "canEn" key anymore -- CAN itself is unconditional (2026-09-10),
+  // nothing to persist for it. The now-orphaned "canEn" key from older
+  // firmware versions is harmlessly ignored (loadConfig() no longer reads
+  // it either); factory reset still clears it like everything else.
   p.putLong("canBit", c.canBitrate);
   p.putBool("copBr", c.canopenBridge);
   p.putInt("copNode", c.canopenNodeId);
