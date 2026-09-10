@@ -170,21 +170,19 @@ void setup() {
   // config just start polling normally below. Use the "Auto-Detect &
   // Enable Now" button on /sensors if you ever need to find new ones.
 
-  // CAN is unconditional — plug-and-play, no config toggle, no way to turn
-  // it off (Sarah 2026-09-10: doesn't want the OPTION to disable it, not
-  // just a default). canopenBridge still gates transmit-capable mode vs.
-  // safe listen-only tap (see can.h header comment) — that stays a real
-  // setting since it changes electrical behavior on someone else's bus,
-  // but the CAN controller itself always starts.
-  {
-    bool bridgeMode = cfg.canopenBridge;
-    Serial.printf("[BOOT] CAN pins: TX=%d RX=%d bitrate=%ld mode=%s\n", CAN_TXD, CAN_RXD,
-      cfg.canBitrate, bridgeMode ? "CANopen Bridge (TX enabled)" : "listen-only");
-    canStart(CAN_TXD, CAN_RXD, cfg.canBitrate, /*listenOnly=*/!bridgeMode);
-    if (bridgeMode) {
-      canopenBringup(cfg.canopenNodeId, cfg.canopenTargetSpecific);
-    }
-  }
+  // BOOT ORDER CHANGE (2026-09-10, after a real field incident): CAN
+  // init used to run HERE, before connectWifi() — moved to AFTER WiFi/AP
+  // + the web server are up (see below, right after webServer.begin()).
+  // Reasoning: CAN is unconditional now (no toggle, see can.h) and
+  // canopenBringup() blocks for a full 2 seconds transmitting on the CAN
+  // bus during every boot. Whatever WAS or WASN'T the actual cause of
+  // that incident, network access (WiFi/AP + web UI) should NEVER be
+  // gated behind CAN hardware initializing successfully — if a CAN
+  // transceiver is ever miswired, floating, or the driver install/start
+  // call ever misbehaves on some board, you should still always be able
+  // to reach the web UI to fix it. Sensors/CAN not coming up is a
+  // recoverable, visible-on-the-web-UI problem; losing network access
+  // entirely is not.
 
   connectWifi();
 
@@ -216,6 +214,25 @@ void setup() {
     Serial.printf("[HTTP] Web server at http://%s/\n", WiFi.localIP().toString().c_str());
   } else {
     Serial.println("[HTTP] Web server up but not connected to any network yet");
+  }
+
+  // CAN starts HERE, deliberately AFTER WiFi/AP + the web server are
+  // already up and reachable — see this function's comment above
+  // connectWifi() for why. Unconditional — plug-and-play, no config
+  // toggle, no way to turn it off (Sarah 2026-09-10: doesn't want the
+  // OPTION to disable it, not just a default). canopenBridge still
+  // gates transmit-capable mode vs. safe listen-only tap (see can.h
+  // header comment) — that stays a real setting since it changes
+  // electrical behavior on someone else's bus, but the CAN controller
+  // itself always starts.
+  {
+    bool bridgeMode = cfg.canopenBridge;
+    Serial.printf("[BOOT] CAN pins: TX=%d RX=%d bitrate=%ld mode=%s\n", CAN_TXD, CAN_RXD,
+      cfg.canBitrate, bridgeMode ? "CANopen Bridge (TX enabled)" : "listen-only");
+    canStart(CAN_TXD, CAN_RXD, cfg.canBitrate, /*listenOnly=*/!bridgeMode);
+    if (bridgeMode) {
+      canopenBringup(cfg.canopenNodeId, cfg.canopenTargetSpecific);
+    }
   }
 
   bufferCount = countBufferEntries();

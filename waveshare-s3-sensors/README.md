@@ -27,6 +27,11 @@ CAN bus, only reads) unless CANopen Bridge mode is turned on:
 - A configurable list of up to 16 "CAN signals" — byte range + decode rule
   extracted from frames matching a given CAN ID, same idea as an RS485
   sensor but sourced from CAN.
+- **Boot order (2026-09-10):** CAN initializes AFTER WiFi/AP and the web
+  server are already up, never before — network access to this board is
+  never gated behind CAN hardware coming up successfully. If a CAN
+  transceiver is ever miswired/floating and something in the TWAI driver
+  install misbehaves, you can still always reach the web UI to fix it.
 
 **No diagnostics/debugging page in this build.** There is no register
 write, raw-traffic log, bus-scan report, or CAN frame sniffer here — only
