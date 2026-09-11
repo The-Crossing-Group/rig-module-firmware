@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.11"
+#define FW_VERSION "rig-module-sensors-1.15.12"
 
 #include <WiFi.h>
 #include <Preferences.h>

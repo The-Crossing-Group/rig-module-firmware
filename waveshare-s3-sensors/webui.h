@@ -259,10 +259,10 @@ static String cfgPage(ModuleConfig& cfg) {
   }
   h += "<div class='row' style='margin-bottom:10px'><button type='button' onclick='doScan()' id='scanBtn'>&#128269; Scan for Networks</button></div>";
   h += "<div id='scanResults'></div>";
-  h += "<label>SSID</label><input name='wifiSSID' id='wifiSSID' value='" + _esc(cfg.wifiSSID) + "' placeholder='site wifi network name'>";
-  h += "<label>Password</label><input name='wifiPass' id='wifiPass' type='password' value='" + _esc(cfg.wifiPass) + "' placeholder='site wifi password'>";
+  h += "<label>SSID</label><input name='wifiSSID' id='wifiSSID' autocomplete='off' value='" + _esc(cfg.wifiSSID) + "' placeholder='site wifi network name'>";
+  h += "<label>Password</label><input name='wifiPass' id='wifiPass' autocomplete='new-password' type='password' value='" + _esc(cfg.wifiPass) + "' placeholder='site wifi password'>";
   h += "<div class='small'>Changing SSID/password reboots the unit.</div>";
-  h += "<br><button type='submit'>Save</button>";
+  h += "<br><button type='submit' onclick=\"return confirmPick()\">Save</button>";
   h += "</form>";
   h += "<div class='card' style='margin-top:12px'><b>Forget WiFi</b><br><span class='small'>Clears saved network, reboots into setup-AP mode.</span><br><br>";
   h += "<button class='btn-red' onclick=\"if(confirm('Forget saved WiFi and reboot into setup mode?'))fetch('/api/wifi/forget',{method:'POST'}).then(()=>alert('Forgotten. Rebooting...'))\">Forget WiFi</button></div>";
@@ -288,7 +288,34 @@ function doScan(){
     box.innerHTML = s;
   }).catch(function(){ btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks'; box.innerHTML='<p class="small">Scan failed.</p>'; });
 }
-function pickNet(ssid){ document.getElementById('wifiSSID').value = ssid; document.getElementById('wifiPass').value=''; document.getElementById('wifiPass').focus(); }
+function pickNet(ssid){
+  var f=document.getElementById('wifiSSID');
+  // CRITICAL: this field is inside a form and browsers' autofill/autocomplete
+  // will silently RESTORE the previously-typed SSID over anything JS writes
+  // here (confirmed in field 2026-09-11: tapping a scan result appeared to
+  // do nothing -- value set, then reverted before Save was pressed).
+  // blur() + autocomplete='off' + _pickedSsid re-apply at submit defeat all
+  // three known interference paths (autofill restore, dropdown reselect,
+  // and the browser ignoring programmatic values on submit).
+  f.blur();
+  f.value = ssid;
+  window._pickedSsid = ssid;
+  var p=document.getElementById('wifiPass');
+  p.blur(); p.value='';
+  p.focus();
+}
+// Final guard: if a scan pick happened since page load, verify at submit
+// time that the SSID field still holds the picked value. If a browser
+// autofill reverted it, re-apply the pick rather than submitting the
+// stale typed value. (No-op when no scan pick was made.)
+function confirmPick(){
+  var picked = window._pickedSsid;
+  if(picked){
+    var f=document.getElementById('wifiSSID');
+    if(f.value !== picked){ f.value = picked; }
+  }
+  return true;
+}
 </script>)JS";
   h += "</div>";
   return h;
