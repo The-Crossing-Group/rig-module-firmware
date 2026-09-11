@@ -252,6 +252,15 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<label>X-Rig-Token</label><input name='rigToken' type='password' value='" + _esc(cfg.rigToken) + "'>";
 
   h += "<h3>WiFi</h3>";
+  // v1.15.14: AP-mode safety net. While the unit is in setup-AP mode it has
+  // no route to the configured network, so a Save that changes the SSID must
+  // reboot to join it. If the SSID was NOT changed (e.g. user scanned, gave
+  // up, and just hit Save), rebooting would land right back in the AP —
+  // exactly the "it keeps using the old network / never changes" symptom seen
+  // in the field 2026-09-11. In AP mode with no SSID change: stay put, no
+  // reboot, and say so loudly on the page.
+  h += "<input type='hidden' name='apModeNow' value='" + String(apModeActive ? 1 : 0) + "'>";
+  h += "<input type='hidden' name='ssidAtPageLoad' value='" + _esc(cfg.wifiSSID) + "'>";
   if (apModeActive) {
     h += "<div class='card'>Currently broadcasting setup AP: <b>" + _esc(apSSID) + "</b><br>Not connected to any site network yet.</div>";
   } else {
@@ -1027,16 +1036,27 @@ static void handleConfig() {
   // value __manual__ means the user chose "Type manually..." and the real
   // value is in wifiSSIDManual. A literal "__manual__" must NEVER be saved
   // as an SSID (that would brick WiFi config until Forget WiFi).
+  String submittedSsid = "";  // what the form actually resolved to
   applyParam("wifiSSID", [&](String v){
     if (v == "__manual__") {
       String mv = _srv->hasArg("wifiSSIDManual") ? _srv->arg("wifiSSIDManual") : String("");
       mv.trim();
-      if (mv.isEmpty()) return;  // manual selected but blank: keep existing SSID
+      if (mv.isEmpty()) { submittedSsid = _cfg->wifiSSID; return; }  // blank manual: keep existing
       v = mv;
     }
+    submittedSsid = v;
     if (v != _cfg->wifiSSID) { _cfg->wifiSSID = v; wifiChanged = true; }
   });
   applyParam("wifiPass", [&](String v){ if (v != _cfg->wifiPass) { _cfg->wifiPass = v; wifiChanged = true; } });
+
+  // v1.15.14 serial diagnostic (field report: "SSID won't change" twice on
+  // 2026-09-11 and we've been guessing). Print exactly what the browser
+  // submitted vs what's in NVS, so the next report is settled by one log line
+  // instead of another firmwares.
+  Serial.printf("[CFG] POST wifi: submitted_ssid=\"%s\" saved_ssid=\"%s\" pass_changed=%s ap_mode=%s\n",
+    submittedSsid.c_str(), _cfg->wifiSSID.c_str(),
+    (_srv->hasArg("wifiPass") && _srv->arg("wifiPass") != _cfg->wifiPass) ? "yes" : "no",
+    apModeActive ? "yes" : "no");
 
   saveConfig(*_prefs, *_cfg);
 
@@ -1065,6 +1085,12 @@ static void handleConfig() {
     _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to connect to new WiFi...</p>" + verifyMsg);
     delay(1000);
     ESP.restart();
+  } else if (apModeActive) {
+    // v1.15.14: don't reboot-loop in the AP when nothing WiFi-related changed.
+    _srv->send(200, "text/html; charset=utf-8",
+      "<p>Saved. <b>No SSID change detected, so NOT rebooting</b> — the unit is still in setup-AP mode"
+      " and would just come back here. Pick a network from the scan list (or Type manually...) and"
+      " press Save again to join it. Current saved SSID: <b>" + _esc(_cfg->wifiSSID) + "</b></p>" + verifyMsg);
   } else if (baudChanged) {
     _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to apply new RS485 baud rate...</p>" + verifyMsg);
     delay(1000);
