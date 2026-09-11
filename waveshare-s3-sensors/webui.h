@@ -607,17 +607,19 @@ static String sysPage(ModuleConfig& cfg) {
     h += "<div class='card'><b>NVS Storage:</b> " + String(st.usedEntries) + " used / " +
          String(st.totalEntries) + " total entries (" + String(st.freeEntries) + " free)";
     h += "<br>Partition size: " + String(nvsPartBytes) + " bytes";
-    if (nvsPartBytes > 0 && nvsPartBytes < 0x10000) {
-      // partitions.csv (nvs -> 64K) either hasn't been flashed yet, or was
-      // silently ignored by the IDE (see getNvsPartitionSizeBytes()
-      // comment) -- either way, this is proof, not a guess.
-      h += " <span class='warn'>&#9888; Still the OLD 20K size — the enlarged-NVS partitions.csv fix "
-           "either hasn't been flashed to THIS board yet, or the IDE silently ignored it (a known "
-           "Arduino-ESP32 issue). If you just flashed v1.15.8+, this means it didn't take — in Arduino "
-           "IDE, set Tools &gt; Erase All Flash Before Sketch Upload &gt; \"All Flash Contents\", then "
-           "re-flash. A normal upload does NOT move existing partition boundaries.</span>";
+    if (nvsPartBytes == 0x5000) {
+      // Stock 20K partition — this is the EXPECTED, correct size since
+      // v1.15.11 (the custom 64K partitions.csv was removed after it
+      // bricked boards via table/app offset mismatch — see README
+      // "Partition table incident"). No warning needed at this size.
+    } else if (nvsPartBytes > 0 && nvsPartBytes < 0x5000) {
+      h += " <span class='warn'>&#9888; Smaller than the stock 20K partition — unexpected partition "
+           "table on this board. Full esptool erase_flash + reflash recommended.</span>";
     } else if (nvsPartBytes >= 0x10000) {
-      h += " <span class='ok'>&#10003; Enlarged partition confirmed active (64K).</span>";
+      h += " <span class='warn'>&#9888; Non-stock partition table detected (" + String(nvsPartBytes) +
+           " bytes). This firmware ships NO partitions.csv (removed v1.15.11 after the field "
+           "boot-loop incident). If this board was flashed with a custom table via esptool "
+           "deliberately, ignore this. Otherwise: esptool erase_flash + reflash.</span>";
     }
     if (nvsLow) {
       h += "<br><span class='warn'>&#9888; Running low — new config keys may silently fail to save. "
