@@ -259,15 +259,53 @@ static String cfgPage(ModuleConfig& cfg) {
   }
   h += "<div class='row' style='margin-bottom:10px'><button type='button' onclick='doScan()' id='scanBtn'>&#128269; Scan for Networks</button></div>";
   h += "<div id='scanResults'></div>";
-  h += "<label>SSID</label><input name='wifiSSID' id='wifiSSID' autocomplete='off' value='" + _esc(cfg.wifiSSID) + "' placeholder='site wifi network name'>";
-  h += "<label>Password</label><input name='wifiPass' id='wifiPass' autocomplete='new-password' type='password' value='" + _esc(cfg.wifiPass) + "' placeholder='site wifi password'>";
-  h += "<div class='small'>Changing SSID/password reboots the unit.</div>";
-  h += "<br><button type='submit' onclick=\"return confirmPick()\">Save</button>";
+  // v1.15.13: SSID is now a <select> populated from the scan, NOT a free-text
+  // input. Root cause of the 2026-09-11 "scan pick doesn't stick" field report:
+  // the browser's password manager silently restored the saved SSID+password
+  // pair over the JS-written value on the manual-typed input (v1.15.12's
+  // autocomplete=off + submit-time re-apply did NOT defeat it). A select has
+  // no autofill target — the only way to change it is choosing from the list
+  // (or the explicit "Type manually..." option).
+  h += "<label>SSID</label><select name='wifiSSID' id='wifiSSID' onchange='onSsidPick()'>";
+  h += "<option value='__manual__'>Type manually...</option></select>";
+  h += "<input name='wifiSSIDManual' id='wifiSSIDManual' autocomplete='off' style='display:none' placeholder='site wifi network name'>";
+  h += "<div class='small' id='ssidHint'>Scan, then pick from the list.</div>";
+  h += "<label>Password</label><input name='wifiPass' id='wifiPass' autocomplete='new-password' type='password' placeholder='enter password for the selected network'>";
+  h += "<div class='small'>Changing SSID/password reboots the unit. Password is never pre-filled — type it fresh after picking a network.</div>";
+  h += "<br><button type='submit'>Save</button>";
   h += "</form>";
   h += "<div class='card' style='margin-top:12px'><b>Forget WiFi</b><br><span class='small'>Clears saved network, reboots into setup-AP mode.</span><br><br>";
   h += "<button class='btn-red' onclick=\"if(confirm('Forget saved WiFi and reboot into setup mode?'))fetch('/api/wifi/forget',{method:'POST'}).then(()=>alert('Forgotten. Rebooting...'))\">Forget WiFi</button></div>";
   h += R"JS(
 <script>
+var CUR_SSID = "__CURSSID__";
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fillSsidOptions(nets){
+  // nets: array of SSID strings (deduped). Rebuilds the select, preserving
+  // current selection when possible. Always keeps the manual entry option.
+  var sel=document.getElementById('wifiSSID');
+  var prev=sel.value;
+  sel.innerHTML='<option value="__manual__">Type manually...</option>';
+  var seen={};
+  for(var i=0;i<nets.length;i++){
+    var n=nets[i];
+    if(seen[n]) continue; seen[n]=1;
+    var o=document.createElement('option');
+    o.value=n; o.textContent=n + (n===CUR_SSID ? '  (current)' : '');
+    sel.appendChild(o);
+  }
+  // restore selection: previous pick if still present, else current config SSID
+  var want = prev && seen[prev] ? prev : (seen[CUR_SSID] ? CUR_SSID : '__manual__');
+  sel.value=want;
+  onSsidPick();
+}
+function onSsidPick(){
+  var sel=document.getElementById('wifiSSID');
+  var m=document.getElementById('wifiSSIDManual');
+  var hint=document.getElementById('ssidHint');
+  if(sel.value==='__manual__'){ m.style.display=''; m.focus(); hint.textContent='Type the exact network name.'; }
+  else { m.style.display='none'; m.value=''; hint.textContent='Selected: '+sel.value; }
+}
 function doScan(){
   let btn=document.getElementById('scanBtn'); let box=document.getElementById('scanResults');
   btn.disabled=true; btn.textContent='Scanning...';
@@ -277,46 +315,27 @@ function doScan(){
     let nets = d.networks || [];
     if(nets.length===0){ box.innerHTML='<p class="small">No networks found. Try again.</p>'; return; }
     let s = '<div class="card">';
-    nets.forEach(function(n, idx){
+    nets.forEach(function(n){
       let bars = n.rssi>-60?'####':n.rssi>-70?'###.':n.rssi>-80?'##..':'#...';
       let lock = n.secure ? '&#128274;' : '';
-      s += '<div class="row" style="justify-content:space-between;padding:4px 0;border-bottom:1px solid #334;cursor:pointer" onclick="pickNet(scanNets['+idx+'])">'+
-           '<span>'+lock+' '+n.ssid+'</span><span class="small">'+bars+' '+n.rssi+'dBm</span></div>';
+      s += '<div style="padding:4px 0;border-bottom:1px solid #334"><span>'+lock+' '+esc(n.ssid)+'</span> <span class="small">'+bars+' '+n.rssi+'dBm</span></div>';
     });
     s += '</div>';
-    window.scanNets = nets.map(function(n){ return n.ssid; });
     box.innerHTML = s;
+    fillSsidOptions(nets.map(function(n){ return n.ssid; }));
   }).catch(function(){ btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks'; box.innerHTML='<p class="small">Scan failed.</p>'; });
 }
-function pickNet(ssid){
-  var f=document.getElementById('wifiSSID');
-  // CRITICAL: this field is inside a form and browsers' autofill/autocomplete
-  // will silently RESTORE the previously-typed SSID over anything JS writes
-  // here (confirmed in field 2026-09-11: tapping a scan result appeared to
-  // do nothing -- value set, then reverted before Save was pressed).
-  // blur() + autocomplete='off' + _pickedSsid re-apply at submit defeat all
-  // three known interference paths (autofill restore, dropdown reselect,
-  // and the browser ignoring programmatic values on submit).
-  f.blur();
-  f.value = ssid;
-  window._pickedSsid = ssid;
-  var p=document.getElementById('wifiPass');
-  p.blur(); p.value='';
-  p.focus();
-}
-// Final guard: if a scan pick happened since page load, verify at submit
-// time that the SSID field still holds the picked value. If a browser
-// autofill reverted it, re-apply the pick rather than submitting the
-// stale typed value. (No-op when no scan pick was made.)
-function confirmPick(){
-  var picked = window._pickedSsid;
-  if(picked){
-    var f=document.getElementById('wifiSSID');
-    if(f.value !== picked){ f.value = picked; }
-  }
-  return true;
-}
+window.addEventListener('DOMContentLoaded', function(){ fillSsidOptions([]); });
 </script>)JS";
+  // Inject the current SSID into the JS constant AFTER the raw-string block
+  // (raw string literals can't interpolate). _esc first, then escape
+  // backslash/quote for JS string context.
+  {
+    String jsSsid = _esc(cfg.wifiSSID);
+    jsSsid.replace("\\", "\\\\");
+    jsSsid.replace("'", "\\'");
+    h.replace("__CURSSID__", jsSsid);
+  }
   h += "</div>";
   return h;
 }
@@ -1004,7 +1023,19 @@ static void handleConfig() {
   // happened to pick up the new one from flash -- a password change that
   // silently doesn't take effect, with no error and no indication why.
   bool wifiChanged = false;
-  applyParam("wifiSSID", [&](String v){ if (v != _cfg->wifiSSID) { _cfg->wifiSSID = v; wifiChanged = true; } });
+  // v1.15.13: SSID arrives from a <select> (name=wifiSSID). The special
+  // value __manual__ means the user chose "Type manually..." and the real
+  // value is in wifiSSIDManual. A literal "__manual__" must NEVER be saved
+  // as an SSID (that would brick WiFi config until Forget WiFi).
+  applyParam("wifiSSID", [&](String v){
+    if (v == "__manual__") {
+      String mv = _srv->hasArg("wifiSSIDManual") ? _srv->arg("wifiSSIDManual") : String("");
+      mv.trim();
+      if (mv.isEmpty()) return;  // manual selected but blank: keep existing SSID
+      v = mv;
+    }
+    if (v != _cfg->wifiSSID) { _cfg->wifiSSID = v; wifiChanged = true; }
+  });
   applyParam("wifiPass", [&](String v){ if (v != _cfg->wifiPass) { _cfg->wifiPass = v; wifiChanged = true; } });
 
   saveConfig(*_prefs, *_cfg);
