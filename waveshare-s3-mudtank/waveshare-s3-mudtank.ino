@@ -314,7 +314,27 @@ static bool ensureStaStarted() {
 // RIG NETWORK AUTO-DISCOVERY — site routers are always named "rigXXX" with
 // a fixed password. No manual setup needed for a standard rig router.
 // =============================================================================
-#define RIG_WIFI_PASS "7804991970"
+// =============================================================================
+// RIG NETWORK AUTO-JOIN — DISABLED IN v1.15.23 AT SARAH'S REQUEST
+// =============================================================================
+// This block used to define tryAutoConnectRigNetwork(): when NVS held no saved
+// SSID, it scanned for any SSID matching "rig" + digits, joined it with a
+// compiled-in password (RIG_WIFI_PASS "7804991970"), and then SAVED that pair
+// to NVS as though the user had chosen it.
+//
+// That made a blank board adopt whatever rigNNN access point happened to be in
+// range (e.g. the bench AP on drill-pi-1's router) and persist the choice, so
+// the network kept reappearing across erase-and-reflash cycles and looked
+// exactly like a hardcoded SSID. Sarah: remove the auto-join while she tests.
+//
+// Policy now: this firmware never joins, guesses, or persists a network the
+// user did not explicitly save on /config. Blank config -> setup AP.
+//
+// isRigSSID() is KEPT, because resolvePi() still uses it for a purely local IP
+// derivation (SSID "rigNNN" -> 192.168.NNN.10). That only formats an IP string
+// from a network the user already chose; it never joins anything and needs no
+// password, so it is not part of the auto-join behaviour.
+// =============================================================================
 
 static bool isRigSSID(const String& ssid) {
   if (ssid.length() < 4) return false;
@@ -325,90 +345,6 @@ static bool isRigSSID(const String& ssid) {
     if (!isDigit(lower[i])) return false;
   }
   return true;
-}
-
-static bool tryAutoConnectRigNetwork() {
-  Serial.println("[WiFi] ----------------------------------------");
-  Serial.println("[WiFi] No saved network — scanning for rigXXX networks...");
-
-  ensureStaStarted();
-  WiFi.disconnect(true);
-  delay(100);
-
-  int found = WiFi.scanNetworks();
-  if (found <= 0) {
-    Serial.println("[WiFi] Scan found no networks at all.");
-    WiFi.scanDelete();
-    return false;
-  }
-
-  int candidates[32];
-  int nCandidates = 0;
-  for (int i = 0; i < found && nCandidates < 32; i++) {
-    if (isRigSSID(WiFi.SSID(i)) && WiFi.channel(i) >= 1 && WiFi.channel(i) <= 14) {
-      candidates[nCandidates++] = i;
-    }
-  }
-  for (int i = 1; i < nCandidates; i++) {
-    int key = candidates[i];
-    int j = i - 1;
-    while (j >= 0 && WiFi.RSSI(candidates[j]) < WiFi.RSSI(key)) {
-      candidates[j+1] = candidates[j];
-      j--;
-    }
-    candidates[j+1] = key;
-  }
-
-  if (nCandidates == 0) {
-    Serial.printf("[WiFi] Scan found %d network(s), none match \"rigNNN\" pattern.\n", found);
-    WiFi.scanDelete();
-    return false;
-  }
-
-  Serial.printf("[WiFi] Found %d rigXXX candidate(s):\n", nCandidates);
-  for (int k = 0; k < nCandidates; k++) {
-    int i = candidates[k];
-    Serial.printf("[WiFi]   %s  RSSI: %d dBm  Ch: %d\n", WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i));
-  }
-
-  bool connected = false;
-  for (int k = 0; k < nCandidates && !connected; k++) {
-    int i = candidates[k];
-    String ssid = WiFi.SSID(i);
-    int channel = WiFi.channel(i);
-    uint8_t bssid[6];
-    memcpy(bssid, WiFi.BSSID(i), 6);
-
-    Serial.printf("[WiFi] Trying \"%s\" with standard rig password...\n", ssid.c_str());
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    delay(300);
-    ensureStaStarted();
-    delay(200);
-    WiFi.begin(ssid.c_str(), RIG_WIFI_PASS, channel, bssid);
-
-    int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries < 30) {
-      delay(500);
-      tries++;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.printf("[WiFi] Connected to \"%s\"!\n", ssid.c_str());
-      Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
-      cfg.wifiSSID = ssid;
-      cfg.wifiPass = RIG_WIFI_PASS;
-      saveConfig(prefs, cfg);
-      Serial.println("[WiFi] Saved to NVS — future boots will connect directly.");
-      connected = true;
-    } else {
-      Serial.printf("[WiFi] Failed to connect to \"%s\" (status=%d)\n", ssid.c_str(), WiFi.status());
-    }
-  }
-
-  WiFi.scanDelete();
-  Serial.println("[WiFi] ----------------------------------------");
-  return connected;
 }
 
 void startSetupAP() {
@@ -431,9 +367,9 @@ void startSetupAP() {
 
 void connectWifi() {
   if (cfg.wifiSSID.isEmpty()) {
-    Serial.println("[WiFi] No SSID saved in NVS.");
-    if (tryAutoConnectRigNetwork()) return;
-    Serial.println("[WiFi] No rigXXX network found/connectable — going to setup AP.");
+    Serial.println("[WiFi] No SSID saved in NVS — going straight to setup AP.");
+    Serial.println("[WiFi] Auto-join disabled: no network is guessed or joined;");
+    Serial.println("[WiFi] open the setup AP and pick a network on /config.");
     startSetupAP();
     return;
   }

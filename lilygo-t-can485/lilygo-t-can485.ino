@@ -268,7 +268,7 @@ void setup() {
 
   // Disable WiFi's own flash-persistent config storage as the very first
   // thing we do, before ANY WiFi.mode()/begin()/softAP() call anywhere in
-  // this sketch (startSetupAP, tryAutoConnectRigNetwork, connectWifi all
+  // this sketch (startSetupAP, connectWifi all
   // call WiFi.mode() before this used to run — it was previously set much
   // later, inside connectWifi(), which left every earlier WiFi.mode() call
   // in every boot path free to read/write the WiFi driver's own NVS blob
@@ -501,9 +501,28 @@ static bool ensureStaStarted() {
 // for a standard rig router. Falls back to the setup AP only if no
 // rigXXX network is found, or it's found but won't connect.
 // =============================================================================
-#define RIG_WIFI_PASS "7804991970"
+// =============================================================================
+// RIG NETWORK AUTO-JOIN — DISABLED IN v1.15.23 AT SARAH'S REQUEST
+// =============================================================================
+// This block used to define tryAutoConnectRigNetwork(): when NVS held no saved
+// SSID, it scanned for any SSID matching "rig" + digits, joined it with a
+// compiled-in password (RIG_WIFI_PASS "7804991970"), and then SAVED that pair
+// to NVS as though the user had chosen it.
+//
+// That made a blank board adopt whatever rigNNN access point happened to be in
+// range (e.g. the bench AP on drill-pi-1's router) and persist the choice, so
+// the network kept reappearing across erase-and-reflash cycles and looked
+// exactly like a hardcoded SSID. Sarah: remove the auto-join while she tests.
+//
+// Policy now: this firmware never joins, guesses, or persists a network the
+// user did not explicitly save on /config. Blank config -> setup AP.
+//
+// isRigSSID() is KEPT, because resolvePi() still uses it for a purely local IP
+// derivation (SSID "rigNNN" -> 192.168.NNN.10). That only formats an IP string
+// from a network the user already chose; it never joins anything and needs no
+// password, so it is not part of the auto-join behaviour.
+// =============================================================================
 
-// Matches "rig" (any case) followed by one or more digits, e.g. rig132, RIG9
 static bool isRigSSID(const String& ssid) {
   if (ssid.length() < 4) return false;
   String lower = ssid;
@@ -519,104 +538,6 @@ static bool isRigSSID(const String& ssid) {
 // standard rig password. On success, saves the SSID/pass to NVS so future
 // boots skip straight to the normal saved-network path (no rescanning).
 // Returns true if connected.
-static bool tryAutoConnectRigNetwork() {
-  Serial.println("[WiFi] ----------------------------------------");
-  Serial.println("[WiFi] No saved network — scanning for rigXXX networks...");
-
-  ensureStaStarted();
-  WiFi.disconnect(true);
-  delay(100);
-
-  int found = WiFi.scanNetworks();
-  if (found <= 0) {
-    Serial.println("[WiFi] Scan found no networks at all.");
-    WiFi.scanDelete();
-    return false;
-  }
-
-  // Collect rigXXX candidates, sorted strongest-RSSI-first.
-  // Skip 5GHz entries (channel > 14) — this ESP32 is 2.4GHz-only, so if a
-  // rig router broadcasts the same SSID on both bands, trying the 5GHz
-  // entry would just waste ~15s failing before falling through.
-  int candidates[32];
-  int nCandidates = 0;
-  for (int i = 0; i < found && nCandidates < 32; i++) {
-    if (isRigSSID(WiFi.SSID(i)) && WiFi.channel(i) >= 1 && WiFi.channel(i) <= 14) {
-      candidates[nCandidates++] = i;
-    }
-  }
-  // simple insertion sort by RSSI descending
-  for (int i = 1; i < nCandidates; i++) {
-    int key = candidates[i];
-    int j = i - 1;
-    while (j >= 0 && WiFi.RSSI(candidates[j]) < WiFi.RSSI(key)) {
-      candidates[j+1] = candidates[j];
-      j--;
-    }
-    candidates[j+1] = key;
-  }
-
-  if (nCandidates == 0) {
-    Serial.printf("[WiFi] Scan found %d network(s), none match \"rigNNN\" pattern.\n", found);
-    WiFi.scanDelete();
-    return false;
-  }
-
-  Serial.printf("[WiFi] Found %d rigXXX candidate(s):\n", nCandidates);
-  for (int k = 0; k < nCandidates; k++) {
-    int i = candidates[k];
-    Serial.printf("[WiFi]   %s  RSSI: %d dBm  Ch: %d\n",
-      WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i));
-  }
-
-  bool connected = false;
-  for (int k = 0; k < nCandidates && !connected; k++) {
-    int i = candidates[k];
-    String ssid = WiFi.SSID(i);
-    int channel = WiFi.channel(i);
-    uint8_t bssid[6];
-    memcpy(bssid, WiFi.BSSID(i), 6);
-
-    Serial.printf("[WiFi] Trying \"%s\" with standard rig password...\n", ssid.c_str());
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    delay(300);
-    ensureStaStarted();
-    delay(200);
-    WiFi.begin(ssid.c_str(), RIG_WIFI_PASS, channel, bssid);
-
-    int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries < 30) {
-      delay(500);
-      tries++;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.printf("[WiFi] Connected to \"%s\"!\n", ssid.c_str());
-      Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
-
-      // Save so next boot skips scanning/auto-discovery entirely
-      cfg.wifiSSID = ssid;
-      cfg.wifiPass = RIG_WIFI_PASS;
-      saveConfig(prefs, cfg);
-      Serial.println("[WiFi] Saved to NVS — future boots will connect directly.");
-      connected = true;
-    } else {
-      Serial.printf("[WiFi] Failed to connect to \"%s\" (status=%d)\n", ssid.c_str(), WiFi.status());
-    }
-  }
-
-  WiFi.scanDelete();
-  Serial.println("[WiFi] ----------------------------------------");
-  return connected;
-}
-
-// =============================================================================
-// WIFI SETUP AP — no saved network, no rigXXX network found/reachable.
-// Broadcasts "RigModule-XXXXXX" (last 6 MAC hex chars), password
-// "modulesetup", serves the main Config page (with its WiFi section) at
-// 192.168.4.1.
-// =============================================================================
 void startSetupAP() {
   // AP_STA (not plain AP) so the Config page's WiFi section can still scan
   // for networks while the setup AP is broadcasting — STA stays idle/
@@ -642,17 +563,15 @@ void startSetupAP() {
 // WIFI — connects using cfg.wifiSSID / cfg.wifiPass (from NVS, set via the
 // web UI, or auto-saved after a successful rigXXX auto-connect). If nothing
 // is saved: first tries to auto-discover a "rigNNN" network with the
-// standard rig password (tryAutoConnectRigNetwork), and only falls back to
+// network the user saved on /config, and only falls back to
 // the setup AP (startSetupAP) if that fails too. No recompile needed to
 // move a unit to a different rig or network.
 // =============================================================================
 void connectWifi() {
   if (cfg.wifiSSID.isEmpty()) {
-    Serial.println("[WiFi] No SSID saved in NVS.");
-    if (tryAutoConnectRigNetwork()) {
-      return; // connected + saved to NVS inside tryAutoConnectRigNetwork()
-    }
-    Serial.println("[WiFi] No rigXXX network found/connectable — going to setup AP.");
+    Serial.println("[WiFi] No SSID saved in NVS — going straight to setup AP.");
+    Serial.println("[WiFi] Auto-join disabled: no network is guessed or joined;");
+    Serial.println("[WiFi] open the setup AP and pick a network on /config.");
     startSetupAP();
     return;
   }
