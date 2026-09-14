@@ -247,7 +247,7 @@ static String cfgPage(ModuleConfig& cfg) {
 
   h += "<h3>Pi Logger</h3>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
-  h += "<label>Pi Host (blank = auto)</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.x.x or rig-logger.local'>";
+  h += "<label>Pi Host</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.5.194 (default) or __auto__'>";
   h += "<div class='small'>Blank = auto-discover.</div>";
   h += "<label>X-Rig-Token</label><input name='rigToken' type='password' value='" + _esc(cfg.rigToken) + "'>";
 
@@ -1017,7 +1017,7 @@ static void handleConfig() {
   }
 
   applyParam("pollIntervalS", [](String v){ _cfg->pollIntervalS = constrain(v.toInt(), 1, 30); });
-  applyParam("piHost",        [](String v){ _cfg->piHost = v; });
+  applyParam("piHost",        [](String v){ _cfg->piHost = v.trim(); });
   applyParam("rigToken",      [](String v){ _cfg->rigToken = v.isEmpty() ? "7804991970" : v; });
 
   // BUG FOUND 2026-09-10 (Sarah asked for a "spot sneaky bugs" pass):

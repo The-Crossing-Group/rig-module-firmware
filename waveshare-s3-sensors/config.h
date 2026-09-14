@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.14"
+#define FW_VERSION "rig-module-sensors-1.15.15"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -179,7 +179,7 @@ struct ModuleConfig {
   // "just wire up a sensor, it's auto-found" convenience.
   bool   baudManuallySet = false;
   int    pollIntervalS  = 7;     // how often to POST to the Pi (also the poll-task cycle gap — 7s default clears radar sensors' ~6s measurement cycle without spamming timeouts)
-  String piHost         = "";
+  String piHost         = "192.168.5.194";
   String rigToken       = "7804991970";
   String wifiSSID       = "";
   String wifiPass       = "";
@@ -237,7 +237,8 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.modbusBaud    = p.getLong("mbBaud", 9600);
   c.baudManuallySet = p.getBool("mbBaudSet", false);
   c.pollIntervalS = p.getInt("pollInt", 7);
-  c.piHost        = p.getString("piHost", "");
+  c.piHost        = p.getString("piHost", "192.168.5.194");
+  if (c.piHost == "__auto__") c.piHost = ""; // explicit opt-out of static default → auto-derive
   c.rigToken      = p.getString("rigToken", "7804991970");
   if (c.rigToken.isEmpty()) c.rigToken = "7804991970"; // self-heal, see other variants
   c.wifiSSID      = p.getString("wifiSSID", "");
