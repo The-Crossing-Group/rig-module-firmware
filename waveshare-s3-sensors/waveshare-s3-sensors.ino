@@ -189,7 +189,26 @@ void setup() {
   // happens from the webTask while loopTask can be inside appendBufferEntry).
   // One clean retry, then format only as a genuine last resort, and say so
   // loudly because it destroys the outage buffer.
-  if (!LittleFS.begin(false)) {
+  // Print WHICH partition we were actually given before blaming the
+  // filesystem — a missing/renamed "spiffs" partition (wrong Partition Scheme
+  // selected in the IDE) fails the mount exactly like corruption does, and the
+  // two need completely different fixes.
+  {
+    const esp_partition_t* fsPart = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, NULL);
+    if (!fsPart) {
+      Serial.println("[BOOT] !!! NO storage partition in the running partition table.");
+      Serial.println("[BOOT] !!! Partition Scheme is wrong — set it to "
+                     "\"16M Flash (3MB APP/9.9MB FATFS)\" and re-flash. "
+                     "LittleFS cannot work without it.");
+      fsUsable = false;
+    } else {
+      Serial.printf("[BOOT] Storage partition: \"%s\" @0x%x size=%u bytes\n",
+                    fsPart->label, (unsigned)fsPart->address, (unsigned)fsPart->size);
+    }
+  }
+
+  if (fsUsable && !LittleFS.begin(false)) {
     Serial.println("[BOOT] LittleFS mount failed — retrying once before any format");
     delay(200);
     if (!LittleFS.begin(false)) {
