@@ -247,7 +247,7 @@ static String cfgPage(ModuleConfig& cfg) {
 
   h += "<h3>Pi Logger</h3>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
-  h += "<label>Pi Host</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.5.194 (default) or __auto__'>";
+  h += "<label>Pi Host (blank = auto)</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.5.194 or rig-logger.local'>";
   h += "<div class='small'>Blank = auto-discover.</div>";
   h += "<label>X-Rig-Token</label><input name='rigToken' type='password' value='" + _esc(cfg.rigToken) + "'>";
 

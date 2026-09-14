@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.15"
+#define FW_VERSION "rig-module-sensors-1.15.16"
 
 #include <WiFi.h>
 #include <Preferences.h>
@@ -179,7 +179,10 @@ struct ModuleConfig {
   // "just wire up a sensor, it's auto-found" convenience.
   bool   baudManuallySet = false;
   int    pollIntervalS  = 7;     // how often to POST to the Pi (also the poll-task cycle gap — 7s default clears radar sensors' ~6s measurement cycle without spamming timeouts)
-  String piHost         = "192.168.5.194";
+  // Default blank = auto-derive (rigNNN SSID -> 192.168.NNN.10, then mDNS).
+  // Set a static IP here for rigs whose WiFi doesn't follow rigNNN naming
+  // (e.g. Rig 6 NORQIN at 192.168.5.194). Type __auto__ to clear it again.
+  String piHost         = "";
   String rigToken       = "7804991970";
   String wifiSSID       = "";
   String wifiPass       = "";
@@ -237,8 +240,8 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.modbusBaud    = p.getLong("mbBaud", 9600);
   c.baudManuallySet = p.getBool("mbBaudSet", false);
   c.pollIntervalS = p.getInt("pollInt", 7);
-  c.piHost        = p.getString("piHost", "192.168.5.194");
-  if (c.piHost == "__auto__") c.piHost = ""; // explicit opt-out of static default → auto-derive
+  c.piHost        = p.getString("piHost", "");
+  if (c.piHost == "__auto__") c.piHost = ""; // legacy: explicit auto marker normalises to blank
   c.rigToken      = p.getString("rigToken", "7804991970");
   if (c.rigToken.isEmpty()) c.rigToken = "7804991970"; // self-heal, see other variants
   c.wifiSSID      = p.getString("wifiSSID", "");
