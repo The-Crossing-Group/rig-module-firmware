@@ -1,8 +1,8 @@
-// discovery.h — IP-agnostic logger discovery (v1.15.18)
+// discovery.h — IP-agnostic logger discovery (v1.15.20)
 //
 // WHY: the old resolvePi() had exactly three ways to find the logger:
 //   1. a static piHost typed into /config
-//   2. derive 192.168.<NNN>.10 from a "rigNNN" WiFi SSID
+//   2. derive 192.168.<NNN>.10 from a "rigNNN" SSID
 //   3. a one-shot mDNS browse for _rig-logger._tcp
 // On a flat test network there is no per-rig router, so (2) is dead, and (3)
 // only ran at boot / every 5 min / after a failed POST — so a logger that
@@ -14,30 +14,35 @@
 //   2. legacy rigNNN SSID derivation (still used on the per-rig-router rigs)
 //   3. mDNS browse for _rig-logger._tcp, re-run on a short retry interval
 //      while unresolved and re-verified on a long interval once resolved
-//   4. TCP PORT SWEEP fallback: walk the module's own /24 looking for
+//   4. TCP port-sweep fallback: walk the module's own /24 looking for
 //      something listening on :8080. Only runs when mDNS is silent, and is
 //      rate-limited, so it can't stall the CAN loop.
 //
-// NO EXTERNAL LIBRARY. v1.15.17 originally used ESP32Ping, which is NOT part
-// of the ESP32 Arduino core (it's marian-craciunescu/ESP32Ping, a separate
-// Library Manager install) — build failed with "ESP32Ping.h: No such file or
-// directory". The sweep now uses plain non-blocking TCP connects instead,
-// which is what actually matters here: the logger answers on TCP :8080, and a
-// live host with the port closed replies RST immediately, so a closed port and
-// a dead host are still distinguishable without ICMP.
+// NO EXTERNAL LIBRARY, AND NO EXTRA INCLUDES EITHER.
+// Two earlier attempts at this file broke Sarah's build:
+//   v1.15.17 — `#include <ESP32Ping.h>`: not in the core, it's a separate
+//              Library Manager install (marian-craciunescu/ESP32Ping).
+//   v1.15.18/19 — `#include <WiFiClient.h>` and `<HTTPClient.h>`: those are
+//              NOT header names in the esp32 core. The classes live in
+//              WiFi.h / NetworkClient.h and the HTTP client is only pulled in
+//              by HTTPClient.h's real path, which Arduino's sketch preprocessor
+//              already resolves for the .ino. Including them by the wrong name
+//              fails exactly like the ping one did.
+// So: this file includes ONLY Arduino.h and ESPmDNS.h, and uses WiFiClient +
+// HTTPClient purely as types, relying on the .ino having included <WiFi.h> and
+// <HTTPClient.h> above it. That is the same contract the other .h files in this
+// sketch already use (webui.h uses WebServer& without including WebServer.h).
 //
 // THREADING: everything here runs from loopTask on core 1 only (same as the
-// old resolvePi). webui.h reads the *_disc* values via discoveryMethod(),
-// which is a plain String copy — same cross-task pattern already used for
-// resolvedPiIp on this firmware.
+// old resolvePi). webui.h reads discoveryMethod(), a plain String copy — the
+// same cross-task pattern already used for resolvedPiIp on this firmware.
 #ifndef DISCOVERY_H
 #define DISCOVERY_H
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include <ESPmDNS.h>
-#include <WiFiClient.h>
-#include <HTTPClient.h>
+// Requires <WiFi.h> and <HTTPClient.h> already included by the .ino (they are,
+// at the top of waveshare-s3-sensors.ino) for WiFiClient / HTTPClient / WiFi.
 
 static const unsigned long DISCOVER_RETRY_MS  = 20000UL;   // unresolved: retry discovery every 20s
 static const unsigned long DISCOVER_VERIFY_MS = 300000UL;  // resolved: re-verify via mDNS every 5 min
@@ -66,7 +71,8 @@ static bool probeLogger(const String& ip) {
 }
 
 // Did a TCP handshake to ip:LOGGER_PORT complete within timeoutMs?
-// Non-blocking connect + poll, so a dead host costs timeoutMs and nothing more.
+// A live host with the port closed sends RST and returns immediately; only a
+// silent/dead host costs the full timeout.
 static bool tcpPortOpen(const IPAddress& ip, uint16_t port, int timeoutMs) {
   WiFiClient c;
   if (!c.connect(ip, port, timeoutMs)) return false;
@@ -75,9 +81,9 @@ static bool tcpPortOpen(const IPAddress& ip, uint16_t port, int timeoutMs) {
 }
 
 // Walk the module's own /24 looking for a listener on LOGGER_PORT.
-// Cost: dead slots answer RST or time out at SWEEP_PORT_TIMEOUT, so a quiet /24
-// is roughly 25s worst case — which is why this only runs after mDNS has
-// already failed, and is rate-limited.
+// Cost: dead slots cost SWEEP_PORT_TIMEOUT each, so a quiet /24 is roughly 25s
+// worst case — which is why this only runs after mDNS has already failed, and
+// is rate-limited.
 static bool sweepSubnet() {
   IPAddress local = WiFi.localIP();
   IPAddress mask  = WiFi.subnetMask();
