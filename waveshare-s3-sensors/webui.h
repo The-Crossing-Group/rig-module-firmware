@@ -1018,7 +1018,10 @@ static void handleConfig() {
   }
 
   applyParam("pollIntervalS", [](String v){ _cfg->pollIntervalS = constrain(v.toInt(), 1, 30); });
-  applyParam("piHost",        [](String v){ _cfg->piHost = v.trim(); });
+  // NOTE: String::trim() mutates in place and returns void — it can't be used
+  // inline in an assignment. (v1.15.17 had `_cfg->piHost = v.trim()`, which
+  // compiled as `String = void` and killed the build.)
+  applyParam("piHost",        [&](String v){ v.trim(); _cfg->piHost = v; });
   applyParam("rigToken",      [](String v){ _cfg->rigToken = v.isEmpty() ? "7804991970" : v; });
 
   // BUG FOUND 2026-09-10 (Sarah asked for a "spot sneaky bugs" pass):
