@@ -1,4 +1,4 @@
-// discovery.h — IP-agnostic logger discovery (v1.15.17)
+// discovery.h — IP-agnostic logger discovery (v1.15.18)
 //
 // WHY: the old resolvePi() had exactly three ways to find the logger:
 //   1. a static piHost typed into /config
@@ -14,14 +14,17 @@
 //   2. legacy rigNNN SSID derivation (still used on the per-rig-router rigs)
 //   3. mDNS browse for _rig-logger._tcp, re-run on a short retry interval
 //      while unresolved and re-verified on a long interval once resolved
-//   4. SUBNET SWEEP fallback: walk the module's own /24 looking for something
-//      answering GET /api/status on :8080. Only runs when mDNS is silent, and
-//      is rate-limited, so it can't stall the CAN loop.
+//   4. TCP PORT SWEEP fallback: walk the module's own /24 looking for
+//      something listening on :8080. Only runs when mDNS is silent, and is
+//      rate-limited, so it can't stall the CAN loop.
 //
-// DEPENDENCY: the sweep uses Arduino's builtin ESP32Ping library (bundled with
-// the esp32 core since 2.x — no Library Manager install needed). If your core
-// somehow doesn't ship it, comment out ESP32PING_AVAILABLE below and the sweep
-// degrades to "not available"; mDNS + static still work.
+// NO EXTERNAL LIBRARY. v1.15.17 originally used ESP32Ping, which is NOT part
+// of the ESP32 Arduino core (it's marian-craciunescu/ESP32Ping, a separate
+// Library Manager install) — build failed with "ESP32Ping.h: No such file or
+// directory". The sweep now uses plain non-blocking TCP connects instead,
+// which is what actually matters here: the logger answers on TCP :8080, and a
+// live host with the port closed replies RST immediately, so a closed port and
+// a dead host are still distinguishable without ICMP.
 //
 // THREADING: everything here runs from loopTask on core 1 only (same as the
 // old resolvePi). webui.h reads the *_disc* values via discoveryMethod(),
@@ -33,19 +36,13 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
+#include <WiFiClient.h>
 #include <HTTPClient.h>
-
-#ifndef ESP32PING_AVAILABLE
-#define ESP32PING_AVAILABLE 1
-#endif
-#if ESP32PING_AVAILABLE
-#include <ESP32Ping.h>
-#endif
 
 static const unsigned long DISCOVER_RETRY_MS  = 20000UL;   // unresolved: retry discovery every 20s
 static const unsigned long DISCOVER_VERIFY_MS = 300000UL;  // resolved: re-verify via mDNS every 5 min
 static const unsigned long SWEEP_RETRY_MS     = 900000UL;  // don't re-sweep the /24 more than every 15 min
-static const int           SWEEP_TIMEOUT_MS   = 120;       // per-host ping timeout
+static const int           SWEEP_PORT_TIMEOUT = 120;       // ms per host waiting for a SYN/ACK
 static const uint16_t      LOGGER_PORT        = 8080;
 
 static String        _discResolvedIp  = "";
@@ -58,8 +55,8 @@ static bool          _discSweepExhausted = false;
 // GET /api/status answers 200 on rig-pi-logger's local server.
 static bool probeLogger(const String& ip) {
   HTTPClient http;
-  http.setConnectTimeout(250);
-  http.setTimeout(250);
+  http.setConnectTimeout(300);
+  http.setTimeout(300);
   http.begin("http://" + ip + ":" + String(LOGGER_PORT) + "/api/status");
   http.addHeader("Accept", "application/json");
   int code = http.GET();
@@ -68,10 +65,19 @@ static bool probeLogger(const String& ip) {
   return found;
 }
 
-// Walk the module's own /24. Returns true if a logger answered.
-// The ping gate means empty addresses cost ~120ms each rather than a full HTTP
-// connect timeout, so a quiet /24 costs roughly 30s — which is why this only
-// runs after mDNS has already failed, and is rate-limited.
+// Did a TCP handshake to ip:LOGGER_PORT complete within timeoutMs?
+// Non-blocking connect + poll, so a dead host costs timeoutMs and nothing more.
+static bool tcpPortOpen(const IPAddress& ip, uint16_t port, int timeoutMs) {
+  WiFiClient c;
+  if (!c.connect(ip, port, timeoutMs)) return false;
+  c.stop();
+  return true;
+}
+
+// Walk the module's own /24 looking for a listener on LOGGER_PORT.
+// Cost: dead slots answer RST or time out at SWEEP_PORT_TIMEOUT, so a quiet /24
+// is roughly 25s worst case — which is why this only runs after mDNS has
+// already failed, and is rate-limited.
 static bool sweepSubnet() {
   IPAddress local = WiFi.localIP();
   IPAddress mask  = WiFi.subnetMask();
@@ -85,35 +91,33 @@ static bool sweepSubnet() {
     return false;
   }
 
-#if !ESP32PING_AVAILABLE
-  Serial.println("[Disc] ESP32Ping not available — sweep skipped");
-  return false;
-#else
   uint8_t base0 = local[0], base1 = local[1], base2 = local[2];
   uint8_t selfLast = local[3];
-  Serial.printf("[Disc] Sweeping %d.%d.%d.1-254 for a logger on port %d...\n",
+  Serial.printf("[Disc] Sweeping %d.%d.%d.1-254 for TCP:%d...\n",
                 base0, base1, base2, LOGGER_PORT);
   unsigned long t0 = millis();
-  int pinged = 0, alive = 0;
+  int open = 0;
 
   for (int host = 1; host <= 254; host++) {
     if (host == selfLast) continue;  // that's us
     IPAddress cand(base0, base1, base2, (uint8_t)host);
-    pinged++;
-    if (!Ping.ping(cand, 1, SWEEP_TIMEOUT_MS)) continue;  // skip dead slots fast
-    alive++;
+    if (!tcpPortOpen(cand, LOGGER_PORT, SWEEP_PORT_TIMEOUT)) continue;
+    open++;
+    // Port is open. Confirm it's actually our logger before committing —
+    // anything could listen on 8080 (Grafana, another dev box, a printer).
     if (probeLogger(cand.toString())) {
       _discResolvedIp = cand.toString();
       _discMethod = "subnet-sweep";
-      Serial.printf("[Disc] Logger found by sweep: %s (%d pinged, %d alive, %lums)\n",
-                    _discResolvedIp.c_str(), pinged, alive, millis() - t0);
+      Serial.printf("[Disc] Logger found by sweep: %s (%d ports open, %lums)\n",
+                    _discResolvedIp.c_str(), open, millis() - t0);
       return true;
     }
+    Serial.printf("[Disc]   %s has :%d open but isn't our logger, continuing\n",
+                  cand.toString().c_str(), LOGGER_PORT);
   }
-  Serial.printf("[Disc] Sweep found nothing (%d pinged, %d alive, %lums)\n",
-                pinged, alive, millis() - t0);
+  Serial.printf("[Disc] Sweep found nothing (%d ports open, %lums)\n",
+                open, millis() - t0);
   return false;
-#endif
 }
 
 // Returns the logger IP, or "" if not currently known.
@@ -167,7 +171,7 @@ String discoverLogger(const String& staticHost, const String& wifiSSID) {
     if (!_discResolvedIp.isEmpty()) return _discResolvedIp;
   }
 
-  // 4. Subnet sweep fallback (only while still unresolved).
+  // 4. TCP port sweep fallback (only while still unresolved).
   if (_discResolvedIp.isEmpty() && !_discSweepExhausted &&
       (now - _discLastSweep >= SWEEP_RETRY_MS)) {
     _discLastSweep = now;

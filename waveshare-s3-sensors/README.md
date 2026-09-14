@@ -224,12 +224,11 @@ built into the ESP32 Arduino core (LittleFS, Preferences, ESPmDNS,
 ArduinoOTA, HTTPClient, WebServer, WiFi, `driver/twai.h` for CAN — no
 extra CAN library needed).
 
-`ESP32Ping` is also used, for the /24 logger-discovery sweep in
-`discovery.h`. It ships **inside the ESP32 Arduino core** (since core 2.x),
-so there is nothing to install from the Library Manager. If a build ever
-complains it can't find `ESP32Ping.h`, add
-`#define ESP32PING_AVAILABLE 0` above `#include "discovery.h"` — the sweep
-turns itself off and discovery falls back to static piHost + rigNNN + mDNS.
+**Nothing else.** The /24 logger-discovery sweep in `discovery.h` uses plain
+non-blocking `WiFiClient` TCP connects, so there is no library to install.
+(v1.15.17 originally called `ESP32Ping`, which is *not* in the core — it's
+`marian-craciunescu/ESP32Ping`, a separate Library Manager install — and the
+build died with `ESP32Ping.h: No such file or directory`. Fixed in v1.15.18.)
 
 ## Finding the logger (discovery.h)
 
@@ -244,8 +243,10 @@ The module finds the rig logger in this order:
    unresolved, re-verified every 5 min once found, so a logger that boots late
    or changes DHCP address is picked up on its own.
 4. **/24 subnet sweep** — if mDNS stays silent, walks the module's own subnet
-   pinging each address and probing `GET :8080/api/status`. Runs at most once
-   per 15 min and only while unresolved.
+   trying a TCP connect to `:8080` on each address, then confirms with
+   `GET /api/status`. Runs at most once per 15 min and only while unresolved.
+   A live host with the port closed replies RST immediately, so closed-vs-dead
+   is still distinguished without needing ICMP ping.
 
 `/system` shows which method is active, e.g. `192.168.5.194 (mdns)`.
 A failed POST invalidates a discovered address (it may be stale) but never a
