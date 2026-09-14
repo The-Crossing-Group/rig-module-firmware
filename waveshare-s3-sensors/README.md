@@ -223,3 +223,30 @@ Same as the other variants: ArduinoJson (>=6.x), NTPClient, plus everything
 built into the ESP32 Arduino core (LittleFS, Preferences, ESPmDNS,
 ArduinoOTA, HTTPClient, WebServer, WiFi, `driver/twai.h` for CAN — no
 extra CAN library needed).
+
+`ESP32Ping` is also used, for the /24 logger-discovery sweep in
+`discovery.h`. It ships **inside the ESP32 Arduino core** (since core 2.x),
+so there is nothing to install from the Library Manager. If a build ever
+complains it can't find `ESP32Ping.h`, add
+`#define ESP32PING_AVAILABLE 0` above `#include "discovery.h"` — the sweep
+turns itself off and discovery falls back to static piHost + rigNNN + mDNS.
+
+## Finding the logger (discovery.h)
+
+The module finds the rig logger in this order:
+
+1. **Static `piHost`** from `/config` — always wins. Use this when the logger
+   isn't discoverable (different subnet, mDNS blocked, etc).
+2. **`rigNNN` SSID derivation** — joining a WiFi named e.g. `rig128` implies
+   the logger is at `192.168.128.10`. Only applies to the per-rig-router rigs.
+3. **mDNS** browse for `_rig-logger._tcp` — what the logger advertises on boot
+   (`[DISCOVERY] advertising ...` in its journal). Retried every 20s while
+   unresolved, re-verified every 5 min once found, so a logger that boots late
+   or changes DHCP address is picked up on its own.
+4. **/24 subnet sweep** — if mDNS stays silent, walks the module's own subnet
+   pinging each address and probing `GET :8080/api/status`. Runs at most once
+   per 15 min and only while unresolved.
+
+`/system` shows which method is active, e.g. `192.168.5.194 (mdns)`.
+A failed POST invalidates a discovered address (it may be stale) but never a
+static one.

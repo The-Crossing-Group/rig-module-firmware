@@ -618,7 +618,7 @@ function fetchLive(){
     let sys = d.system||{};
     s += '<h3>System</h3><table>';
     s += '<tr><td>Module ID</td><td>'+d.moduleId+'</td></tr>';
-    s += '<tr><td>Pi</td><td>'+(sys.piIp||'unresolved')+'</td></tr>';
+    s += '<tr><td>Pi</td><td>'+(sys.piIp||'unresolved')+(sys.piMethod?' ('+sys.piMethod+')':'')+'</td></tr>';
     s += '<tr><td>Last post</td><td class="'+(sys.lastPostOk?'ok':'open')+'">'+((sys.lastPostMs>0)?(sys.lastPostMs/1000).toFixed(0)+'s ago':'never')+' '+(sys.lastPostOk?'ok':'fail')+'</td></tr>';
     s += '<tr><td>Buffer</td><td>'+sys.bufCount+' entries</td></tr>';
     s += '<tr><td>WiFi RSSI</td><td>'+(sys.rssi||'?')+' dBm</td></tr>';
@@ -827,6 +827,7 @@ static void handleApiStatus() {
   doc["system"]["freeHeap"]   = ESP.getFreeHeap();
   doc["system"]["rssi"]       = WiFi.RSSI();
   doc["system"]["piIp"]       = resolvedPiIp;
+  doc["system"]["piMethod"]   = discoveryMethod();  // static|rig-ssid|mdns|subnet-sweep|none
   doc["system"]["lastPostMs"] = lastPostMs ? (millis() - lastPostMs) : -1;
   doc["system"]["lastPostOk"] = lastPostOk;
   doc["system"]["bufCount"]     = bufferCount; // in-RAM tracked count

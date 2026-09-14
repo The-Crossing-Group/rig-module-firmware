@@ -51,6 +51,7 @@
 #include <nvs_flash.h>
 #include <nvs.h>
 #include "config.h"
+#include "discovery.h"
 #include "modbus.h"
 #include "can.h"
 #include "scaling.h"
@@ -268,9 +269,10 @@ void loop() {
   }
 
   if (!apModeActive) {
-    if (resolvedPiIp.isEmpty() || (millis() - lastPiResolve > 300000UL)) {
-      resolvePi();
-    }
+    // Discovery is a state machine with its own timers (see discovery.h):
+    // calling it every cycle is cheap when resolved and lets it retry
+    // promptly when not. resolvedPiIp is core-1-owned, same as before.
+    resolvePi();
     static unsigned long lastPostAttempt = 0;
     unsigned long now = millis();
     if (!resolvedPiIp.isEmpty() && (now - lastPostAttempt >= (unsigned long)cfg.pollIntervalS * 1000UL)) {
@@ -548,39 +550,11 @@ void connectWifi() {
 
 // =============================================================================
 // Pi DISCOVERY
-// =============================================================================
+// Thin wrapper over discovery.h — see that file for the full strategy.
+// Kept as resolvePi() so the existing loopTask call site is unchanged.
 void resolvePi() {
   lastPiResolve = millis();
-
-  if (!cfg.piHost.isEmpty()) {
-    resolvedPiIp = cfg.piHost;
-    Serial.printf("[Pi] Using static host: %s\n", resolvedPiIp.c_str());
-    return;
-  }
-
-  if (!cfg.wifiSSID.isEmpty() && isRigSSID(cfg.wifiSSID)) {
-    String rigNum = cfg.wifiSSID.substring(3);
-    resolvedPiIp = "192.168." + rigNum + ".10";
-    Serial.printf("[Pi] Derived from rig SSID \"%s\": %s\n", cfg.wifiSSID.c_str(), resolvedPiIp.c_str());
-    return;
-  }
-
-  int n = MDNS.queryService("_rig-logger", "_tcp");
-  if (n > 0) {
-    resolvedPiIp = MDNS.address(0).toString();
-    Serial.printf("[Pi] mDNS found: %s\n", resolvedPiIp.c_str());
-    return;
-  }
-
-  IPAddress ip;
-  if (WiFi.hostByName("rig-logger.local", ip)) {
-    resolvedPiIp = ip.toString();
-    Serial.printf("[Pi] Hostname fallback: %s\n", resolvedPiIp.c_str());
-    return;
-  }
-
-  Serial.println("[Pi] Could not resolve Pi — will retry in 5 min");
-  resolvedPiIp = "";
+  resolvedPiIp = discoverLogger(cfg.piHost, cfg.wifiSSID);
 }
 
 // =============================================================================
@@ -848,6 +822,9 @@ void postToPi() {
         removeBufferHead();
         bufferCount = max(0, bufferCount - 1);
       } else {
+        // Address may be stale (logger moved / DHCP change) — let discovery
+        // re-resolve instead of silently sitting on a dead IP.
+        discoveryInvalidate(resolvedPiIp);
         resolvedPiIp = "";
         return;
       }
@@ -863,6 +840,7 @@ void postToPi() {
   if (!ok) {
     appendBufferEntry(payload);
     bufferCount++;
+    discoveryInvalidate(resolvedPiIp);
     resolvedPiIp = "";
   }
 }
