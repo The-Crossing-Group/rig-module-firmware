@@ -1064,6 +1064,17 @@ static void handleConfig() {
 
   saveConfig(*_prefs, *_cfg);
 
+  // v1.15.21: give loopTask a moment to finish any LittleFS write it's in the
+  // middle of before we reboot out from under it. This WiFi-save path reboots
+  // from webTask while loopTask can be inside appendBufferEntry()/
+  // removeBufferHead() — LittleFS has no cross-task locking, and cutting a
+  // write mid-flight is a good way to leave the partition unmountable, which
+  // is exactly the "LittleFS mount failed — formatting" line Sarah kept seeing
+  // after every WiFi change (and it silently ate the outage buffer each time).
+  // This doesn't make the two tasks safe against each other in general; it
+  // just removes the guaranteed collision at the reboot.
+  delay(1500);
+
   // Read the two baud keys straight back from NVS right now, in a fresh
   // Preferences handle — not from the in-RAM _cfg struct, which would
   // "verify" nothing (it's just proving RAM still has what we put there

@@ -99,6 +99,59 @@ bool flushNow = false;
 bool apModeActive = false;
 String apSSID = "";
 
+// Set false only if LittleFS is unusable even after a format (see setup()).
+// Every LittleFS user in this sketch checks it first so a dead filesystem
+// degrades to "no buffering" instead of repeated failed opens in the loop.
+bool fsUsable = true;
+
+// =============================================================================
+// QUIET THE USB-CDC PORT WHILE THE RADIO IS BRINGING UP (v1.15.21)
+//
+// SYMPTOM Sarah reported: the serial monitor constantly disconnects and
+// reconnects, and it's worst around a WiFi change.
+//
+// This board's USB is the ESP32-S3's OWN peripheral (USB-CDC on boot, not an
+// FTDI/CH340 chip). The tiny USB task runs on core 0, and the WiFi driver's
+// init/calibration is a CPU-bound burst that starves it — the device stops
+// answering SETUP for longer than the host allows, Linux drops it, and it
+// re-enumerates a second later. That's the disconnect/reconnect cycle, and
+// it's why it clusters exactly where WiFi work happens:
+//   - setup(): esp_log_level_set("wifi", ESP_LOG_VERBOSE) + Serial.setDebugOutput
+//     (true) + 5 connect attempts, each doing WiFi.mode(WIFI_OFF) → scan →
+//     WiFi.begin()
+//   - the WiFi-save reboot, which runs that whole storm right after boot
+//
+// FIX: drop the radio-log spam to WARN and turn the Arduino assert channel off
+// for the duration of the connect storm, then restore both. Real diagnostics
+// survive (our own Serial.printf lines are untouched); only the driver's
+// firehose is muted while it's most likely to starve USB.
+//
+// Set these BEFORE the first call below and they stay in effect for the whole
+// boot if you want maximum serial stability during a bring-up you're watching.
+static bool _quietUsbActive = false;
+static void quietUsbForRadioWork() {
+  if (_quietUsbActive) return;
+  _quietUsbActive = true;
+  esp_log_level_set("wifi", ESP_LOG_WARN);
+  esp_log_level_set("wifi_init", ESP_LOG_WARN);
+  esp_log_level_set("phy_init", ESP_LOG_WARN);
+  esp_log_level_set("phy", ESP_LOG_WARN);
+  esp_log_level_set("system_api", ESP_LOG_WARN);
+  esp_log_level_set("nvs", ESP_LOG_WARN);
+  Serial.setDebugOutput(false);
+}
+static void restoreVerboseRadioLogs() {
+  if (!_quietUsbActive) return;
+  _quietUsbActive = false;
+  esp_log_level_set("wifi", ESP_LOG_VERBOSE);
+  esp_log_level_set("wifi_init", ESP_LOG_VERBOSE);
+  esp_log_level_set("phy_init", ESP_LOG_VERBOSE);
+  esp_log_level_set("phy", ESP_LOG_VERBOSE);
+  esp_log_level_set("system_api", ESP_LOG_VERBOSE);
+  esp_log_level_set("nvs", ESP_LOG_VERBOSE);
+  Serial.setDebugOutput(true);
+}
+
 // =============================================================================
 // SETUP
 // =============================================================================
@@ -129,11 +182,27 @@ void setup() {
   Serial.println("========================================");
 
   Serial.println("[BOOT] Mounting LittleFS...");
-  if (!LittleFS.begin(true)) {
-    Serial.println("[BOOT] LittleFS mount failed — formatting");
-    LittleFS.format();
-    LittleFS.begin(true);
-  } else {
+  // v1.15.21: mount WITHOUT auto-format first. LittleFS.begin(true) formats
+  // the partition itself when the mount fails, and doing that on top of a
+  // filesystem that another task is mid-write to is how /buffer.jsonl got
+  // wiped on reboot (see webui.h handleConfigPost — the WiFi-save reboot
+  // happens from the webTask while loopTask can be inside appendBufferEntry).
+  // One clean retry, then format only as a genuine last resort, and say so
+  // loudly because it destroys the outage buffer.
+  if (!LittleFS.begin(false)) {
+    Serial.println("[BOOT] LittleFS mount failed — retrying once before any format");
+    delay(200);
+    if (!LittleFS.begin(false)) {
+      Serial.println("[BOOT] LittleFS still failing — FORMATTING (buffered data lost)");
+      LittleFS.format();
+      if (!LittleFS.begin(true)) {
+        Serial.println("[BOOT] !!! LittleFS unusable even after format — "
+                       "buffering and OTA disabled, rest of firmware continues");
+        fsUsable = false;
+      }
+    }
+  }
+  if (fsUsable) {
     Serial.printf("[BOOT] LittleFS OK, total=%d used=%d\n", LittleFS.totalBytes(), LittleFS.usedBytes());
   }
 
@@ -497,6 +566,11 @@ void connectWifi() {
   WiFi.scanDelete();
 
   Serial.println("[WiFi] Attempting connection...");
+  // Mute the driver's log firehose for the connect storm — see
+  // quietUsbForRadioWork() for why (radio init starves the USB-CDC task and
+  // the host drops/re-enumerates the serial port). Our own [WiFi] lines above
+  // and below still print; only ESP_LOG_VERBOSE radio spam is suppressed.
+  quietUsbForRadioWork();
   WiFi.setAutoReconnect(false);
   WiFi.persistent(false);
 
@@ -546,6 +620,10 @@ void connectWifi() {
     startSetupAP();
   }
   Serial.println("[WiFi] ----------------------------------------");
+  // Bring the radio logs back now that the worst of the CPU burst is over.
+  // If we ended up in setup-AP mode, leave them quiet — softAP is still
+  // radio work and the port is the only thing she's got for diagnostics.
+  if (WiFi.status() == WL_CONNECTED) restoreVerboseRadioLogs();
 }
 
 // =============================================================================
@@ -865,6 +943,7 @@ bool httpPost(const String& ip, const String& json) {
 // BUFFER (LittleFS /buffer.jsonl)
 // =============================================================================
 int countBufferEntries() {
+  if (!fsUsable) return 0;
   File f = LittleFS.open("/buffer.jsonl", "r");
   if (!f) return 0;
   int n = 0;
@@ -877,6 +956,7 @@ int countBufferEntries() {
 }
 
 void appendBufferEntry(const String& json) {
+  if (!fsUsable) return;
   int maxEntries = min(3600, (int)(3 * 3600 / max(1, cfg.pollIntervalS)));
   if (bufferCount >= maxEntries) {
     // BUG FIXED 2026-09-09: this called trimBufferHead() (removes the
@@ -903,6 +983,7 @@ void appendBufferEntry(const String& json) {
 // the old popBufferEntry() which deleted on read regardless of whether
 // the resend actually succeeded (see postToPi() comment).
 String peekBufferEntry() {
+  if (!fsUsable) return "";
   File f = LittleFS.open("/buffer.jsonl", "r");
   if (!f) return "";
   String first = "";
@@ -920,6 +1001,7 @@ String peekBufferEntry() {
 // (or intentionally discarding it, e.g. trimming a full buffer) — this
 // is the one place that destructively shrinks /buffer.jsonl.
 void removeBufferHead() {
+  if (!fsUsable) return;
   File f = LittleFS.open("/buffer.jsonl", "r");
   if (!f) return;
 
