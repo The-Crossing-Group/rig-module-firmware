@@ -129,6 +129,18 @@ bool fsUsable = true;
 // Set these BEFORE the first call below and they stay in effect for the whole
 // boot if you want maximum serial stability during a bring-up you're watching.
 static bool _quietUsbActive = false;
+
+// v1.15.24: set this to 1 to keep the radio driver's log firehose OFF for the
+// ENTIRE boot instead of just during the connect storm. Use it when the USB-CDC
+// serial port is dropping at startup and you need a stable console to see why —
+// the drop is the tiny USB task being starved by radio CPU work, and the log
+// volume is what makes it fatal. Costs you the verbose wifi/phy diagnostics,
+// which is a fair trade when the alternative is no console at all.
+// All our own [WiFi]/[BOOT] printf lines still print at any setting.
+#ifndef QUIET_SERIAL_BOOT
+#define QUIET_SERIAL_BOOT 0
+#endif
+
 static void quietUsbForRadioWork() {
   if (_quietUsbActive) return;
   _quietUsbActive = true;
@@ -158,6 +170,13 @@ static void restoreVerboseRadioLogs() {
 void setup() {
   Serial.begin(115200);
   delay(500);
+
+#if QUIET_SERIAL_BOOT
+  Serial.println("[BOOT] QUIET_SERIAL_BOOT=1 — radio driver logs muted for the");
+  Serial.println("[BOOT] whole boot to keep the USB-CDC console alive. Our own");
+  Serial.println("[BOOT] [BOOT]/[WiFi]/[HTTP] lines still print.");
+  quietUsbForRadioWork();
+#endif
 
   // See modbus/WiFi self-heal rationale below (ensureStaStarted) — these
   // two logging systems both matter for diagnosing WiFi driver failures.
@@ -563,7 +582,12 @@ void connectWifi() {
   // Bring the radio logs back now that the worst of the CPU burst is over.
   // If we ended up in setup-AP mode, leave them quiet — softAP is still
   // radio work and the port is the only thing she's got for diagnostics.
+#if QUIET_SERIAL_BOOT
+  // Console stability was the whole point — leave the radio logs muted.
+  Serial.println("[WiFi] (QUIET_SERIAL_BOOT: radio logs left muted this boot)");
+#else
   if (WiFi.status() == WL_CONNECTED) restoreVerboseRadioLogs();
+#endif
 }
 
 // =============================================================================
