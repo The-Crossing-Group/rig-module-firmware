@@ -160,6 +160,22 @@ static bool _quietUsbActive = false;
 #define FORGET_WIFI_ONCE 0
 #endif
 
+// v1.15.26: set to 1 to wipe the ENTIRE rigmod NVS namespace on next boot —
+// every sensor slot, CAN settings, tokens, everything. Same effect as a full
+// chip erase, without needing esptool or the BOOT/RESET dance. Set back to 0 and
+// reflash once you want to keep the fresh config.
+//
+// Deliberately does NOT call nvs_flash_erase(): that wipes the whole NVS
+// partition including the WiFi driver's own storage, which is what the WL_STOPPED
+// self-heal got in trouble with. clear() removes all of OUR keys and leaves the
+// driver's areas alone.
+//
+// This is the "start completely fresh" switch. Prefer the red Forget WiFi button
+// on /config when the page is reachable; use this when it isn't.
+#ifndef FACTORY_RESET_ONCE
+#define FACTORY_RESET_ONCE 0
+#endif
+
 static void quietUsbForRadioWork() {
   if (_quietUsbActive) return;
   _quietUsbActive = true;
@@ -206,6 +222,16 @@ void setup() {
   prefs.remove("wifiSSID");
   prefs.remove("wifiPass");
   prefs.end();
+#endif
+
+#if FACTORY_RESET_ONCE
+  Serial.println("[BOOT] FACTORY_RESET_ONCE=1 — wiping ALL saved module config.");
+  prefs.begin("rigmod", false);
+  prefs.clear();
+  prefs.end();
+  Serial.println("[BOOT] Namespace cleared: everything from here on is the");
+  Serial.println("[BOOT] compiled-in default, and no network is saved, so boot");
+  Serial.println("[BOOT] goes straight to the setup AP.");
 #endif
 
   // See modbus/WiFi self-heal rationale below (ensureStaStarted) — these
