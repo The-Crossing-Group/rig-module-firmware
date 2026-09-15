@@ -97,6 +97,17 @@ int bufferCount = 0;
 bool flushNow = false;
 
 bool apModeActive = false;
+
+// v1.15.27: when AP_FIRST_NO_WIFI_WAIT is on, connectWifi()'s per-attempt
+// WiFi.mode(WIFI_OFF) would tear the setup AP back down. ensureApAlive() re-arms
+// the AP side after each teardown; only called from that loop, guarded by this flag.
+static bool s_apKeepAlive = false;
+static void ensureApAlive() {
+  if (!s_apKeepAlive || !apModeActive) return;
+  if (WiFi.getMode() != WIFI_AP && WiFi.getMode() != WIFI_AP_STA) {
+    WiFi.mode(WIFI_AP_STA);
+  }
+}
 String apSSID = "";
 
 // Set false only if LittleFS is unusable even after a format (see setup()).
@@ -174,6 +185,22 @@ static bool _quietUsbActive = false;
 // on /config when the page is reachable; use this when it isn't.
 #ifndef FACTORY_RESET_ONCE
 #define FACTORY_RESET_ONCE 0
+#endif
+
+// v1.15.27: set to 1 to bring up the setup AP BEFORE any WiFi connection attempt.
+//
+// WHY: connectWifi() runs before webServer.begin() in setup(). When a network IS
+// saved, its 5-attempt loop costs ~40-60s of WiFi.mode(WIFI_OFF)/scan/begin
+// thrashing before startSetupAP() is ever reached — and the AP does not exist at
+// all during that window. A phone that joins the AP name it saw earlier gets
+// nothing to talk to, which looks exactly like "on the waveshare's network but the
+// browser cannot connect." With this set, the AP is live within ~1s of power-on
+// and the STA attempt happens afterwards, so the page is reachable the whole time.
+//
+// Set back to 0 once the module is configured; it only matters for the
+// has-a-stale-or-dead-saved-network case.
+#ifndef AP_FIRST_NO_WIFI_WAIT
+#define AP_FIRST_NO_WIFI_WAIT 0
 #endif
 
 static void quietUsbForRadioWork() {
@@ -347,6 +374,23 @@ void setup() {
   // to reach the web UI to fix it. Sensors/CAN not coming up is a
   // recoverable, visible-on-the-web-UI problem; losing network access
   // entirely is not.
+
+#if AP_FIRST_NO_WIFI_WAIT
+  // Bring the setup AP up FIRST so the web page is reachable immediately, then let
+  // connectWifi() add the STA side. Without this, a saved-but-dead network keeps
+  // the AP offline for the ~40-60s the retry loop takes, and the browser has
+  // nothing to connect to. startSetupAP() is idempotent-safe here: connectWifi()
+  // only calls it again on the no-SSID / all-attempts-failed paths, where the
+  // second call just re-issues softAP() on the same SSID.
+  Serial.println("[WiFi] AP_FIRST_NO_WIFI_WAIT=1 — starting setup AP before any STA attempt.");
+  startSetupAP();
+  // connectWifi()'s retry loop calls WiFi.mode(WIFI_OFF) between attempts, which
+  // WOULD tear this AP back down and put us right back where we started. Force the
+  // AP bit back on after each teardown so the page stays reachable throughout.
+  // startSetupAP() above already set apModeActive, so the fallback paths in
+  // connectWifi() still behave normally.
+  s_apKeepAlive = true;
+#endif
 
   connectWifi();
 
@@ -563,6 +607,7 @@ void connectWifi() {
   ensureStaStarted();
   WiFi.disconnect(true);
   delay(100);
+  ensureApAlive();  // v1.15.27: same teardown risk on the pre-scan disconnect
 
   Serial.println("[WiFi] Scanning for networks...");
   int found = WiFi.scanNetworks();
@@ -608,6 +653,7 @@ void connectWifi() {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     delay(500);
+    ensureApAlive();  // v1.15.27: undo the AP teardown from WIFI_OFF
     ensureStaStarted();
     delay(200);
 
