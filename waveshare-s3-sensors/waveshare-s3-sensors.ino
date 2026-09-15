@@ -482,9 +482,21 @@ static bool ensureStaStarted() {
 // Removed because it made the module look like it had a hardcoded network: a
 // board with a blank config would find whatever rigNNN AP was in range (e.g.
 // the bench test AP on drill-pi-1's router), join it, and PERSIST that choice.
-// From then on "Beaudoin" or "rig128" came back on every boot no matter how
-// many times the chip was erased-and-reflashed, because the SSID was being
-// re-derived from the live RF environment at first boot rather than left empty.
+// From then on a network name came back on every boot no matter how many times
+// the chip was erased-and-reflashed, because the SSID was being re-derived from
+// the live RF environment at first boot rather than left empty.
+//
+// NOTE ON THE WORDING ABOVE, because it invites the wrong conclusion: nothing
+// was ever hardcoded. No SSID string exists anywhere in this repo — grep for
+// any network name and the only hits are comments. The persistence was NVS
+// storage plus this routine re-deriving a candidate from a live scan.
+//
+// The WL_STOPPED self-heal in ensureStaStarted() does call nvs_flash_erase()
+// and then saveConfig() right after, which LOOKS like it re-writes a stale SSID
+// over a clean erase. It can't: loadConfig() runs earlier in setup() and is the
+// only thing that populates cfg.wifiSSID, so on a freshly erased chip that field
+// is empty and the rebuild writes an empty SSID. Self-heal can only ever
+// republish what was already in NVS — it cannot invent a network.
 //
 // Policy now: the firmware never joins, guesses, or persists a network the
 // user didn't explicitly save on /config. Blank config -> setup AP, full stop.
