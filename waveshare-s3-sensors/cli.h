@@ -117,7 +117,7 @@ static void _cliCmHelp() {
     "  cm set type <text>       module type (free text)\n"
     "  cm set desc <text>       description\n"
     "  cm set poll <secs>       poll interval (1-3600)\n"
-    "  cm set pihost <host>     Pi host override (blank = auto mDNS)\n"
+    "  cm set pihost <host>     Host PC address override (blank = auto mDNS)\n"
     "  cm set token <text>      X-Rig-Token\n"
     "  cm set baud <rate>       RS485 baud (also sets baudManuallySet)\n"
     "  cm set canbit <rate>     CAN bitrate (125000/250000/500000/1000000) -- CAN itself always on\n"
@@ -263,7 +263,7 @@ static void _cliCm(String* tok, int n) {
       if (v < 1 || v > 3600) { _cliErr("poll must be 1-3600"); return; }
       cfg.pollIntervalS = v; _cliOk("poll interval");
     }
-    else if (field == "pihost") { cfg.piHost = val; _cliOk("pi host"); }
+    else if (field == "pihost") { cfg.piHost = val; _cliOk("host pc address"); }
     else if (field == "token") { cfg.rigToken = val; _cliOk("token"); }
     else if (field == "baud") {
       cfg.modbusBaud = val.toInt();

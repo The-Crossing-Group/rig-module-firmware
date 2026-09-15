@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.32"
+#define FW_VERSION "rig-module-sensors-1.15.33"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code

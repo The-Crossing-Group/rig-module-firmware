@@ -96,7 +96,7 @@ static const char NAV[] PROGMEM = R"(
 </style>
 <div class='nav'>
   <a href='/'>&#9881; Config</a>
-  <a href='/sensors'>&#128225; Sensors</a>
+  <a href='/sensors'>&#128225; RS485</a>
   <a href='/can'>&#128225; CAN</a>
   <a href='/live'>&#128202; Live</a>
   <a href='/system'>&#128295; System</a>
@@ -228,7 +228,7 @@ static String cfgPage(ModuleConfig& cfg) {
 
   h += "<h3>Carriage Position Sensor (CANopen Encoder Bridge)</h3>";
   h += "<div class='small'>This board's CAN link exists for one job right now: waking the "
-       "ditchwitch-logger carriage-position CANopen encoder and relaying its frames to the Pi "
+       "ditchwitch-logger carriage-position CANopen encoder and relaying its frames to the Host PC "
        "(decode happens there — see that project's <code>web/sensors.html</code>).</div>";
   h += "<label><input type='checkbox' name='canopenBridge'";
   if (cfg.canopenBridge) h += " checked";
@@ -242,12 +242,12 @@ static String cfgPage(ModuleConfig& cfg) {
   if (cfg.canopenTargetSpecific) h += " checked";
   h += "> Target specific node (unchecked = broadcast, confirmed working)</label>";
   h += "<div class='small'>Confirmed: encoder counts/rev = 16384 (EPC object 6001h factory "
-       "default 0x4000). Position-per-foot calibration is unconfirmed — set on the Pi's Sensor "
+       "default 0x4000). Position-per-foot calibration is unconfirmed — set on the Host PC's Sensor "
        "Configuration page once the sensor is jogged a known distance, not here.</div>";
 
-  h += "<h3>Pi Logger</h3>";
+  h += "<h3>Host PC Logger</h3>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
-  h += "<label>Pi Host (blank = auto)</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.5.194 or rig-logger.local'>";
+  h += "<label>Host PC Address (blank = auto)</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.5.194 or rig-logger.local'>";
   h += "<div class='small'>Blank = auto-discover.</div>";
   h += "<label>X-Rig-Token</label><input name='rigToken' type='password' value='" + _esc(cfg.rigToken) + "'>";
 
@@ -516,7 +516,7 @@ static String canPage(ModuleConfig& cfg) {
   String h = FPSTR(NAV);
   h += "<div class='page'><h2>&#128225; CAN Signals</h2>";
   h += "<div class='card'>CAN running at " + String(cfg.canBitrate) + " bit/s, " +
-       (cfg.canopenBridge ? "Carriage Position Sensor bridge (transmitting bring-up, relaying raw frames to Pi)"
+       (cfg.canopenBridge ? "Carriage Position Sensor bridge (transmitting bring-up, relaying raw frames to Host PC)"
                            : "listen-only") + ". "
        "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps.</div>";
   h += "<p class='small'>Decodes a byte range from a specific CAN ID into a value.</p>";
@@ -618,7 +618,7 @@ function fetchLive(){
     let sys = d.system||{};
     s += '<h3>System</h3><table>';
     s += '<tr><td>Module ID</td><td>'+d.moduleId+'</td></tr>';
-    s += '<tr><td>Pi</td><td>'+(sys.piIp||'unresolved')+(sys.piMethod?' ('+sys.piMethod+')':'')+'</td></tr>';
+    s += '<tr><td>Host PC</td><td>'+(sys.piIp||'unresolved')+(sys.piMethod?' ('+sys.piMethod+')':'')+'</td></tr>';
     s += '<tr><td>Last post</td><td class="'+(sys.lastPostOk?'ok':'open')+'">'+((sys.lastPostMs>0)?(sys.lastPostMs/1000).toFixed(0)+'s ago':'never')+' '+(sys.lastPostOk?'ok':'fail')+'</td></tr>';
     s += '<tr><td>Buffer</td><td>'+sys.bufCount+' entries</td></tr>';
     s += '<tr><td>WiFi RSSI</td><td>'+(sys.rssi||'?')+' dBm</td></tr>';
