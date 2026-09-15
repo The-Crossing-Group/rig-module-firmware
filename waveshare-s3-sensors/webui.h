@@ -1079,15 +1079,43 @@ static void handleConfig() {
     submittedSsid = v;
     if (v != _cfg->wifiSSID) { _cfg->wifiSSID = v; wifiChanged = true; }
   });
-  applyParam("wifiPass", [&](String v){ if (v != _cfg->wifiPass) { _cfg->wifiPass = v; wifiChanged = true; } });
+  // BUG FOUND 2026-09-15 (Sarah: "waveshare now is totally resetting the
+  // wifi settings when it reboots when i try to set it"): wifiPass is
+  // NEVER pre-filled into the form on purpose (see the label below this
+  // form -- "Password is never pre-filled, type it fresh"). That means
+  // EVERY /config save, for ANY field, submits wifiPass="" (blank) unless
+  // the user actually retyped it that visit. The old check `v !=
+  // _cfg->wifiPass` treated that blank submission as a real change
+  // (blank almost never equals the actual saved password), silently
+  // WIPED the saved password to empty, and set wifiChanged=true --
+  // forcing an immediate reboot that then fails to join with a blank
+  // password. This bug already existed but was masked as long as
+  // wifiPass was type='password': Chrome/Firefox's own saved-credential
+  // autofill (the exact prompt Sarah asked to remove in v1.15.34) was
+  // silently re-filling the real password back into the field on every
+  // page load, so `v` was never actually blank in practice. Switching to
+  // type='text' (v1.15.34) removed that accidental safety net and fully
+  // exposed this. Fix: a blank submitted password means "user didn't
+  // type a new one" -- leave the saved password untouched. Only a
+  // genuinely non-empty, different value counts as a real change.
+  bool passActuallyChanged = false;
+  applyParam("wifiPass", [&](String v){
+    if (!v.isEmpty() && v != _cfg->wifiPass) { _cfg->wifiPass = v; wifiChanged = true; passActuallyChanged = true; }
+  });
 
   // v1.15.14 serial diagnostic (field report: "SSID won't change" twice on
   // 2026-09-11 and we've been guessing). Print exactly what the browser
   // submitted vs what's in NVS, so the next report is settled by one log line
   // instead of another firmwares.
+  // v1.15.35: pass_changed now reflects passActuallyChanged (the real
+  // decision made above), not a raw string comparison against a field
+  // that's blank on every single save by design -- that comparison would
+  // print "yes" on every save regardless of whether the password was
+  // actually touched, which is exactly the kind of misleading diagnostic
+  // that would send a future debugging session down the wrong path.
   Serial.printf("[CFG] POST wifi: submitted_ssid=\"%s\" saved_ssid=\"%s\" pass_changed=%s ap_mode=%s\n",
     submittedSsid.c_str(), _cfg->wifiSSID.c_str(),
-    (_srv->hasArg("wifiPass") && _srv->arg("wifiPass") != _cfg->wifiPass) ? "yes" : "no",
+    passActuallyChanged ? "yes" : "no",
     apModeActive ? "yes" : "no");
 
   saveConfig(*_prefs, *_cfg);
