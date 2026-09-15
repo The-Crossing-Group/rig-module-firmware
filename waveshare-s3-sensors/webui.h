@@ -93,6 +93,21 @@ static const char NAV[] PROGMEM = R"(
   .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
   .grid4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px}
   .badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:#334}
+  /* v1.15.34: visual dot-masking WITHOUT type='password'. Chrome/Firefox
+     key their "save this password?" prompt off the mere presence of a
+     type='password' field with a real value in it once you navigate
+     away from the page — happens on the token/WiFi-password fields here
+     even though this is a LAN-only bench config page with no login flow
+     at all, and every field's value is stored/shown in plaintext on
+     THIS same page regardless (see wifiSSID's card, /system, etc). A
+     real type='password' field bought no actual secrecy, just an
+     unwanted browser prompt. -webkit-text-security gets the same dot-
+     masked look on a type='text' input, which browsers do not treat as
+     a credential field at all. (Standard-track CSS text-security isn't
+     shipped cross-browser yet — this -webkit- prefixed property is,
+     confirmed, in every Chromium and Firefox release currently in use.)
+  */
+  .masked-text{-webkit-text-security:disc}
 </style>
 <div class='nav'>
   <a href='/'>&#9881; Config</a>
@@ -249,7 +264,11 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
   h += "<label>Host PC Address (blank = auto)</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.5.194 or rig-logger.local'>";
   h += "<div class='small'>Blank = auto-discover.</div>";
-  h += "<label>X-Rig-Token</label><input name='rigToken' type='password' value='" + _esc(cfg.rigToken) + "'>";
+  // v1.15.34: type='text' + masked-text (dot-masked via CSS), not
+  // type='password' — see that class's comment above. Chrome/Firefox
+  // don't treat this as a credential field at all now, so no more
+  // "save this password?" prompt on leaving the page.
+  h += "<label>X-Rig-Token</label><input name='rigToken' type='text' class='masked-text' autocomplete='off' value='" + _esc(cfg.rigToken) + "'>";
 
   h += "<h3>WiFi</h3>";
   // v1.15.14: AP-mode safety net. While the unit is in setup-AP mode it has
@@ -279,7 +298,11 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<option value='__manual__'>Type manually...</option></select>";
   h += "<input name='wifiSSIDManual' id='wifiSSIDManual' autocomplete='off' style='display:none' placeholder='site wifi network name'>";
   h += "<div class='small' id='ssidHint'>Scan, then pick from the list.</div>";
-  h += "<label>Password</label><input name='wifiPass' id='wifiPass' autocomplete='new-password' type='password' placeholder='enter password for the selected network'>";
+  // v1.15.34: type='text' + masked-text, same reasoning as X-Rig-Token
+  // above — this was the field actually causing the save-password
+  // prompt Sarah reported, since it's the one that most looks like a
+  // real login password field to the browser's heuristics.
+  h += "<label>Password</label><input name='wifiPass' id='wifiPass' autocomplete='off' type='text' class='masked-text' placeholder='enter password for the selected network'>";
   h += "<div class='small'>Changing SSID/password reboots the unit. Password is never pre-filled — type it fresh after picking a network.</div>";
   h += "<br><button type='submit'>Save</button>";
   h += "</form>";
