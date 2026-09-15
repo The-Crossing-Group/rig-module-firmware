@@ -460,6 +460,25 @@ void setup() {
 // LOOP — handles OTA, NTP, CAN polling, Pi discovery/posting
 // =============================================================================
 void loop() {
+  // v1.15.29: ~1Hz "still alive" line. This firmware can sit for 40-60s inside
+  // connectWifi()'s retry loop with NOTHING printed (all its own printf lines
+  // already went out before the loop's delays), and the poll task doesn't start
+  // until setup() returns — so a board that looks silent is indistinguishable
+  // from a board that has crashed. One line a second proves the difference, and
+  // it prints from loop(), which by definition means setup() completed.
+  {
+    static unsigned long _hbLast = 0;
+    unsigned long _hbNow = millis();
+    if (_hbNow - _hbLast >= 1000UL) {
+      _hbLast = _hbNow;
+      Serial.printf("[HB] up=%lus mode=%d ap=%d sta=%d wifi=%d apIP=%s pi=%s\n",
+        (unsigned long)(_hbNow / 1000UL), (int)WiFi.getMode(), (int)apModeActive,
+        (int)(WiFi.status() == WL_CONNECTED), (int)WiFi.status(),
+        apModeActive ? WiFi.softAPIP().toString().c_str() : "-",
+        resolvedPiIp.isEmpty() ? "-" : resolvedPiIp.c_str());
+    }
+  }
+
   ArduinoOTA.handle();
   webServer.handleClient();
   ntpClient.update();
@@ -716,13 +735,24 @@ void connectWifi() {
   }
   Serial.println("[WiFi] ----------------------------------------");
   // Bring the radio logs back now that the worst of the CPU burst is over.
-  // If we ended up in setup-AP mode, leave them quiet — softAP is still
-  // radio work and the port is the only thing she's got for diagnostics.
+  //
+  // v1.15.29: this used to stay muted whenever we ended up in setup-AP mode, on
+  // the theory that softAP is still radio work and would starve the USB task.
+  // That backfires exactly when she needs the console most: AP mode is the
+  // can't-reach-the-page diagnostic case, and leaving the console quiet there
+  // meant /system reported "verbose OFF" with no way to see why. Restore it in
+  // AP mode too; QUIET_SERIAL_BOOT is the explicit opt-out if the port really
+  // does drop.
 #if QUIET_SERIAL_BOOT
   // Console stability was the whole point — leave the radio logs muted.
   Serial.println("[WiFi] (QUIET_SERIAL_BOOT: radio logs left muted this boot)");
 #else
-  if (WiFi.status() == WL_CONNECTED) restoreVerboseRadioLogs();
+  if (WiFi.status() == WL_CONNECTED) {
+    restoreVerboseRadioLogs();
+  } else if (apModeActive) {
+    restoreVerboseRadioLogs();
+    Serial.println("[WiFi] Setup AP active — radio logs restored for diagnostics.");
+  }
 #endif
 }
 
