@@ -54,7 +54,7 @@
 // =============================================================================
 // ⚙️  BUILD SWITCHES ARE AT THE TOP OF config.h — edit them there.
 //     QUIET_SERIAL_BOOT, FACTORY_RESET_ONCE, FORGET_WIFI_ONCE,
-//     AP_FIRST_NO_WIFI_WAIT, every *_DEBUG flag, ENABLE_CAN, NO_WIFI, etc.
+//     every *_DEBUG flag, ENABLE_CAN, NO_WIFI, etc.
 //     config.h is included below, before any of them is used.
 // =============================================================================
 #include "config.h"
@@ -103,18 +103,15 @@ bool lastPostOk = false;
 int bufferCount = 0;
 bool flushNow = false;
 
+// v1.15.32: apModeActive now means "not currently connected to a site
+// network" (drives the /config banner + resolvePi() gating) — it is NOT
+// the same thing as "is the AP radio broadcasting". The AP radio is ALWAYS
+// broadcasting, in every state, from very early in setup() onward (see
+// bringUpWifi() below). See that function's header comment for the full
+// rationale — this replaces the old startSetupAP()/connectWifi() pair and
+// the ensureApAlive()/s_apKeepAlive patch that used to paper over the mode
+// churn between them.
 bool apModeActive = false;
-
-// v1.15.27: when AP_FIRST_NO_WIFI_WAIT is on, connectWifi()'s per-attempt
-// WiFi.mode(WIFI_OFF) would tear the setup AP back down. ensureApAlive() re-arms
-// the AP side after each teardown; only called from that loop, guarded by this flag.
-static bool s_apKeepAlive = false;
-static void ensureApAlive() {
-  if (!s_apKeepAlive || !apModeActive) return;
-  if (WiFi.getMode() != WIFI_AP && WiFi.getMode() != WIFI_AP_STA) {
-    WiFi.mode(WIFI_AP_STA);
-  }
-}
 String apSSID = "";
 
 // Set false only if LittleFS is unusable even after a format (see setup()).
@@ -334,24 +331,11 @@ void setup() {
   // recoverable, visible-on-the-web-UI problem; losing network access
   // entirely is not.
 
-#if AP_FIRST_NO_WIFI_WAIT
-  // Bring the setup AP up FIRST so the web page is reachable immediately, then let
-  // connectWifi() add the STA side. Without this, a saved-but-dead network keeps
-  // the AP offline for the ~40-60s the retry loop takes, and the browser has
-  // nothing to connect to. startSetupAP() is idempotent-safe here: connectWifi()
-  // only calls it again on the no-SSID / all-attempts-failed paths, where the
-  // second call just re-issues softAP() on the same SSID.
-  Serial.println("[WiFi] AP_FIRST_NO_WIFI_WAIT=1 — starting setup AP before any STA attempt.");
-  startSetupAP();
-  // connectWifi()'s retry loop calls WiFi.mode(WIFI_OFF) between attempts, which
-  // WOULD tear this AP back down and put us right back where we started. Force the
-  // AP bit back on after each teardown so the page stays reachable throughout.
-  // startSetupAP() above already set apModeActive, so the fallback paths in
-  // connectWifi() still behave normally.
-  s_apKeepAlive = true;
-#endif
-
-  connectWifi();
+  // v1.15.32: bringUpWifi() replaces the old startSetupAP()/connectWifi() pair.
+  // The setup AP is unconditional and permanent now (see that function's header
+  // comment for the full story) — no AP_FIRST_NO_WIFI_WAIT switch needed, this
+  // is just always how it works.
+  bringUpWifi();
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("[NTP] Starting NTP client...");
@@ -375,12 +359,14 @@ void setup() {
   Serial.println("[HTTP] Setting up web routes...");
   setupWebRoutes(webServer, cfg, prefs, sensorReadings, canReadings, stateMutex);
   webServer.begin();
-  if (apModeActive) {
-    Serial.printf("[HTTP] Setup AP web server at http://192.168.4.1/ (connect to \"%s\")\n", apSSID.c_str());
-  } else if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("[HTTP] Web server at http://%s/\n", WiFi.localIP().toString().c_str());
+  // v1.15.32: the setup AP is unconditional now, so it's ALWAYS a valid way
+  // to reach the web UI regardless of STA outcome — print both lines instead
+  // of an either/or, so the fallback address is never hidden.
+  Serial.printf("[HTTP] Setup AP web server always at http://192.168.4.1/ (connect to \"%s\" / \"modulesetup\")\n", apSSID.c_str());
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("[HTTP] Also reachable on site network at http://%s/\n", WiFi.localIP().toString().c_str());
   } else {
-    Serial.println("[HTTP] Web server up but not connected to any network yet");
+    Serial.println("[HTTP] Not connected to a site network yet — use the setup AP above.");
   }
 
   // CAN starts HERE, deliberately AFTER WiFi/AP + the web server are
@@ -419,12 +405,18 @@ void setup() {
 // LOOP — handles OTA, NTP, CAN polling, Pi discovery/posting
 // =============================================================================
 void loop() {
-  // v1.15.29: ~1Hz "still alive" line. This firmware can sit for 40-60s inside
-  // connectWifi()'s retry loop with NOTHING printed (all its own printf lines
-  // already went out before the loop's delays), and the poll task doesn't start
+  // v1.15.29: ~1Hz "still alive" line. bringUpWifi()'s retry loop can run for
+  // up to ~2 minutes with nothing else printed (its own printf lines already went
+  // out before the loop's internal delays), and the poll task doesn't start
   // until setup() returns — so a board that looks silent is indistinguishable
-  // from a board that has crashed. One line a second proves the difference, and
-  // it prints from loop(), which by definition means setup() completed.
+  // from a board that has crashed. One line a second proves the difference.
+  //
+  // v1.15.32: apIP is now printed UNCONDITIONALLY, not just when
+  // apModeActive. The setup AP is always broadcasting from very early in
+  // setup() onward regardless of whether STA ever connects — the old
+  // apModeActive-gated version would print "-" here even while the AP was
+  // fully up and reachable, which is exactly the wrong information for
+  // exactly the case (can't reach 192.168.4.1) this line exists to help with.
   {
     static unsigned long _hbLast = 0;
     unsigned long _hbNow = millis();
@@ -433,7 +425,7 @@ void loop() {
       Serial.printf("[HB] up=%lus mode=%d ap=%d sta=%d wifi=%d apIP=%s pi=%s\n",
         (unsigned long)(_hbNow / 1000UL), (int)WiFi.getMode(), (int)apModeActive,
         (int)(WiFi.status() == WL_CONNECTED), (int)WiFi.status(),
-        apModeActive ? WiFi.softAPIP().toString().c_str() : "-",
+        WiFi.softAPIP().toString().c_str(),
         resolvedPiIp.isEmpty() ? "-" : resolvedPiIp.c_str());
     }
   }
@@ -470,54 +462,31 @@ void loop() {
 }
 
 // =============================================================================
-// Wait for the STA interface to actually come up after WiFi.mode(WIFI_STA).
-// Identical self-heal logic to the other rig-module variants — see their
-// comments for the full WL_STOPPED/NVS-corruption backstory.
+// v1.15.32: ensureStaStarted()'s NVS-erase self-heal REMOVED.
+//
+// THIS WAS THE ACTUAL CAUSE OF SARAH'S "changing WiFi network boot-loops, have
+// to erase flash and reflash from the IDE" report (2026-09-15). The old
+// function called nvs_flash_erase() — which wipes the ENTIRE NVS partition
+// (WiFi driver's own PHY calibration/country-code data included, not just our
+// "rigmod" namespace) — as a "self-heal" any time WiFi.mode(WIFI_STA) left the
+// interface at WL_STOPPED for 2s. That is squarely radio-driver noise you can
+// hit while WiFi is being cycled during a config change; the old
+// connectWifi() cycled WIFI_OFF -> WIFI_STA on every one of its 5 retry
+// attempts, which is exactly the kind of rapid mode churn that trips this.
+// Erasing the WHOLE NVS partition mid-boot, then immediately trying to write
+// straight back into it (nvs_flash_init() + saveConfig()) while the WiFi
+// driver is simultaneously retrying against a partition that just changed out
+// from under it, produced exactly the crash/wedge Sarah described that only
+// esptool erase_flash + a clean reflash could get her out of.
+//
+// The actual WL_STOPPED bug this was chasing (see WiFi.persistent(false) at
+// the top of setup()) is already fixed at its real root cause. bringUpWifi()
+// below also no longer cycles WIFI_OFF/WIFI_STA at all — mode is set to
+// WIFI_AP_STA exactly once and left alone — so the condition this self-heal
+// existed to patch around shouldn't recur. If WiFi.begin() ever still fails
+// outright, that's now just a normal "couldn't join, stay on the AP" case,
+// not a reason to touch NVS.
 // =============================================================================
-static bool _nvsEraseAttempted = false;
-static bool ensureStaStarted() {
-  for (int retry = 0; retry < 3; retry++) {
-    bool modeOk = WiFi.mode(WIFI_STA);
-    Serial.printf("[WiFi]   WiFi.mode(WIFI_STA) returned %s, getMode()=%d, freeHeap=%d\n",
-      modeOk ? "true" : "FALSE", (int)WiFi.getMode(), ESP.getFreeHeap());
-    unsigned long start = millis();
-    while (WiFi.status() == WL_STOPPED && (millis() - start) < 2000) {
-      delay(50);
-    }
-    if (WiFi.status() != WL_STOPPED) return true;
-    Serial.printf("[WiFi]   STA still WL_STOPPED after mode(WIFI_STA), retry %d...\n", retry + 1);
-    WiFi.mode(WIFI_OFF);
-    delay(300);
-  }
-  Serial.println("[WiFi]   WARNING: STA stuck at WL_STOPPED after 3 retries.");
-
-  if (!_nvsEraseAttempted) {
-    _nvsEraseAttempted = true;
-    Serial.println("[WiFi]   Attempting NVS erase + reinit as a self-heal...");
-    // This wipes the ENTIRE "rigmod" NVS namespace, not just WiFi state —
-    // every sensor slot, CAN settings, everything. Track how often this
-    // has ever fired so a setting that "reverts on reboot" can be traced
-    // back to this instead of assumed to be a compiled-in default —
-    // visible on /system. See nvsEraseSelfHealCount comment in config.h.
-    cfg.nvsEraseSelfHealCount++;
-    uint32_t healCountToRestore = cfg.nvsEraseSelfHealCount;
-    esp_err_t erase_err = nvs_flash_erase();
-    esp_err_t init_err = nvs_flash_init();
-    Serial.printf("[WiFi]   nvs_flash_erase=0x%x nvs_flash_init=0x%x\n", erase_err, init_err);
-    Serial.printf("[WiFi]   NVS erase self-heal has now fired %u time(s) total.\n",
-      (unsigned)healCountToRestore);
-    Serial.println("[WiFi]   Restoring saved module config into freshly-erased NVS...");
-    prefs.begin("rigmod", false);
-    saveConfig(prefs, cfg);
-    prefs.end();
-    WiFi.mode(WIFI_OFF);
-    delay(300);
-    return ensureStaStarted();
-  }
-
-  Serial.println("[WiFi]   Still stuck after NVS erase — proceeding anyway.");
-  return false;
-}
 
 // =============================================================================
 // RIG NETWORK AUTO-DISCOVERY — REMOVED IN v1.15.23 AT SARAH'S REQUEST
@@ -552,8 +521,12 @@ static bool ensureStaStarted() {
 // convenience is ever wanted back, it must be an explicit opt-in checkbox on
 // /config, not a boot-time default.
 
-void startSetupAP() {
-  WiFi.mode(WIFI_AP_STA);
+// Configures + (re)issues the AP radio side only. Does NOT touch WiFi.mode()
+// — the caller (bringUpWifi()) sets WIFI_AP_STA exactly once and this never
+// runs a second time after that, so there's nothing here to accidentally
+// undo a mode change. Safe to think of as "the AP settings", not an action
+// with side effects on STA.
+static void configureSetupAP() {
   uint8_t mac[6];
   esp_efuse_mac_get_default(mac);
   char suffix[7];
@@ -568,55 +541,90 @@ void startSetupAP() {
   // 1) Without an explicit channel, softAP() lets the ARF algorithm pick, and it
   //    can land on 5GHz-adjacent/DFS-adjacent settings or hop when the STA side
   //    scans. A phone that associated while it was on one channel then sits on a
-  //    channel the AP has left. Pinning to 1 removes the variable entirely; the
-  //    setup AP is short-lived and single-client, so co-channel interference is
-  //    irrelevant.
+  //    channel the AP has left. Pinning to 1 removes the variable entirely.
   //
   // 2) Bandwidth: on a BW_SECOND (40MHz) AP, a client that negotiated 20MHz —
   //    common on phones in a crowded office — can associate and then fail to
   //    pass traffic. HTX_MODE_20 is the conservative choice.
   //
-  // WiFi.setBandMode() is NOT called: this chip is 2.4GHz-only, so there is no
-  // band to negotiate, and the API name differs across core versions.
-  // NOTE: no bandwidth call. WiFiClass in ESP32 Arduino core 3.2.0 has no
-  // setBandWidth() — that name is from the ESP8266 core. softAP() already
-  // defaults to HT20 here, so there was nothing to force.
+  // NOTE: no WiFi.setBandWidth() call — that's an ESP8266-core-only API, does
+  // not exist on this core (3.2.0). softAP() already defaults to HT20.
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
                     IPAddress(255, 255, 255, 0));
   WiFi.softAP(apSSID.c_str(), "modulesetup", 1, 0, 4, true);
-  apModeActive = true;
 
   Serial.println("[WiFi] ----------------------------------------");
-  Serial.printf("[WiFi] Starting setup AP: \"%s\" / \"modulesetup\"\n", apSSID.c_str());
+  Serial.printf("[WiFi] Setup AP: \"%s\" / \"modulesetup\"\n", apSSID.c_str());
   Serial.printf("[WiFi] AP IP: %s  channel=1 bw=20MHz\n",
     WiFi.softAPIP().toString().c_str());
-  Serial.println("[WiFi] Connect to this network, then open http://192.168.4.1/");
+  Serial.println("[WiFi] This AP is ALWAYS on, even once connected to a site network —");
+  Serial.println("[WiFi] http://192.168.4.1/ always works as a fallback to fix WiFi settings.");
   Serial.println("[WiFi] ----------------------------------------");
 }
 
-void connectWifi() {
+// =============================================================================
+// v1.15.32: bringUpWifi() replaces the old startSetupAP()/connectWifi() pair.
+//
+// REAL BUG FIXED (Sarah's field report, 2026-09-15): changing the saved WiFi
+// network from /config would boot-loop the board hard enough that only an
+// esptool erase_flash + fresh reflash from the IDE recovered it — and even
+// on a normal boot with a dead/out-of-range saved network, the setup AP was
+// only reachable AFTER a ~40-100s retry storm finished, because the AP
+// didn't exist until every STA attempt against the (bad) saved network had
+// failed.
+//
+// ROOT CAUSE, two compounding bugs:
+//   1. The old connectWifi() retry loop called WiFi.mode(WIFI_OFF) then
+//      WiFi.mode(WIFI_STA) between every one of its 5 connection attempts.
+//      Once the AP existed (either from an early-start experiment or the
+//      fallback path), those mode calls silently tore its radio state down;
+//      a patch called ensureApAlive() tried to flip the mode back to
+//      WIFI_AP_STA afterward, but flipping a mode bit does not re-run
+//      softAP()/softAPConfig() — the AP could end up "associates fine, HTTP
+//      never answers", which is exactly what you were seeing.
+//   2. ensureStaStarted() treated 2s of WL_STOPPED after WiFi.mode(WIFI_STA)
+//      as a reason to nvs_flash_erase() the ENTIRE NVS partition (not just
+//      our config — the WiFi driver's own PHY/cal data too) and immediately
+//      write straight back into it while still mid-connect-retry. Rapid
+//      mode churn during a WiFi change is exactly the kind of radio noise
+//      that trips WL_STOPPED transiently — this is almost certainly what
+//      actually crashed/wedged the board hard enough to need a flash erase.
+//
+// THE FIX: stop cycling the radio mode entirely.
+//   - WiFi.mode(WIFI_AP_STA) is set ONCE, right here, and never changed again
+//     for the rest of this boot (not WIFI_OFF, not WIFI_STA, not WIFI_AP).
+//   - The AP is unconditional and PERMANENT — it comes up before any STA
+//     attempt and stays up whether or not a site network is ever joined.
+//     http://192.168.4.1/ is now always the answer to "how do I fix WiFi
+//     settings", never a race against a retry timer.
+//   - WiFi.begin() is called directly for retries — the ESP32 WiFi driver
+//     supports re-calling begin() on an already-active STA interface without
+//     needing disconnect()/mode(WIFI_OFF) first; that churn was never
+//     actually required, just inherited from older example code.
+//   - No NVS erase self-heal. If STA genuinely can't connect, that's a
+//     normal "stay on the AP, let her fix it from /config" outcome, not a
+//     reason to touch flash.
+// =============================================================================
+void bringUpWifi() {
+  WiFi.mode(WIFI_AP_STA);
+  configureSetupAP();
+  apModeActive = true; // corrected below to false if STA connects
+
   if (cfg.wifiSSID.isEmpty()) {
-    Serial.println("[WiFi] No SSID saved in NVS — going straight to setup AP.");
-    Serial.println("[WiFi] No network is ever guessed or hardcoded; open the setup");
-    Serial.println("[WiFi] AP and pick a network on the /config page.");
-    startSetupAP();
+    Serial.println("[WiFi] No SSID saved — staying on setup AP only.");
+    Serial.println("[WiFi] No network is ever guessed or hardcoded; pick one on /config.");
     return;
   }
 
   Serial.println("[WiFi] ----------------------------------------");
   Serial.printf("[WiFi] Target SSID: %s\n", cfg.wifiSSID.c_str());
+  Serial.println("[WiFi] Scanning for networks (AP stays up throughout — mode never changes)...");
 
-  ensureStaStarted();
-  WiFi.disconnect(true);
-  delay(100);
-  ensureApAlive();  // v1.15.27: same teardown risk on the pre-scan disconnect
-
-  Serial.println("[WiFi] Scanning for networks...");
   int found = WiFi.scanNetworks();
   int targetChannel = 0;
   uint8_t targetBSSID[6] = {0};
-  if (found == 0) {
-    Serial.println("[WiFi] Scan found NO networks at all");
+  if (found <= 0) {
+    Serial.println("[WiFi] Scan found no networks — will still try WiFi.begin() blind.");
   } else {
     Serial.printf("[WiFi] Scan found %d network(s):\n", found);
     bool targetFound = false;
@@ -632,18 +640,17 @@ void connectWifi() {
       }
     }
     if (!targetFound) {
-      Serial.printf("[WiFi] WARNING: \"%s\" not found in scan (or only on 5GHz, unusable on this chip)!\n", cfg.wifiSSID.c_str());
+      Serial.printf("[WiFi] WARNING: \"%s\" not found in scan (or 5GHz-only, unusable on this chip)!\n", cfg.wifiSSID.c_str());
     } else {
       Serial.printf("[WiFi] Target on channel %d, RSSI %d dBm\n", targetChannel, bestRssi);
     }
   }
   WiFi.scanDelete();
 
-  Serial.println("[WiFi] Attempting connection...");
   // Mute the driver's log firehose for the connect storm — see
   // quietUsbForRadioWork() for why (radio init starves the USB-CDC task and
-  // the host drops/re-enumerates the serial port). Our own [WiFi] lines above
-  // and below still print; only ESP_LOG_VERBOSE radio spam is suppressed.
+  // the host drops/re-enumerates the serial port). Our own [WiFi] lines
+  // still print; only ESP_LOG_VERBOSE radio spam is suppressed.
   quietUsbForRadioWork();
   WiFi.setAutoReconnect(false);
   WiFi.persistent(false);
@@ -652,13 +659,10 @@ void connectWifi() {
   for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     Serial.printf("[WiFi] Attempt %d/%d — connecting to \"%s\"...\n", attempt, MAX_ATTEMPTS, cfg.wifiSSID.c_str());
 
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    delay(500);
-    ensureApAlive();  // v1.15.27: undo the AP teardown from WIFI_OFF
-    ensureStaStarted();
-    delay(200);
-
+    // No disconnect()/mode(WIFI_OFF) here — calling WiFi.begin() again on an
+    // already-active AP_STA interface is enough to make the driver retry;
+    // the mode churn that used to happen here is exactly what was tearing
+    // down the AP (see header comment above).
     bool useHint = (targetChannel > 0) && (attempt < MAX_ATTEMPTS);
     if (useHint) {
       Serial.printf("[WiFi]   Using BSSID hint, channel %d\n", targetChannel);
@@ -679,6 +683,7 @@ void connectWifi() {
       Serial.printf("[WiFi] IP      : %s\n", WiFi.localIP().toString().c_str());
       Serial.printf("[WiFi] MAC     : %s\n", WiFi.macAddress().c_str());
       Serial.printf("[WiFi] RSSI    : %d dBm\n", WiFi.RSSI());
+      apModeActive = false; // connected — banner/discovery gating updates
       break;
     } else {
       Serial.printf("[WiFi] Attempt %d failed (final status=%d)\n", attempt, WiFi.status());
@@ -691,29 +696,19 @@ void connectWifi() {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WiFi] All attempts failed against saved network.");
-    Serial.println("[WiFi] Falling back to setup AP so credentials can be corrected.");
-    startSetupAP();
+    Serial.println("[WiFi] Setup AP was never torn down — http://192.168.4.1/ is reachable");
+    Serial.println("[WiFi] right now to fix credentials on /config.");
   }
   Serial.println("[WiFi] ----------------------------------------");
-  // Bring the radio logs back now that the worst of the CPU burst is over.
-  //
-  // v1.15.29: this used to stay muted whenever we ended up in setup-AP mode, on
-  // the theory that softAP is still radio work and would starve the USB task.
-  // That backfires exactly when she needs the console most: AP mode is the
-  // can't-reach-the-page diagnostic case, and leaving the console quiet there
-  // meant /system reported "verbose OFF" with no way to see why. Restore it in
-  // AP mode too; QUIET_SERIAL_BOOT is the explicit opt-out if the port really
-  // does drop.
+
+  // Bring the radio logs back now that the worst of the CPU burst is over —
+  // restored regardless of outcome (connected OR still on AP-only) so /system
+  // and the console stay useful either way. QUIET_SERIAL_BOOT is the explicit
+  // opt-out if the port genuinely can't handle it.
 #if QUIET_SERIAL_BOOT
-  // Console stability was the whole point — leave the radio logs muted.
   Serial.println("[WiFi] (QUIET_SERIAL_BOOT: radio logs left muted this boot)");
 #else
-  if (WiFi.status() == WL_CONNECTED) {
-    restoreVerboseRadioLogs();
-  } else if (apModeActive) {
-    restoreVerboseRadioLogs();
-    Serial.println("[WiFi] Setup AP active — radio logs restored for diagnostics.");
-  }
+  restoreVerboseRadioLogs();
 #endif
 }
 

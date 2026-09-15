@@ -646,13 +646,18 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<br><b>CAN:</b> always on, " + String(cfg.canBitrate) + " bit/s" +
     (cfg.canopenBridge ? " (Carriage Position Sensor bridge, node 0x" + String(cfg.canopenNodeId, HEX) + ")" : ", listen-only") +
     "</div>";
+  // v1.15.32: the NVS-erase self-heal that used to bump this counter was
+  // REMOVED (it was the actual root cause of a boot-loop bug — see
+  // nvsEraseSelfHealCount's comment in config.h). A non-zero reading here
+  // is now only possible on an OLDER firmware still running on this board.
   bool selfHealFired = cfg.nvsEraseSelfHealCount > 0;
   if (selfHealFired) {
-    h += "<div class='card' style='border-color:#e74c3c'><b>&#9888; NVS erase self-heal has fired " +
-         String(cfg.nvsEraseSelfHealCount) + " time(s)</b> — this WIFI driver recovery path wipes the "
-         "whole config namespace and restores it from RAM. If any setting (CAN, sensors, etc) has ever "
-         "reverted after a reboot, this is almost certainly why — the underlying WL_STOPPED WiFi issue "
-         "causing it needs fixing, not just the setting re-applied.</div>";
+    h += "<div class='card' style='border-color:#e74c3c'><b>&#9888; NVS erase self-heal fired " +
+         String(cfg.nvsEraseSelfHealCount) + " time(s) on a PREVIOUS firmware version</b> — that code "
+         "path (which wiped the whole NVS partition on transient WiFi mode-change noise) was REMOVED "
+         "in v1.15.32 because it was the root cause of the \"changing WiFi network boot-loops the "
+         "board\" bug. Since this board is now running " + String(FW_VERSION) + ", it can't fire again "
+         "— this count is a historical record from before the fix, not a live warning.</div>";
   }
   NvsStats st = getNvsStats();
   bool nvsLow = false;
@@ -705,12 +710,12 @@ static String sysPage(ModuleConfig& cfg) {
     verify.end();
     bool keysAbsent = !baudKeyExists && !baudSetKeyExists;
     // NOTE: keysAbsent is genuinely AMBIGUOUS on its own -- it means either
-    // "Config page has never been saved on this device" OR "the self-heal
-    // wipe fired and its own restore-save also failed to recreate these
-    // keys" (nvs_flash_erase() -> saveConfig() right after, see
-    // ensureStaStarted() in the .ino). Do NOT assert "not a bug" here
-    // without checking the self-heal counter -- that was the mistake to
-    // avoid (2026-09-10).
+    // "Config page has never been saved on this device" OR (only possible
+    // on firmware OLDER than v1.15.32, since the self-heal path was removed
+    // then) "the self-heal wipe fired and its own restore-save also failed
+    // to recreate these keys". Do NOT assert "not a bug" here without
+    // checking the self-heal counter -- that was the mistake to avoid
+    // (2026-09-10).
     bool mismatch = !keysAbsent && ((flashBaud != cfg.modbusBaud) || (flashBaudSet != cfg.baudManuallySet));
     h += "<div class='card'><b>Baud Persistence Check:</b>";
     h += "<br>In RAM right now: baud=" + String(cfg.modbusBaud) + " manuallySet=" + String(cfg.baudManuallySet ? "true" : "false");
@@ -719,11 +724,11 @@ static String sysPage(ModuleConfig& cfg) {
     if (keysAbsent) {
       h += "<div style='margin-top:6px;padding:8px;background:#00000022;border-radius:6px'>";
       if (selfHealFired) {
-        h += "<span class='warn'>&#9888; Likely cause: the NVS erase self-heal above has fired " +
-             String(cfg.nvsEraseSelfHealCount) + " time(s)</span> — that wipes this exact key, tries to "
-             "restore it from RAM immediately after, and that restore apparently didn't take either. "
-             "Fix the underlying WL_STOPPED WiFi issue (why the self-heal fires at all), not the baud "
-             "setting directly.";
+        h += "<span class='warn'>&#9888; Likely cause: this board's history shows the (now-removed, "
+             "v1.15.32+) NVS erase self-heal fired " + String(cfg.nvsEraseSelfHealCount) +
+             " time(s) on an older firmware version</span> — that wiped this exact key on the way "
+             "down. If this board hasn't been re-saved on /config since updating to " + String(FW_VERSION) +
+             ", just click Save once there to recreate it.";
       } else if (nvsLow) {
         h += "<span class='warn'>&#9888; Likely cause:</span> NVS Storage above shows only " +
              String(st.freeEntries) + " free entries — a first-ever save attempt on this device may be "

@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.31"
+#define FW_VERSION "rig-module-sensors-1.15.32"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -27,7 +27,6 @@
 //    ...wipe all config (WiFi, sensors, channels)      → FACTORY_RESET_ONCE   = 1
 //    ...forget WiFi only, keep sensors                 → FORGET_WIFI_ONCE     = 1
 //    ...see serial from the very first line            → QUIET_SERIAL_BOOT    = 1
-//    ...reach the web page while a dead WiFi is saved  → AP_FIRST_NO_WIFI_WAIT= 1
 //    ...stop the module joining WiFi at all (bench)    → NO_WIFI              = 1
 //    ...watch raw CAN traffic                          → CAN_DEBUG            = 1
 //    ...watch every Modbus frame                       → MODBUS_DEBUG         = 1
@@ -62,12 +61,11 @@
 #define QUIET_SERIAL_BOOT       0
 #endif
 
-// Bring the setup AP up BEFORE any WiFi connection attempt. Without this, a
-// saved-but-dead network spends 40-60s in the retry loop before the AP exists,
-// and the web page is unreachable the whole time.
-#ifndef AP_FIRST_NO_WIFI_WAIT
-#define AP_FIRST_NO_WIFI_WAIT   0
-#endif
+// NOTE: there used to be an AP_FIRST_NO_WIFI_WAIT switch here to bring the
+// setup AP up before any STA attempt. Removed in v1.15.32 — the setup AP is
+// now ALWAYS brought up first, unconditionally, with no switch needed. See
+// bringUpWifi() in the .ino for why (root cause of the "changing WiFi
+// boot-loops the board" field report).
 
 // --- Radio --------------------------------------------------------------------
 // Compile the WiFi stack out entirely. Bench/USB-only; no radio, no AP, no POST.
@@ -350,14 +348,17 @@ struct ModuleConfig {
   bool   canopenTargetSpecific = false; // false = NMT Start targets "all nodes" (confirmed
                                           // working on bench, the safe default)
 
-  // Bumps every time ensureStaStarted()'s NVS-erase self-heal actually
-  // fires (see waveshare-s3-sensors.ino) — that path wipes the WHOLE
-  // "rigmod" NVS namespace, not just WiFi state, then tries to restore
-  // everything from the in-RAM cfg struct. If settings (e.g. canopenBridge,
-  // mbBaud) ever appear to "revert on reboot" with no explanation, check
-  // this on /system first — a non-zero count means something is
-  // repeatedly forcing a full config wipe+restore, which is a much
-  // bigger red flag than any single setting's default value.
+  // LEGACY (v1.15.32): used to bump every time ensureStaStarted()'s
+  // NVS-erase self-heal fired. That whole code path — which wiped the
+  // ENTIRE NVS partition (not just our namespace) on transient WL_STOPPED
+  // during a WiFi mode change — was REMOVED in v1.15.32: it's the actual
+  // root cause identified for the "changing WiFi network boot-loops the
+  // board, needs a flash erase to recover" field report (2026-09-15). See
+  // bringUpWifi() in the .ino for the fix (mode set once, never cycled).
+  // Field kept (not deleted) purely so existing NVS/readback code and old
+  // boards' stored counts don't break; it will never increment again on
+  // any board running v1.15.32+. A non-zero value here on an OLDER
+  // firmware version was the smoking gun for that bug.
   uint32_t nvsEraseSelfHealCount = 0;
 
   SensorConfig    sensors[MAX_SENSORS];
