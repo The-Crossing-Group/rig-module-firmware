@@ -162,75 +162,6 @@ static bool _quietUsbActive = false;
 #define CAN_TXD     15
 #define CAN_RXD     16
 
-// =============================================================================
-// GLOBALS
-// =============================================================================
-Preferences prefs;
-WiFiUDP ntpUDP;
-NTPClient ntpClient(ntpUDP, "pool.ntp.org", 0, 3600000);
-
-SemaphoreHandle_t stateMutex;     // guards sensorReadings/canReadings
-SemaphoreHandle_t modbusBusMutex; // guards Serial2 (poll task vs. web diagnostics)
-
-ModuleConfig cfg;
-SensorReading    sensorReadings[MAX_SENSORS];
-CanSignalReading canReadings[MAX_CAN_SIGNALS];
-
-WebServer webServer(80);
-
-String resolvedPiIp = "";
-unsigned long lastPiResolve = 0;
-unsigned long lastPostMs = 0;
-int lastPostStatus = 0;
-bool lastPostOk = false;
-int bufferCount = 0;
-bool flushNow = false;
-
-bool apModeActive = false;
-
-// v1.15.27: when AP_FIRST_NO_WIFI_WAIT is on, connectWifi()'s per-attempt
-// WiFi.mode(WIFI_OFF) would tear the setup AP back down. ensureApAlive() re-arms
-// the AP side after each teardown; only called from that loop, guarded by this flag.
-static bool s_apKeepAlive = false;
-static void ensureApAlive() {
-  if (!s_apKeepAlive || !apModeActive) return;
-  if (WiFi.getMode() != WIFI_AP && WiFi.getMode() != WIFI_AP_STA) {
-    WiFi.mode(WIFI_AP_STA);
-  }
-}
-String apSSID = "";
-
-// Set false only if LittleFS is unusable even after a format (see setup()).
-// Every LittleFS user in this sketch checks it first so a dead filesystem
-// degrades to "no buffering" instead of repeated failed opens in the loop.
-bool fsUsable = true;
-
-// =============================================================================
-// QUIET THE USB-CDC PORT WHILE THE RADIO IS BRINGING UP (v1.15.21)
-//
-// SYMPTOM Sarah reported: the serial monitor constantly disconnects and
-// reconnects, and it's worst around a WiFi change.
-//
-// This board's USB is the ESP32-S3's OWN peripheral (USB-CDC on boot, not an
-// FTDI/CH340 chip). The tiny USB task runs on core 0, and the WiFi driver's
-// init/calibration is a CPU-bound burst that starves it — the device stops
-// answering SETUP for longer than the host allows, Linux drops it, and it
-// re-enumerates a second later. That's the disconnect/reconnect cycle, and
-// it's why it clusters exactly where WiFi work happens:
-//   - setup(): esp_log_level_set("wifi", ESP_LOG_VERBOSE) + Serial.setDebugOutput
-//     (true) + 5 connect attempts, each doing WiFi.mode(WIFI_OFF) → scan →
-//     WiFi.begin()
-//   - the WiFi-save reboot, which runs that whole storm right after boot
-//
-// FIX: drop the radio-log spam to WARN and turn the Arduino assert channel off
-// for the duration of the connect storm, then restore both. Real diagnostics
-// survive (our own Serial.printf lines are untouched); only the driver's
-// firehose is muted while it's most likely to starve USB.
-//
-// Set these BEFORE the first call below and they stay in effect for the whole
-// boot if you want maximum serial stability during a bring-up you're watching.
-static bool _quietUsbActive = false;
-
 static void quietUsbForRadioWork() {
   if (_quietUsbActive) return;
   _quietUsbActive = true;
@@ -647,7 +578,9 @@ void startSetupAP() {
   //
   // WiFi.setBandMode() is NOT called: this chip is 2.4GHz-only, so there is no
   // band to negotiate, and the API name differs across core versions.
-  WiFi.setBandWidth(WIFI_BW_HT20);
+  // NOTE: no bandwidth call. WiFiClass in ESP32 Arduino core 3.2.0 has no
+  // setBandWidth() — that name is from the ESP8266 core. softAP() already
+  // defaults to HT20 here, so there was nothing to force.
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
                     IPAddress(255, 255, 255, 0));
   WiFi.softAP(apSSID.c_str(), "modulesetup", 1, 0, 4, true);
