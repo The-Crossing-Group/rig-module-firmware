@@ -141,6 +141,25 @@ static bool _quietUsbActive = false;
 #define QUIET_SERIAL_BOOT 0
 #endif
 
+// v1.15.25: set to 1 to clear the saved WiFi credentials from NVS on the next
+// boot, then set it back to 0 and flash again.
+//
+// WHY THIS EXISTS: a full chip erase DOES wipe NVS, but it does not help here,
+// because the erase is followed by a fresh flash of this sketch — and this
+// sketch's own WL_STOPPED self-heal (see ensureStaStarted) calls
+// nvs_flash_erase() and then immediately writes the in-memory cfg back into the
+// freshly-erased namespace. On a blank chip cfg.wifiSSID is empty, so that
+// rebuild is harmless. The case that actually bites is a board with a stale
+// unreachable SSID saved and a working NVS: nothing in normal operation ever
+// clears those two keys, and connectWifi() will happily burn ~30s against a dead
+// network on every single boot before falling back to the setup AP.
+//
+// Only wifiSSID/wifiPass are touched. Sensor slots, CAN settings, tokens, and
+// the self-heal counter all survive.
+#ifndef FORGET_WIFI_ONCE
+#define FORGET_WIFI_ONCE 0
+#endif
+
 static void quietUsbForRadioWork() {
   if (_quietUsbActive) return;
   _quietUsbActive = true;
@@ -176,6 +195,17 @@ void setup() {
   Serial.println("[BOOT] whole boot to keep the USB-CDC console alive. Our own");
   Serial.println("[BOOT] [BOOT]/[WiFi]/[HTTP] lines still print.");
   quietUsbForRadioWork();
+#endif
+
+#if FORGET_WIFI_ONCE
+  // Runs before loadConfig() below, so the cleared values are what the rest of
+  // boot sees. Written back to NVS by the first saveConfig() so it sticks even
+  // if this build stays flashed.
+  Serial.println("[BOOT] FORGET_WIFI_ONCE=1 — clearing saved WiFi credentials.");
+  prefs.begin("rigmod", false);
+  prefs.remove("wifiSSID");
+  prefs.remove("wifiPass");
+  prefs.end();
 #endif
 
   // See modbus/WiFi self-heal rationale below (ensureStaStarted) — these
