@@ -12,7 +12,149 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.29"
+#define FW_VERSION "rig-module-sensors-1.15.30"
+
+// =============================================================================
+//  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
+//  =============================================================================
+//  1 = ON, 0 = OFF. All of these used to be scattered through the .ino buried in
+//  commentary. They are collected here so a rebuild is a one-line change.
+//  config.h is included FIRST in the sketch, so setting a value here wins; each
+//  definition below is still wrapped in #ifndef so an -D on the command line or an
+//  old note in the .ino can never silently override what you typed here.
+//
+//  QUICK REFERENCE — "I need to ..."
+//    ...wipe all config (WiFi, sensors, channels)      → FACTORY_RESET_ONCE   = 1
+//    ...forget WiFi only, keep sensors                 → FORGET_WIFI_ONCE     = 1
+//    ...see serial from the very first line            → QUIET_SERIAL_BOOT    = 1
+//    ...reach the web page while a dead WiFi is saved  → AP_FIRST_NO_WIFI_WAIT= 1
+//    ...stop the module joining WiFi at all (bench)    → NO_WIFI              = 1
+//    ...watch raw CAN traffic                          → CAN_DEBUG            = 1
+//    ...watch every Modbus frame                       → MODBUS_DEBUG         = 1
+//    ...watch the RS485 DE/RE timing                   → RS485_DEBUG          = 1
+//    ...watch the buffer drain                         → BUFFER_DEBUG         = 1
+//    ...watch CANopen encoder bring-up                 → CANOPEN_DEBUG        = 1
+//    ...watch the CAN RX task start                    → CAN_TASK_DEBUG       = 1
+//  After flashing with a *_ONCE switch, set it back to 0 — it self-clears in NVS
+//  but leaving it set re-wipes on every flash.
+// =============================================================================
+
+// --- One-shot rescue switches -------------------------------------------------
+// Wipe the entire "rigmod" NVS namespace before config loads. Board boots to a
+// factory-fresh setup AP. Use when the config page is unreachable or a stale
+// network is wedging boot.
+#ifndef FACTORY_RESET_ONCE
+#define FACTORY_RESET_ONCE      0
+#endif
+
+// Clear ONLY wifiSSID/wifiPass, keep sensor and channel config. For "wrong WiFi
+// password, can't reach the page." Prefer the red Forget WiFi button on /config
+// when the page loads.
+#ifndef FORGET_WIFI_ONCE
+#define FORGET_WIFI_ONCE        0
+#endif
+
+// --- Serial / diagnostics -----------------------------------------------------
+// Mute wifi/phy/nvs driver logs for the WHOLE boot and skip Serial.setDebugOutput.
+// Use when the USB-CDC monitor drops during boot. Costs you the driver chatter
+// that usually explains a radio failure, so turn it off once you can see.
+#ifndef QUIET_SERIAL_BOOT
+#define QUIET_SERIAL_BOOT       0
+#endif
+
+// Bring the setup AP up BEFORE any WiFi connection attempt. Without this, a
+// saved-but-dead network spends 40-60s in the retry loop before the AP exists,
+// and the web page is unreachable the whole time.
+#ifndef AP_FIRST_NO_WIFI_WAIT
+#define AP_FIRST_NO_WIFI_WAIT   0
+#endif
+
+// --- Radio --------------------------------------------------------------------
+// Compile the WiFi stack out entirely. Bench/USB-only; no radio, no AP, no POST.
+#ifndef NO_WIFI
+#define NO_WIFI                 0
+#endif
+
+// --- Subsystem kill switches --------------------------------------------------
+// 0 = do not start the background Modbus sensor poll task.
+#ifndef ENABLE_MODBUS_POLL_TASK
+#define ENABLE_MODBUS_POLL_TASK 1
+#endif
+
+// 1 = compile in the CAN transceiver / sniffer / CANopen encoder code.
+#ifndef ENABLE_CAN
+#define ENABLE_CAN              1
+#endif
+
+// 1 = CANopen encoder is fitted on this machine. 0 = leave its bus alone entirely.
+#ifndef CANOPEN_ENCODER_PRESENT
+#define CANOPEN_ENCODER_PRESENT 0
+#endif
+
+// --- Verbose logging ----------------------------------------------------------
+// Every CAN frame: id, dlc, data bytes.
+#ifndef CAN_DEBUG
+#define CAN_DEBUG               0
+#endif
+
+// Every Modbus request/response, hex.
+#ifndef MODBUS_DEBUG
+#define MODBUS_DEBUG            0
+#endif
+
+// RS485 DE/RE toggle timing.
+#ifndef RS485_DEBUG
+#define RS485_DEBUG             0
+#endif
+
+// Buffer drain / POST retry detail.
+#ifndef BUFFER_DEBUG
+#define BUFFER_DEBUG            0
+#endif
+
+// CANopen NMT/SYNC/RPDO bring-up detail.
+#ifndef CANOPEN_DEBUG
+#define CANOPEN_DEBUG           0
+#endif
+
+// CAN RX task startup detail.
+#ifndef CAN_TASK_DEBUG
+#define CAN_TASK_DEBUG          0
+#endif
+
+// 1 = print the boot banner + diagnostics even in AP mode.
+#ifndef DEBUG_BOOT_IN_AP
+#define DEBUG_BOOT_IN_AP        1
+#endif
+
+// --- Feature flags ------------------------------------------------------------
+// 1 = POST buffered samples to the logger automatically.
+#ifndef AUTO_POST
+#define AUTO_POST               1
+#endif
+
+// 1 = accept sensor config over HTTP (off = read-only firmware).
+#ifndef WEBUI_ENABLE
+#define WEBUI_ENABLE            1
+#endif
+
+// 1 = serve the /debug page.
+#ifndef DEBUG_PAGE_ENABLED
+#define DEBUG_PAGE_ENABLED      1
+#endif
+
+// 1 = ESP32 OTA updates.
+#ifndef ENABLE_OTA
+#define ENABLE_OTA              1
+#endif
+
+// 1 = run the /24 broadcast sweep when mDNS finds nothing. Needs ESP32Ping.
+#ifndef ESP32PING_AVAILABLE
+#define ESP32PING_AVAILABLE     1
+#endif
+// =============================================================================
+//  ⚙️  END BUILD SWITCHES
+// =============================================================================
 
 #include <WiFi.h>
 #include <Preferences.h>

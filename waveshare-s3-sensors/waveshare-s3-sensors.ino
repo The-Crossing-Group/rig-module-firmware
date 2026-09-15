@@ -50,6 +50,13 @@
 #include <esp_log.h>
 #include <nvs_flash.h>
 #include <nvs.h>
+
+// =============================================================================
+// ⚙️  BUILD SWITCHES ARE AT THE TOP OF config.h — edit them there.
+//     QUIET_SERIAL_BOOT, FACTORY_RESET_ONCE, FORGET_WIFI_ONCE,
+//     AP_FIRST_NO_WIFI_WAIT, every *_DEBUG flag, ENABLE_CAN, NO_WIFI, etc.
+//     config.h is included below, before any of them is used.
+// =============================================================================
 #include "config.h"
 #include "discovery.h"
 #include "modbus.h"
@@ -141,67 +148,88 @@ bool fsUsable = true;
 // boot if you want maximum serial stability during a bring-up you're watching.
 static bool _quietUsbActive = false;
 
-// v1.15.24: set this to 1 to keep the radio driver's log firehose OFF for the
-// ENTIRE boot instead of just during the connect storm. Use it when the USB-CDC
-// serial port is dropping at startup and you need a stable console to see why —
-// the drop is the tiny USB task being starved by radio CPU work, and the log
-// volume is what makes it fatal. Costs you the verbose wifi/phy diagnostics,
-// which is a fair trade when the alternative is no console at all.
-// All our own [WiFi]/[BOOT] printf lines still print at any setting.
-#ifndef QUIET_SERIAL_BOOT
-#define QUIET_SERIAL_BOOT 0
-#endif
 
-// v1.15.25: set to 1 to clear the saved WiFi credentials from NVS on the next
-// boot, then set it back to 0 and flash again.
-//
-// WHY THIS EXISTS: a full chip erase DOES wipe NVS, but it does not help here,
-// because the erase is followed by a fresh flash of this sketch — and this
-// sketch's own WL_STOPPED self-heal (see ensureStaStarted) calls
-// nvs_flash_erase() and then immediately writes the in-memory cfg back into the
-// freshly-erased namespace. On a blank chip cfg.wifiSSID is empty, so that
-// rebuild is harmless. The case that actually bites is a board with a stale
-// unreachable SSID saved and a working NVS: nothing in normal operation ever
-// clears those two keys, and connectWifi() will happily burn ~30s against a dead
-// network on every single boot before falling back to the setup AP.
-//
-// Only wifiSSID/wifiPass are touched. Sensor slots, CAN settings, tokens, and
-// the self-heal counter all survive.
-#ifndef FORGET_WIFI_ONCE
-#define FORGET_WIFI_ONCE 0
-#endif
+// =============================================================================
+// PIN DEFINITIONS — Waveshare ESP32-S3-RS485-CAN
+// Same pins as the adapter-board variant (waveshare-s3/) — verified
+// against Waveshare's schematic + Battery-Emulator / esphome-yambms ports.
+//   RS485: TX=GPIO17, RX=GPIO18, DE/RE=GPIO21 (SP3485, HIGH=transmit)
+//   CAN:   TX=GPIO15, RX=GPIO16 (native ESP32-S3 TWAI + onboard transceiver)
+// =============================================================================
+#define RS485_TXD   17
+#define RS485_RXD   18
+#define RS485_DE    21
+#define CAN_TXD     15
+#define CAN_RXD     16
 
-// v1.15.26: set to 1 to wipe the ENTIRE rigmod NVS namespace on next boot —
-// every sensor slot, CAN settings, tokens, everything. Same effect as a full
-// chip erase, without needing esptool or the BOOT/RESET dance. Set back to 0 and
-// reflash once you want to keep the fresh config.
-//
-// Deliberately does NOT call nvs_flash_erase(): that wipes the whole NVS
-// partition including the WiFi driver's own storage, which is what the WL_STOPPED
-// self-heal got in trouble with. clear() removes all of OUR keys and leaves the
-// driver's areas alone.
-//
-// This is the "start completely fresh" switch. Prefer the red Forget WiFi button
-// on /config when the page is reachable; use this when it isn't.
-#ifndef FACTORY_RESET_ONCE
-#define FACTORY_RESET_ONCE 0
-#endif
+// =============================================================================
+// GLOBALS
+// =============================================================================
+Preferences prefs;
+WiFiUDP ntpUDP;
+NTPClient ntpClient(ntpUDP, "pool.ntp.org", 0, 3600000);
 
-// v1.15.27: set to 1 to bring up the setup AP BEFORE any WiFi connection attempt.
+SemaphoreHandle_t stateMutex;     // guards sensorReadings/canReadings
+SemaphoreHandle_t modbusBusMutex; // guards Serial2 (poll task vs. web diagnostics)
+
+ModuleConfig cfg;
+SensorReading    sensorReadings[MAX_SENSORS];
+CanSignalReading canReadings[MAX_CAN_SIGNALS];
+
+WebServer webServer(80);
+
+String resolvedPiIp = "";
+unsigned long lastPiResolve = 0;
+unsigned long lastPostMs = 0;
+int lastPostStatus = 0;
+bool lastPostOk = false;
+int bufferCount = 0;
+bool flushNow = false;
+
+bool apModeActive = false;
+
+// v1.15.27: when AP_FIRST_NO_WIFI_WAIT is on, connectWifi()'s per-attempt
+// WiFi.mode(WIFI_OFF) would tear the setup AP back down. ensureApAlive() re-arms
+// the AP side after each teardown; only called from that loop, guarded by this flag.
+static bool s_apKeepAlive = false;
+static void ensureApAlive() {
+  if (!s_apKeepAlive || !apModeActive) return;
+  if (WiFi.getMode() != WIFI_AP && WiFi.getMode() != WIFI_AP_STA) {
+    WiFi.mode(WIFI_AP_STA);
+  }
+}
+String apSSID = "";
+
+// Set false only if LittleFS is unusable even after a format (see setup()).
+// Every LittleFS user in this sketch checks it first so a dead filesystem
+// degrades to "no buffering" instead of repeated failed opens in the loop.
+bool fsUsable = true;
+
+// =============================================================================
+// QUIET THE USB-CDC PORT WHILE THE RADIO IS BRINGING UP (v1.15.21)
 //
-// WHY: connectWifi() runs before webServer.begin() in setup(). When a network IS
-// saved, its 5-attempt loop costs ~40-60s of WiFi.mode(WIFI_OFF)/scan/begin
-// thrashing before startSetupAP() is ever reached — and the AP does not exist at
-// all during that window. A phone that joins the AP name it saw earlier gets
-// nothing to talk to, which looks exactly like "on the waveshare's network but the
-// browser cannot connect." With this set, the AP is live within ~1s of power-on
-// and the STA attempt happens afterwards, so the page is reachable the whole time.
+// SYMPTOM Sarah reported: the serial monitor constantly disconnects and
+// reconnects, and it's worst around a WiFi change.
 //
-// Set back to 0 once the module is configured; it only matters for the
-// has-a-stale-or-dead-saved-network case.
-#ifndef AP_FIRST_NO_WIFI_WAIT
-#define AP_FIRST_NO_WIFI_WAIT 0
-#endif
+// This board's USB is the ESP32-S3's OWN peripheral (USB-CDC on boot, not an
+// FTDI/CH340 chip). The tiny USB task runs on core 0, and the WiFi driver's
+// init/calibration is a CPU-bound burst that starves it — the device stops
+// answering SETUP for longer than the host allows, Linux drops it, and it
+// re-enumerates a second later. That's the disconnect/reconnect cycle, and
+// it's why it clusters exactly where WiFi work happens:
+//   - setup(): esp_log_level_set("wifi", ESP_LOG_VERBOSE) + Serial.setDebugOutput
+//     (true) + 5 connect attempts, each doing WiFi.mode(WIFI_OFF) → scan →
+//     WiFi.begin()
+//   - the WiFi-save reboot, which runs that whole storm right after boot
+//
+// FIX: drop the radio-log spam to WARN and turn the Arduino assert channel off
+// for the duration of the connect storm, then restore both. Real diagnostics
+// survive (our own Serial.printf lines are untouched); only the driver's
+// firehose is muted while it's most likely to starve USB.
+//
+// Set these BEFORE the first call below and they stay in effect for the whole
+// boot if you want maximum serial stability during a bring-up you're watching.
+static bool _quietUsbActive = false;
 
 static void quietUsbForRadioWork() {
   if (_quietUsbActive) return;
