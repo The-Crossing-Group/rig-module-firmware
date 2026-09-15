@@ -582,12 +582,34 @@ void startSetupAP() {
   snprintf(suffix, sizeof(suffix), "%02X%02X%02X", mac[3], mac[4], mac[5]);
   apSSID = "RigModule-" + String(suffix);
 
-  WiFi.softAP(apSSID.c_str(), "modulesetup");
+  // v1.15.28: pin the AP to channel 1 and force 20MHz.
+  //
+  // Two separate real-world failures this fixes, both of which look identical
+  // from the client side — "joined the AP, browser cannot connect":
+  //
+  // 1) Without an explicit channel, softAP() lets the ARF algorithm pick, and it
+  //    can land on 5GHz-adjacent/DFS-adjacent settings or hop when the STA side
+  //    scans. A phone that associated while it was on one channel then sits on a
+  //    channel the AP has left. Pinning to 1 removes the variable entirely; the
+  //    setup AP is short-lived and single-client, so co-channel interference is
+  //    irrelevant.
+  //
+  // 2) Bandwidth: on a BW_SECOND (40MHz) AP, a client that negotiated 20MHz —
+  //    common on phones in a crowded office — can associate and then fail to
+  //    pass traffic. HTX_MODE_20 is the conservative choice.
+  //
+  // WiFi.setBandMode() is NOT called: this chip is 2.4GHz-only, so there is no
+  // band to negotiate, and the API name differs across core versions.
+  WiFi.setBandWidth(WIFI_BW_HT20);
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
+                    IPAddress(255, 255, 255, 0));
+  WiFi.softAP(apSSID.c_str(), "modulesetup", 1, 0, 4, true);
   apModeActive = true;
 
   Serial.println("[WiFi] ----------------------------------------");
   Serial.printf("[WiFi] Starting setup AP: \"%s\" / \"modulesetup\"\n", apSSID.c_str());
-  Serial.printf("[WiFi] AP IP: %s\n", WiFi.softAPIP().toString().c_str());
+  Serial.printf("[WiFi] AP IP: %s  channel=1 bw=20MHz\n",
+    WiFi.softAPIP().toString().c_str());
   Serial.println("[WiFi] Connect to this network, then open http://192.168.4.1/");
   Serial.println("[WiFi] ----------------------------------------");
 }
