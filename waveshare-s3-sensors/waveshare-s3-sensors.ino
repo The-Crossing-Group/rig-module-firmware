@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.39 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.40 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)

@@ -1,4 +1,4 @@
-// discovery.h — IP-agnostic logger discovery (v1.15.20)
+// discovery.h — IP-agnostic logger discovery (v1.15.20, v1.15.40 sweep fix)
 //
 // WHY: the old resolvePi() had exactly three ways to find the logger:
 //   1. a static piHost typed into /config
@@ -9,14 +9,30 @@
 // booted AFTER the module stayed invisible for up to 5 minutes, and a logger
 // whose IP changed (DHCP) took just as long to re-find.
 //
+// v1.15.40 NOTE — mDNS tier (3) is now UNRELIABLE, not this file's fault:
+// v1.15.32 made bringUpWifi() keep WIFI_AP_STA (setup AP + station) active
+// permanently, even after a successful WiFi connection, to fix a boot-loop
+// bug. Simultaneous AP+STA is a documented Espressif/arduino-esp32
+// limitation for mDNS — MDNS.queryService() frequently gets no replies in
+// that mode even though the Pi is advertising correctly and everything is
+// on the same network (see espressif/arduino-esp32#10613 and similar).
+// Before v1.15.32 the module dropped to plain WIFI_STA once connected,
+// where mDNS works fine — that's why this "just worked" a few versions ago
+// and doesn't now. We are NOT reverting to mode-switching (that's what
+// caused the boot-loop this was fixing). Instead tier (4), the TCP
+// port-sweep, is now the primary fallback in practice, not a rare backstop
+// — see the first-sweep timer fix below.
+//
 // Strategy now, in priority order:
 //   1. static piHost — always wins, it's the per-rig override
 //   2. legacy rigNNN SSID derivation (still used on the per-rig-router rigs)
 //   3. mDNS browse for _rig-logger._tcp, re-run on a short retry interval
 //      while unresolved and re-verified on a long interval once resolved
+//      (expect this to often fail silently now — see v1.15.40 note above)
 //   4. TCP port-sweep fallback: walk the module's own /24 looking for
-//      something listening on :8080. Only runs when mDNS is silent, and is
-//      rate-limited, so it can't stall the CAN loop.
+//      something listening on :8080. Runs immediately on first attempt
+//      (not after a 15-min wait — see _discSweepEverRun below), and is
+//      rate-limited afterward so it can't stall the CAN loop.
 //
 // NO EXTERNAL LIBRARY, AND NO EXTRA INCLUDES EITHER.
 // Two earlier attempts at this file broke Sarah's build:
@@ -54,7 +70,15 @@ static String        _discResolvedIp  = "";
 static String        _discMethod      = "none";
 static unsigned long _discLastAttempt = 0;
 static unsigned long _discLastSweep   = 0;
-static bool          _discSweepExhausted = false;
+// v1.15.40 fix: _discLastAttempt/_discLastSweep both start at 0, and the old
+// gating was `now - last >= INTERVAL`, i.e. "has it been INTERVAL since last
+// ran" — which on a fresh boot means "wait a full INTERVAL before the FIRST
+// run ever happens." For the sweep (SWEEP_RETRY_MS = 15 min) that meant a
+// module which can't reach the Pi via mDNS (now the common case, see file
+// header) sat completely undiscoverable for 15 minutes after every boot.
+// These two flags make the first attempt of each tier run immediately.
+static bool           _discMdnsEverRun  = false;
+static bool           _discSweepEverRun = false;
 
 // Cheap liveness probe: does anything speak our logger API at this IP?
 // GET /api/status answers 200 on rig-pi-logger's local server.
@@ -156,10 +180,13 @@ String discoverLogger(const String& staticHost, const String& wifiSSID) {
   }
 
   // 3. mDNS browse. Retry fast while unresolved, verify slowly once found.
-  bool due = _discResolvedIp.isEmpty()
+  // v1.15.40: !_discMdnsEverRun forces the very first call through
+  // immediately instead of waiting DISCOVER_RETRY_MS (20s) after boot.
+  bool due = !_discMdnsEverRun || (_discResolvedIp.isEmpty()
                ? (now - _discLastAttempt >= DISCOVER_RETRY_MS)
-               : (now - _discLastAttempt >= DISCOVER_VERIFY_MS);
+               : (now - _discLastAttempt >= DISCOVER_VERIFY_MS));
   if (due) {
+    _discMdnsEverRun = true;
     _discLastAttempt = now;
     int n = MDNS.queryService("_rig-logger", "_tcp");
     if (n > 0) {
@@ -169,7 +196,6 @@ String discoverLogger(const String& staticHost, const String& wifiSSID) {
       }
       _discResolvedIp = found;
       _discMethod = "mdns";
-      _discSweepExhausted = false;
       return _discResolvedIp;
     }
     // mDNS silent. If we already hold an address, keep it — one missed browse
@@ -178,16 +204,30 @@ String discoverLogger(const String& staticHost, const String& wifiSSID) {
   }
 
   // 4. TCP port sweep fallback (only while still unresolved).
-  if (_discResolvedIp.isEmpty() && !_discSweepExhausted &&
-      (now - _discLastSweep >= SWEEP_RETRY_MS)) {
+  // v1.15.40 fixes (two):
+  //   a) !_discSweepEverRun forces the very first sweep to run immediately
+  //      instead of waiting SWEEP_RETRY_MS (15 min) after boot — this was
+  //      the main bug (see file header).
+  //   b) removed the old _discSweepExhausted latch, which PERMANENTLY
+  //      stopped retrying the sweep after one failed attempt for the rest
+  //      of the boot session, only re-armed by an mDNS success. That was
+  //      fine back when mDNS was the reliable primary tier — it isn't
+  //      anymore. In practice: Pi not up yet on the module's one sweep
+  //      attempt after boot -> sweep gives up for good -> module never
+  //      finds the Pi even after it comes online, until rebooted. Now the
+  //      sweep just retries every SWEEP_RETRY_MS forever while unresolved,
+  //      same pacing as before, no permanent give-up.
+  if (_discResolvedIp.isEmpty() &&
+      (!_discSweepEverRun || (now - _discLastSweep >= SWEEP_RETRY_MS))) {
+    _discSweepEverRun = true;
     _discLastSweep = now;
     if (sweepSubnet()) {
       _discMethod = "subnet-sweep";
       return _discResolvedIp;
     }
-    _discSweepExhausted = true;  // stop hammering the LAN; mDNS retries continue
-    Serial.println("[Disc] Sweep exhausted — relying on mDNS retries. "
-                   "Set piHost manually if the logger is on a different subnet.");
+    Serial.println("[Disc] Sweep found nothing this pass — will retry in "
+                   "~15 min (or sooner if mDNS succeeds). Set piHost manually "
+                   "if the logger is on a different subnet.");
   }
 
   return _discResolvedIp;
