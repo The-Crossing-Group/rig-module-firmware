@@ -1,4 +1,4 @@
-// discovery.h — IP-agnostic logger discovery (v1.15.20, v1.15.40 sweep fix)
+// discovery.h — IP-agnostic logger discovery (v1.15.20, v1.15.40/41 sweep fixes)
 //
 // WHY: the old resolvePi() had exactly three ways to find the logger:
 //   1. a static piHost typed into /config
@@ -62,7 +62,21 @@
 
 static const unsigned long DISCOVER_RETRY_MS  = 20000UL;   // unresolved: retry discovery every 20s
 static const unsigned long DISCOVER_VERIFY_MS = 300000UL;  // resolved: re-verify via mDNS every 5 min
-static const unsigned long SWEEP_RETRY_MS     = 900000UL;  // don't re-sweep the /24 more than every 15 min
+// v1.15.41 (Sarah, 2026-09-16: "waiting 15 minutes is too long for plug and
+// play"): a sweep only costs ~25-30s worst case on a quiet /24 (254 hosts x
+// SWEEP_PORT_TIMEOUT), so there was never a real cost reason for a 15-minute
+// gap between attempts — that number was just carried over unchanged from
+// the original "rare backstop" design intent, before mDNS became unreliable
+// in AP+STA mode (see file header) and the sweep became the primary path in
+// practice. The realistic failure this gap matters for: module boots faster
+// than the Pi (e.g. both powered on together, Pi still in its own boot),
+// first sweep finds nothing, and under the old 15-min value the module then
+// sat undiscoverable for the rest of that gap even once the Pi came up.
+// 90s covers that startup-race case comfortably while still being a small
+// fraction of one duty cycle on the LAN (roughly 30s of scanning per 90s,
+// i.e. ~33% duty at worst, only while genuinely unresolved — once found,
+// discoverLogger() never re-enters this branch again until invalidated).
+static const unsigned long SWEEP_RETRY_MS     = 90000UL;   // don't re-sweep the /24 more than every 90s
 static const int           SWEEP_PORT_TIMEOUT = 120;       // ms per host waiting for a SYN/ACK
 static const uint16_t      LOGGER_PORT        = 8080;
 
@@ -226,7 +240,7 @@ String discoverLogger(const String& staticHost, const String& wifiSSID) {
       return _discResolvedIp;
     }
     Serial.println("[Disc] Sweep found nothing this pass — will retry in "
-                   "~15 min (or sooner if mDNS succeeds). Set piHost manually "
+                   "~90s (or sooner if mDNS succeeds). Set piHost manually "
                    "if the logger is on a different subnet.");
   }
 
