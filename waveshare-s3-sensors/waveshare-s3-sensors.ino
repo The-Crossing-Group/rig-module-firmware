@@ -693,7 +693,28 @@ void bringUpWifi() {
   WiFi.setAutoReconnect(false);
   WiFi.persistent(false);
 
-  const int MAX_ATTEMPTS = 5;
+  // v1.15.37 (Sarah, 2026-09-16: "a shorter connect time would make it more
+  // reliable and plug and play"): this loop used to run 5 attempts x up to
+  // 20s each + 3s between = up to ~112s worst case (saved-but-unreachable
+  // network -- exactly the bench scenario, wrong SSID in range/dead
+  // password/router off). That entire time is spent doing real CPU-bound
+  // radio work on the same core that services the USB-CDC port, which is
+  // the documented starvation mechanism behind this board's flaky
+  // auto-reset-to-bootloader (esptool "No serial data received" without a
+  // manual BOOT+RESET). Shrinking the retry budget directly shrinks how
+  // often an Upload attempt lands inside that bad window.
+  // 3 attempts x 8s + 2x2s between = ~28s worst case (plus a few seconds
+  // for the scan above), down from ~112s. If a network is actually in
+  // range with the right password it almost always associates within the
+  // first couple seconds anyway -- this budget cut costs real-world
+  // reconnect reliability only in marginal-signal edge cases, and trades
+  // that for a MUCH shorter window where the board is busy enough with
+  // radio work to risk starving USB.
+  const int MAX_ATTEMPTS = 3;
+  const int ATTEMPT_TIMEOUT_MS = 8000;   // was ~20000 (tries<40 @ 500ms)
+  const int RETRY_GAP_MS = 2000;         // was 3000
+  const int pollMs = 250;
+  const int maxPolls = ATTEMPT_TIMEOUT_MS / pollMs;
   for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     Serial.printf("[WiFi] Attempt %d/%d — connecting to \"%s\"...\n", attempt, MAX_ATTEMPTS, cfg.wifiSSID.c_str());
 
@@ -711,8 +732,8 @@ void bringUpWifi() {
     }
 
     int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries < 40) {
-      delay(500);
+    while (WiFi.status() != WL_CONNECTED && tries < maxPolls) {
+      delay(pollMs);
       tries++;
     }
 
@@ -726,8 +747,8 @@ void bringUpWifi() {
     } else {
       Serial.printf("[WiFi] Attempt %d failed (final status=%d)\n", attempt, WiFi.status());
       if (attempt < MAX_ATTEMPTS) {
-        Serial.println("[WiFi] Waiting 3s before retry...");
-        delay(3000);
+        Serial.printf("[WiFi] Waiting %ds before retry...\n", RETRY_GAP_MS / 1000);
+        delay(RETRY_GAP_MS);
       }
     }
   }
