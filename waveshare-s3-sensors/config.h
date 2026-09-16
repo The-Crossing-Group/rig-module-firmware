@@ -1,3 +1,4 @@
+// FIRMWARE VERSION: rig-module-sensors-1.15.38
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
