@@ -1205,25 +1205,36 @@ static void handleSensorsSave() {
   saveConfig(*_prefs, *_cfg);
 
   // Readback verification — same idea as the mbBaud check in saveConfig():
-  // confirm what's ACTUALLY in flash for each enabled slot's function
-  // code right after writing it, not just what's in the RAM struct we
-  // just wrote from. Added 2026-08-18 to chase down a report of fc
-  // reverting to 4 after a save — if this fires, the write itself is
-  // failing (NVS full/corrupt), not a logic bug in the save/load code.
-  _prefs->begin("rigmod", false);
-  for (int i = 0; i < MAX_SENSORS; i++) {
-    if (!_cfg->sensors[i].enabled) continue;
-    String pre = "s" + String(i) + "_";
-    int readBack = _prefs->getInt((pre + "fc").c_str(), -1);
-    if (readBack != (int)_cfg->sensors[i].funcCode) {
-      Serial.printf("[Sensors] MISMATCH slot %d: wrote fc=%d, flash readback=%d — NVS write may have failed!\n",
-        i, _cfg->sensors[i].funcCode, readBack);
+  // confirm what's ACTUALLY in flash right after writing it, not just
+  // what's in the RAM struct we just wrote from. Added 2026-08-18 to
+  // chase down a report of fc reverting to 4 after a save — if this
+  // fires, the write itself is failing (NVS full/corrupt), not a logic
+  // bug in the save/load code.
+  //
+  // UPDATED 2026-09-16: reads back the packed "sensorsBlob" (see
+  // SensorConfigPacked in config.h) instead of individual per-key
+  // "sX_fc" values — those old keys are no longer written.
+  {
+    SensorConfigPacked packed[MAX_SENSORS];
+    _prefs->begin("rigmod", true); // read-only
+    size_t got = _prefs->getBytes("sensorsBlob", packed, sizeof(packed));
+    _prefs->end();
+    if (got != sizeof(packed)) {
+      Serial.printf("[Sensors] MISMATCH: sensorsBlob readback got %u bytes, expected %u — NVS write may have failed!\n",
+        (unsigned)got, (unsigned)sizeof(packed));
     } else {
-      Serial.printf("[Sensors] slot %d saved OK: fc=%d (slaveId=%d)\n",
-        i, readBack, _cfg->sensors[i].slaveId);
+      for (int i = 0; i < MAX_SENSORS; i++) {
+        if (!_cfg->sensors[i].enabled) continue;
+        if (packed[i].funcCode != _cfg->sensors[i].funcCode) {
+          Serial.printf("[Sensors] MISMATCH slot %d: wrote fc=%d, flash readback=%d — NVS write may have failed!\n",
+            i, _cfg->sensors[i].funcCode, packed[i].funcCode);
+        } else {
+          Serial.printf("[Sensors] slot %d saved OK: fc=%d (slaveId=%d)\n",
+            i, packed[i].funcCode, packed[i].slaveId);
+        }
+      }
     }
   }
-  _prefs->end();
 
   _srv->sendHeader("Location", "/sensors");
   _srv->send(302, "text/plain", "");

@@ -11,8 +11,9 @@
 // =============================================================================
 #pragma once
 #include <Arduino.h>
+#include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.15.37"
+#define FW_VERSION "rig-module-sensors-1.15.38"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -294,6 +295,147 @@ struct CanSignalConfig {
   int      decimals   = 2;
 };
 
+// =============================================================================
+// Packed (POD, fixed-size) mirrors of SensorConfig/CanSignalConfig, used
+// ONLY for NVS blob storage — see BUG FIXED 2026-09-16 below.
+//
+// BUG FIXED 2026-09-16 (Sarah: "CAN and RS485 sensor settings don't
+// persist across a hard power cycle, only survives a page refresh"):
+// saveConfig()/loadConfig() previously stored each sensor/CAN-signal
+// field as its OWN individual NVS key — 18 keys x 16 sensor slots + 13
+// keys x 16 CAN slots + ~15 top-level keys = ~511 separate NVS entries
+// in this one "rigmod" namespace, each written with its own
+// nvs_set_xxx()+nvs_commit() call (~511 independent flash commits per
+// "Save All Sensors"/"Save All Signals" click). Confirmed live on
+// Sarah's board: NVS was sitting at 504/630 entries used, 126 free —
+// i.e. this feature alone was consuming almost the ENTIRE default 20K
+// partition, leaving only the one mandatory reserved page for garbage
+// collection with no real headroom. A refresh only re-renders the
+// already-correct in-RAM cfg struct (proves nothing about flash); only
+// an actual reboot re-reads through loadConfig() and would have exposed
+// any of those ~511 writes that silently failed to land.
+//
+// Fix: sensors[] and canSignals[] are now serialized as ONE packed
+// struct each and stored as a single NVS blob per array ("sensorsBlob"/
+// "canBlob") — 2 keys, 2 flash commits total per save, instead of ~340.
+// This also frees up the vast majority of that NVS headroom. A one-time
+// migration (loadConfig()) reads any OLD per-key data still on flash so
+// existing saved configs are not lost by this change, then the next
+// save writes the new blob format and the old keys become orphaned
+// (harmlessly ignored, same pattern as the old "canEn" key).
+// =============================================================================
+#define SENSOR_STR_LEN 32     // generous for name/kind/unit/capacityUnit
+struct SensorConfigPacked {
+  bool     enabled;
+  char     name[SENSOR_STR_LEN];
+  char     kind[SENSOR_STR_LEN];
+  char     unit[SENSOR_STR_LEN];
+  uint8_t  slaveId;
+  uint8_t  funcCode;
+  uint16_t regAddr;
+  uint8_t  dataType;
+  uint8_t  wordOrder;
+  uint8_t  respRegOffset;
+  float    scale;
+  float    offset;
+  int32_t  decimals;
+  bool     volumeEnabled;
+  float    capacity;
+  char     capacityUnit[SENSOR_STR_LEN];
+  float    volZeroLevel;
+  float    volMaxLevel;
+};
+
+struct CanSignalConfigPacked {
+  bool     enabled;
+  char     name[SENSOR_STR_LEN];
+  char     kind[SENSOR_STR_LEN];
+  char     unit[SENSOR_STR_LEN];
+  uint32_t canId;
+  bool     extended;
+  uint8_t  byteOffset;
+  uint8_t  byteLen;
+  bool     bigEndian;
+  bool     signedVal;
+  float    scale;
+  float    offset;
+  int32_t  decimals;
+};
+
+static void packSensor(const SensorConfig& s, SensorConfigPacked& p) {
+  p.enabled = s.enabled;
+  strncpy(p.name, s.name.c_str(), SENSOR_STR_LEN - 1); p.name[SENSOR_STR_LEN - 1] = 0;
+  strncpy(p.kind, s.kind.c_str(), SENSOR_STR_LEN - 1); p.kind[SENSOR_STR_LEN - 1] = 0;
+  strncpy(p.unit, s.unit.c_str(), SENSOR_STR_LEN - 1); p.unit[SENSOR_STR_LEN - 1] = 0;
+  p.slaveId = s.slaveId;
+  p.funcCode = s.funcCode;
+  p.regAddr = s.regAddr;
+  p.dataType = s.dataType;
+  p.wordOrder = s.wordOrder;
+  p.respRegOffset = s.respRegOffset;
+  p.scale = s.scale;
+  p.offset = s.offset;
+  p.decimals = s.decimals;
+  p.volumeEnabled = s.volumeEnabled;
+  p.capacity = s.capacity;
+  strncpy(p.capacityUnit, s.capacityUnit.c_str(), SENSOR_STR_LEN - 1); p.capacityUnit[SENSOR_STR_LEN - 1] = 0;
+  p.volZeroLevel = s.volZeroLevel;
+  p.volMaxLevel = s.volMaxLevel;
+}
+
+static void unpackSensor(const SensorConfigPacked& p, SensorConfig& s) {
+  s.enabled = p.enabled;
+  s.name = String(p.name);
+  s.kind = String(p.kind);
+  s.unit = String(p.unit);
+  s.slaveId = p.slaveId;
+  s.funcCode = p.funcCode;
+  s.regAddr = p.regAddr;
+  s.dataType = p.dataType;
+  s.wordOrder = p.wordOrder;
+  s.respRegOffset = p.respRegOffset;
+  s.scale = p.scale;
+  s.offset = p.offset;
+  s.decimals = p.decimals;
+  s.volumeEnabled = p.volumeEnabled;
+  s.capacity = p.capacity;
+  s.capacityUnit = String(p.capacityUnit);
+  s.volZeroLevel = p.volZeroLevel;
+  s.volMaxLevel = p.volMaxLevel;
+}
+
+static void packCanSignal(const CanSignalConfig& c, CanSignalConfigPacked& p) {
+  p.enabled = c.enabled;
+  strncpy(p.name, c.name.c_str(), SENSOR_STR_LEN - 1); p.name[SENSOR_STR_LEN - 1] = 0;
+  strncpy(p.kind, c.kind.c_str(), SENSOR_STR_LEN - 1); p.kind[SENSOR_STR_LEN - 1] = 0;
+  strncpy(p.unit, c.unit.c_str(), SENSOR_STR_LEN - 1); p.unit[SENSOR_STR_LEN - 1] = 0;
+  p.canId = c.canId;
+  p.extended = c.extended;
+  p.byteOffset = c.byteOffset;
+  p.byteLen = c.byteLen;
+  p.bigEndian = c.bigEndian;
+  p.signedVal = c.signedVal;
+  p.scale = c.scale;
+  p.offset = c.offset;
+  p.decimals = c.decimals;
+}
+
+static void unpackCanSignal(const CanSignalConfigPacked& p, CanSignalConfig& c) {
+  c.enabled = p.enabled;
+  c.name = String(p.name);
+  c.kind = String(p.kind);
+  c.unit = String(p.unit);
+  c.canId = p.canId;
+  c.extended = p.extended;
+  c.byteOffset = p.byteOffset;
+  c.byteLen = p.byteLen;
+  c.bigEndian = p.bigEndian;
+  c.signedVal = p.signedVal;
+  c.scale = p.scale;
+  c.offset = p.offset;
+  c.decimals = p.decimals;
+}
+
 struct CanSignalReading {
   bool   hasValue = false;
   float  rawValue = 0.0f;
@@ -410,43 +552,78 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.canopenTargetSpecific = p.getBool("copTgtSp", false);
   c.nvsEraseSelfHealCount = p.getULong("nvsHealCnt", 0);
 
-  for (int i = 0; i < MAX_SENSORS; i++) {
-    String pre = "s" + String(i) + "_";
-    c.sensors[i].enabled     = p.getBool((pre + "en").c_str(), false);
-    c.sensors[i].name        = p.getString((pre + "nm").c_str(), "");
-    c.sensors[i].kind        = p.getString((pre + "kd").c_str(), "");
-    c.sensors[i].unit        = p.getString((pre + "ut").c_str(), "");
-    c.sensors[i].slaveId     = (uint8_t)p.getInt((pre + "sid").c_str(), 1);
-    c.sensors[i].funcCode    = (uint8_t)p.getInt((pre + "fc").c_str(), 3);
-    c.sensors[i].regAddr     = (uint16_t)p.getInt((pre + "reg").c_str(), 0);
-    c.sensors[i].dataType    = (uint8_t)p.getInt((pre + "dt").c_str(), MB_UINT16);
-    c.sensors[i].wordOrder   = (uint8_t)p.getInt((pre + "wo").c_str(), MB_WORD_HIGH_FIRST);
-    c.sensors[i].respRegOffset = (uint8_t)p.getInt((pre + "ro").c_str(), 0);
-    c.sensors[i].scale       = p.getFloat((pre + "sc").c_str(), 1.0f);
-    c.sensors[i].offset      = p.getFloat((pre + "of").c_str(), 0.0f);
-    c.sensors[i].decimals    = p.getInt((pre + "dec").c_str(), 2);
-    c.sensors[i].volumeEnabled = p.getBool((pre + "vE").c_str(), false);
-    c.sensors[i].capacity      = p.getFloat((pre + "cap").c_str(), 0.0f);
-    c.sensors[i].capacityUnit  = p.getString((pre + "cu").c_str(), "m3");
-    c.sensors[i].volZeroLevel  = p.getFloat((pre + "vz").c_str(), 0.0f);
-    c.sensors[i].volMaxLevel   = p.getFloat((pre + "vm").c_str(), 1.0f);
+  // BUG FIXED 2026-09-16 — see SensorConfigPacked comment (above the
+  // struct defs) for the full story: sensor/CAN-signal config used to be
+  // ~511 individual NVS keys, tight enough against the 20K partition
+  // (504/630 entries used, confirmed live) that some writes could
+  // silently fail. Now read as one packed blob per array.
+  //
+  // MIGRATION: a board that already has settings saved under the OLD
+  // per-key format won't have "sensorsBlob"/"canBlob" yet on its first
+  // boot after this update — getBytesLength() returns 0 for a key that
+  // doesn't exist (confirmed in Preferences.cpp, not an error/exception).
+  // In that case, fall back to reading the old per-key format so
+  // existing saved sensors/CAN signals are NOT lost by this change. The
+  // next save (any "Save All Sensors"/"Save All Signals" click) writes
+  // the new blob format going forward; the old keys are then orphaned
+  // and harmlessly ignored, same pattern as the old "canEn" key before.
+  {
+    SensorConfigPacked packed[MAX_SENSORS];
+    size_t got = p.getBytes("sensorsBlob", packed, sizeof(packed));
+    if (got == sizeof(packed)) {
+      for (int i = 0; i < MAX_SENSORS; i++) unpackSensor(packed[i], c.sensors[i]);
+      Serial.println("[Config] Loaded sensors from sensorsBlob (current format).");
+    } else {
+      Serial.println("[Config] No sensorsBlob found — migrating from old per-key sensor format (if any).");
+      for (int i = 0; i < MAX_SENSORS; i++) {
+        String pre = "s" + String(i) + "_";
+        c.sensors[i].enabled     = p.getBool((pre + "en").c_str(), false);
+        c.sensors[i].name        = p.getString((pre + "nm").c_str(), "");
+        c.sensors[i].kind        = p.getString((pre + "kd").c_str(), "");
+        c.sensors[i].unit        = p.getString((pre + "ut").c_str(), "");
+        c.sensors[i].slaveId     = (uint8_t)p.getInt((pre + "sid").c_str(), 1);
+        c.sensors[i].funcCode    = (uint8_t)p.getInt((pre + "fc").c_str(), 3);
+        c.sensors[i].regAddr     = (uint16_t)p.getInt((pre + "reg").c_str(), 0);
+        c.sensors[i].dataType    = (uint8_t)p.getInt((pre + "dt").c_str(), MB_UINT16);
+        c.sensors[i].wordOrder   = (uint8_t)p.getInt((pre + "wo").c_str(), MB_WORD_HIGH_FIRST);
+        c.sensors[i].respRegOffset = (uint8_t)p.getInt((pre + "ro").c_str(), 0);
+        c.sensors[i].scale       = p.getFloat((pre + "sc").c_str(), 1.0f);
+        c.sensors[i].offset      = p.getFloat((pre + "of").c_str(), 0.0f);
+        c.sensors[i].decimals    = p.getInt((pre + "dec").c_str(), 2);
+        c.sensors[i].volumeEnabled = p.getBool((pre + "vE").c_str(), false);
+        c.sensors[i].capacity      = p.getFloat((pre + "cap").c_str(), 0.0f);
+        c.sensors[i].capacityUnit  = p.getString((pre + "cu").c_str(), "m3");
+        c.sensors[i].volZeroLevel  = p.getFloat((pre + "vz").c_str(), 0.0f);
+        c.sensors[i].volMaxLevel   = p.getFloat((pre + "vm").c_str(), 1.0f);
+      }
+    }
   }
 
-  for (int i = 0; i < MAX_CAN_SIGNALS; i++) {
-    String pre = "c" + String(i) + "_";
-    c.canSignals[i].enabled    = p.getBool((pre + "en").c_str(), false);
-    c.canSignals[i].name       = p.getString((pre + "nm").c_str(), "");
-    c.canSignals[i].kind       = p.getString((pre + "kd").c_str(), "");
-    c.canSignals[i].unit       = p.getString((pre + "ut").c_str(), "");
-    c.canSignals[i].canId      = (uint32_t)p.getLong((pre + "id").c_str(), 0);
-    c.canSignals[i].extended   = p.getBool((pre + "ext").c_str(), false);
-    c.canSignals[i].byteOffset = (uint8_t)p.getInt((pre + "bo").c_str(), 0);
-    c.canSignals[i].byteLen    = (uint8_t)p.getInt((pre + "bl").c_str(), 2);
-    c.canSignals[i].bigEndian  = p.getBool((pre + "be").c_str(), true);
-    c.canSignals[i].signedVal  = p.getBool((pre + "sv").c_str(), false);
-    c.canSignals[i].scale      = p.getFloat((pre + "sc").c_str(), 1.0f);
-    c.canSignals[i].offset     = p.getFloat((pre + "of").c_str(), 0.0f);
-    c.canSignals[i].decimals   = p.getInt((pre + "dec").c_str(), 2);
+  {
+    CanSignalConfigPacked packed[MAX_CAN_SIGNALS];
+    size_t got = p.getBytes("canBlob", packed, sizeof(packed));
+    if (got == sizeof(packed)) {
+      for (int i = 0; i < MAX_CAN_SIGNALS; i++) unpackCanSignal(packed[i], c.canSignals[i]);
+      Serial.println("[Config] Loaded CAN signals from canBlob (current format).");
+    } else {
+      Serial.println("[Config] No canBlob found — migrating from old per-key CAN format (if any).");
+      for (int i = 0; i < MAX_CAN_SIGNALS; i++) {
+        String pre = "c" + String(i) + "_";
+        c.canSignals[i].enabled    = p.getBool((pre + "en").c_str(), false);
+        c.canSignals[i].name       = p.getString((pre + "nm").c_str(), "");
+        c.canSignals[i].kind       = p.getString((pre + "kd").c_str(), "");
+        c.canSignals[i].unit       = p.getString((pre + "ut").c_str(), "");
+        c.canSignals[i].canId      = (uint32_t)p.getLong((pre + "id").c_str(), 0);
+        c.canSignals[i].extended   = p.getBool((pre + "ext").c_str(), false);
+        c.canSignals[i].byteOffset = (uint8_t)p.getInt((pre + "bo").c_str(), 0);
+        c.canSignals[i].byteLen    = (uint8_t)p.getInt((pre + "bl").c_str(), 2);
+        c.canSignals[i].bigEndian  = p.getBool((pre + "be").c_str(), true);
+        c.canSignals[i].signedVal  = p.getBool((pre + "sv").c_str(), false);
+        c.canSignals[i].scale      = p.getFloat((pre + "sc").c_str(), 1.0f);
+        c.canSignals[i].offset     = p.getFloat((pre + "of").c_str(), 0.0f);
+        c.canSignals[i].decimals   = p.getInt((pre + "dec").c_str(), 2);
+      }
+    }
   }
 }
 
@@ -535,43 +712,37 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   p.putBool("copTgtSp", c.canopenTargetSpecific);
   p.putULong("nvsHealCnt", c.nvsEraseSelfHealCount);
 
-  for (int i = 0; i < MAX_SENSORS; i++) {
-    String pre = "s" + String(i) + "_";
-    p.putBool((pre + "en").c_str(), c.sensors[i].enabled);
-    p.putString((pre + "nm").c_str(), c.sensors[i].name);
-    p.putString((pre + "kd").c_str(), c.sensors[i].kind);
-    p.putString((pre + "ut").c_str(), c.sensors[i].unit);
-    p.putInt((pre + "sid").c_str(), c.sensors[i].slaveId);
-    p.putInt((pre + "fc").c_str(), c.sensors[i].funcCode);
-    p.putInt((pre + "reg").c_str(), c.sensors[i].regAddr);
-    p.putInt((pre + "dt").c_str(), c.sensors[i].dataType);
-    p.putInt((pre + "wo").c_str(), c.sensors[i].wordOrder);
-    p.putInt((pre + "ro").c_str(), c.sensors[i].respRegOffset);
-    p.putFloat((pre + "sc").c_str(), c.sensors[i].scale);
-    p.putFloat((pre + "of").c_str(), c.sensors[i].offset);
-    p.putInt((pre + "dec").c_str(), c.sensors[i].decimals);
-    p.putBool((pre + "vE").c_str(), c.sensors[i].volumeEnabled);
-    p.putFloat((pre + "cap").c_str(), c.sensors[i].capacity);
-    p.putString((pre + "cu").c_str(), c.sensors[i].capacityUnit);
-    p.putFloat((pre + "vz").c_str(), c.sensors[i].volZeroLevel);
-    p.putFloat((pre + "vm").c_str(), c.sensors[i].volMaxLevel);
+  // BUG FIXED 2026-09-16 — see SensorConfigPacked comment above for the
+  // full story. Was: 18 keys x 16 slots = 288 individual NVS writes here
+  // (and another 208 for CAN signals below), ~511 total in this function.
+  // Now: pack all 16 sensor slots into ONE fixed-size blob, one NVS key,
+  // one flash commit — same for CAN signals. Massively less NVS pressure,
+  // and each save is now effectively atomic instead of ~500 independent
+  // writes any one of which could silently fail on a tight partition.
+  {
+    SensorConfigPacked packed[MAX_SENSORS];
+    for (int i = 0; i < MAX_SENSORS; i++) packSensor(c.sensors[i], packed[i]);
+    size_t wrote = p.putBytes("sensorsBlob", packed, sizeof(packed));
+    if (wrote != sizeof(packed)) {
+      Serial.printf("[Config] WARNING: NVS write FAILED for sensorsBlob (wrote=%u, expected=%u) "
+        "— partition may be full/corrupt.\n", (unsigned)wrote, (unsigned)sizeof(packed));
+    }
+  }
+  {
+    CanSignalConfigPacked packed[MAX_CAN_SIGNALS];
+    for (int i = 0; i < MAX_CAN_SIGNALS; i++) packCanSignal(c.canSignals[i], packed[i]);
+    size_t wrote = p.putBytes("canBlob", packed, sizeof(packed));
+    if (wrote != sizeof(packed)) {
+      Serial.printf("[Config] WARNING: NVS write FAILED for canBlob (wrote=%u, expected=%u) "
+        "— partition may be full/corrupt.\n", (unsigned)wrote, (unsigned)sizeof(packed));
+    }
   }
 
-  for (int i = 0; i < MAX_CAN_SIGNALS; i++) {
-    String pre = "c" + String(i) + "_";
-    p.putBool((pre + "en").c_str(), c.canSignals[i].enabled);
-    p.putString((pre + "nm").c_str(), c.canSignals[i].name);
-    p.putString((pre + "kd").c_str(), c.canSignals[i].kind);
-    p.putString((pre + "ut").c_str(), c.canSignals[i].unit);
-    p.putLong((pre + "id").c_str(), c.canSignals[i].canId);
-    p.putBool((pre + "ext").c_str(), c.canSignals[i].extended);
-    p.putInt((pre + "bo").c_str(), c.canSignals[i].byteOffset);
-    p.putInt((pre + "bl").c_str(), c.canSignals[i].byteLen);
-    p.putBool((pre + "be").c_str(), c.canSignals[i].bigEndian);
-    p.putBool((pre + "sv").c_str(), c.canSignals[i].signedVal);
-    p.putFloat((pre + "sc").c_str(), c.canSignals[i].scale);
-    p.putFloat((pre + "of").c_str(), c.canSignals[i].offset);
-    p.putInt((pre + "dec").c_str(), c.canSignals[i].decimals);
-  }
+  // Old per-key sensor/CAN-signal writes (18 keys x 16 sensor slots + 13
+  // keys x 16 CAN slots) removed here 2026-09-16 — replaced by the two
+  // blob writes above. loadConfig() below still knows how to read the
+  // OLD per-key format for one-time migration; nothing writes through
+  // it anymore, so those old keys become orphaned/harmless once a save
+  // happens under the new format (same pattern as the old "canEn" key).
   p.end();
 }
