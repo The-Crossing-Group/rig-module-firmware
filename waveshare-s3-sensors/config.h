@@ -12,7 +12,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define FW_VERSION "rig-module-sensors-1.15.35"
+#define FW_VERSION "rig-module-sensors-1.15.36"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -34,8 +34,12 @@
 //    ...watch the buffer drain                         → BUFFER_DEBUG         = 1
 //    ...watch CANopen encoder bring-up                 → CANOPEN_DEBUG        = 1
 //    ...watch the CAN RX task start                    → CAN_TASK_DEBUG       = 1
-//  After flashing with a *_ONCE switch, set it back to 0 — it self-clears in NVS
-//  but leaving it set re-wipes on every flash.
+//  v1.15.36: *_ONCE switches now track their own "already fired" flag in NVS
+//  (see waveshare-s3-sensors.ino's setup()), so leaving one at 1 no longer
+//  re-wipes on every subsequent boot/reboot — it truly only fires once per
+//  0->1 arm. Still good practice to set it back to 0 after use so a future
+//  intentional 0->1 re-arms cleanly, but it's no longer a footgun if you
+//  forget: it just stays a harmless no-op until you do.
 // =============================================================================
 
 // --- One-shot rescue switches -------------------------------------------------

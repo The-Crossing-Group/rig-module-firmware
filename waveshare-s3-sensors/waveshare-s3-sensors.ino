@@ -196,25 +196,63 @@ void setup() {
   quietUsbForRadioWork();
 #endif
 
+  // BUG FOUND 2026-09-16 (Sarah: "wifi settings and sensor settings ...
+  // everything seems to be resetting while im testing"): FORGET_WIFI_ONCE
+  // and FACTORY_RESET_ONCE were named/documented like one-shot switches
+  // ("self-clears in NVS") but were plain #if checks with NO tracking of
+  // whether they'd already fired. Leaving either at 1 in the flashed
+  // binary (exactly what the old comment warned you to remember NOT to
+  // do) wiped config on EVERY SINGLE BOOT for as long as that build kept
+  // running -- a plain power-cycle reboot included, not just the next
+  // reflash. That silently explains "resetting between flashes AND
+  // reboots": a normal reboot never touches NVS at all unless something
+  // is actively re-wiping it every time, and this was doing exactly that.
+  //
+  // Fix: each switch now only fires on the first boot after being
+  // "armed" (flipped to 1 and flashed), tracked via its own NVS done-flag.
+  // Once fired, leaving the switch at 1 on later reboots is now a no-op --
+  // it actually behaves like "ONCE" this time. Flipping the switch back
+  // to 0 (even briefly, one flash) clears the done-flag so a future 0->1
+  // re-arms it properly instead of it staying permanently spent.
 #if FORGET_WIFI_ONCE
-  // Runs before loadConfig() below, so the cleared values are what the rest of
-  // boot sees. Written back to NVS by the first saveConfig() so it sticks even
-  // if this build stays flashed.
-  Serial.println("[BOOT] FORGET_WIFI_ONCE=1 — clearing saved WiFi credentials.");
   prefs.begin("rigmod", false);
-  prefs.remove("wifiSSID");
-  prefs.remove("wifiPass");
+  if (!prefs.getBool("wifiFgtDone", false)) {
+    Serial.println("[BOOT] FORGET_WIFI_ONCE=1, first boot since armed — clearing saved WiFi credentials.");
+    prefs.remove("wifiSSID");
+    prefs.remove("wifiPass");
+    prefs.putBool("wifiFgtDone", true);
+  } else {
+    Serial.println("[BOOT] FORGET_WIFI_ONCE=1 but already fired since last armed — NOT wiping again.");
+    Serial.println("[BOOT] Flip it to 0, reflash once, then back to 1 to re-arm if you need it again.");
+  }
+  prefs.end();
+#else
+  // Switch is off in THIS build -- clear any stale done-flag so a future
+  // 0->1 flip fires fresh instead of silently staying "already done"
+  // forever from some past flash.
+  prefs.begin("rigmod", false);
+  if (prefs.getBool("wifiFgtDone", false)) prefs.remove("wifiFgtDone");
   prefs.end();
 #endif
 
 #if FACTORY_RESET_ONCE
-  Serial.println("[BOOT] FACTORY_RESET_ONCE=1 — wiping ALL saved module config.");
   prefs.begin("rigmod", false);
-  prefs.clear();
+  if (!prefs.getBool("facRstDone", false)) {
+    Serial.println("[BOOT] FACTORY_RESET_ONCE=1, first boot since armed — wiping ALL saved module config.");
+    prefs.clear();
+    prefs.putBool("facRstDone", true);
+    Serial.println("[BOOT] Namespace cleared: everything from here on is the");
+    Serial.println("[BOOT] compiled-in default, and no network is saved, so boot");
+    Serial.println("[BOOT] goes straight to the setup AP.");
+  } else {
+    Serial.println("[BOOT] FACTORY_RESET_ONCE=1 but already fired since last armed — NOT wiping again.");
+    Serial.println("[BOOT] Flip it to 0, reflash once, then back to 1 to re-arm if you need it again.");
+  }
   prefs.end();
-  Serial.println("[BOOT] Namespace cleared: everything from here on is the");
-  Serial.println("[BOOT] compiled-in default, and no network is saved, so boot");
-  Serial.println("[BOOT] goes straight to the setup AP.");
+#else
+  prefs.begin("rigmod", false);
+  if (prefs.getBool("facRstDone", false)) prefs.remove("facRstDone");
+  prefs.end();
 #endif
 
   // See modbus/WiFi self-heal rationale below (ensureStaStarted) — these
