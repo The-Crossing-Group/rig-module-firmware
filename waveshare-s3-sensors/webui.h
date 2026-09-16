@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.38 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.39 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -676,12 +676,8 @@ static String sysPage(ModuleConfig& cfg) {
   // is now only possible on an OLDER firmware still running on this board.
   bool selfHealFired = cfg.nvsEraseSelfHealCount > 0;
   if (selfHealFired) {
-    h += "<div class='card' style='border-color:#e74c3c'><b>&#9888; NVS erase self-heal fired " +
-         String(cfg.nvsEraseSelfHealCount) + " time(s) on a PREVIOUS firmware version</b> — that code "
-         "path (which wiped the whole NVS partition on transient WiFi mode-change noise) was REMOVED "
-         "in v1.15.32 because it was the root cause of the \"changing WiFi network boot-loops the "
-         "board\" bug. Since this board is now running " + String(FW_VERSION) + ", it can't fire again "
-         "— this count is a historical record from before the fix, not a live warning.</div>";
+    h += "<div class='card' style='border-color:#e74c3c'><b>&#9888; NVS self-heal fired " +
+         String(cfg.nvsEraseSelfHealCount) + "x on old firmware.</b> Fixed in v1.15.32+, historical only.</div>";
   }
   NvsStats st = getNvsStats();
   bool nvsLow = false;
@@ -692,22 +688,14 @@ static String sysPage(ModuleConfig& cfg) {
          String(st.totalEntries) + " total entries (" + String(st.freeEntries) + " free)";
     h += "<br>Partition size: " + String(nvsPartBytes) + " bytes";
     if (nvsPartBytes == 0x5000) {
-      // Stock 20K partition — this is the EXPECTED, correct size since
-      // v1.15.11 (the custom 64K partitions.csv was removed after it
-      // bricked boards via table/app offset mismatch — see README
-      // "Partition table incident"). No warning needed at this size.
+      // Stock 20K partition — expected size, no warning.
     } else if (nvsPartBytes > 0 && nvsPartBytes < 0x5000) {
-      h += " <span class='warn'>&#9888; Smaller than the stock 20K partition — unexpected partition "
-           "table on this board. Full esptool erase_flash + reflash recommended.</span>";
+      h += " <span class='warn'>&#9888; Smaller than stock 20K — reflash recommended.</span>";
     } else if (nvsPartBytes >= 0x10000) {
-      h += " <span class='warn'>&#9888; Non-stock partition table detected (" + String(nvsPartBytes) +
-           " bytes). This firmware ships NO partitions.csv (removed v1.15.11 after the field "
-           "boot-loop incident). If this board was flashed with a custom table via esptool "
-           "deliberately, ignore this. Otherwise: esptool erase_flash + reflash.</span>";
+      h += " <span class='warn'>&#9888; Non-stock partition table (" + String(nvsPartBytes) + " bytes).</span>";
     }
     if (nvsLow) {
-      h += "<br><span class='warn'>&#9888; Running low — new config keys may silently fail to save. "
-           "If settings (e.g. baud rate) aren't sticking, this is likely why.</span>";
+      h += "<br><span class='warn'>&#9888; Running low — new settings may silently fail to save.</span>";
     }
     h += "</div>";
   }
@@ -742,50 +730,16 @@ static String sysPage(ModuleConfig& cfg) {
     // (2026-09-10).
     bool mismatch = !keysAbsent && ((flashBaud != cfg.modbusBaud) || (flashBaudSet != cfg.baudManuallySet));
     h += "<div class='card'><b>Baud Persistence Check:</b>";
-    h += "<br>In RAM right now: baud=" + String(cfg.modbusBaud) + " manuallySet=" + String(cfg.baudManuallySet ? "true" : "false");
-    h += "<br>On flash right now: baud=" + String(flashBaud) + " manuallySet=" + String(flashBaudSet ? "true" : "false") +
-         (keysAbsent ? " <i>(keys don't exist on flash at all)</i>" : "");
+    h += "<br>RAM: baud=" + String(cfg.modbusBaud) + " manuallySet=" + String(cfg.baudManuallySet ? "true" : "false");
+    h += "<br>Flash: baud=" + String(flashBaud) + " manuallySet=" + String(flashBaudSet ? "true" : "false");
+    // Terse, one line per state (2026-09-16, Sarah: no walls of text) —
+    // full root-cause reasoning that used to live here moved to MEMORY.md.
     if (keysAbsent) {
-      h += "<div style='margin-top:6px;padding:8px;background:#00000022;border-radius:6px'>";
-      if (selfHealFired) {
-        h += "<span class='warn'>&#9888; Likely cause: this board's history shows the (now-removed, "
-             "v1.15.32+) NVS erase self-heal fired " + String(cfg.nvsEraseSelfHealCount) +
-             " time(s) on an older firmware version</span> — that wiped this exact key on the way "
-             "down. If this board hasn't been re-saved on /config since updating to " + String(FW_VERSION) +
-             ", just click Save once there to recreate it.";
-      } else if (nvsLow) {
-        h += "<span class='warn'>&#9888; Likely cause:</span> NVS Storage above shows only " +
-             String(st.freeEntries) + " free entries — a first-ever save attempt on this device may be "
-             "silently failing because the partition is already full. Check serial log at the moment "
-             "of Save for a '[Config] WARNING: NVS write FAILED' line to confirm.";
-      } else {
-        h += "&#8505; Ambiguous from this page alone: could mean this device has genuinely never had "
-             "its Config page saved (click Save once on / and re-check), OR a save attempt is silently "
-             "failing for a reason not covered by the other two diagnostics above (self-heal count is "
-             "0, NVS has " + String(st.freeEntries) + " free entries -- not low). If it STILL shows "
-             "these keys absent after clicking Save, that's a genuinely new failure mode — needs a "
-             "serial log captured at the exact moment Save is clicked to see the actual "
-             "putLong()/putBool() return values.";
-      }
-      h += "</div>";
+      h += "<br><span class='warn'>&#9888; Not saved yet — click Save on /config.</span>";
     } else if (mismatch) {
-      h += "<br><span class='warn'>&#9888; MISMATCH — flash has different VALUES than what's running "
-           "(keys exist, but disagree). This confirms a save silently failed to update them; the "
-           "values shown above as \"on flash\" are what will come back after a reboot.</span>";
-      h += "<div style='margin-top:6px;padding:8px;background:#00000022;border-radius:6px'>"
-           "<b>Likely cause:</b> ";
-      if (nvsLow) {
-        h += "NVS Storage above shows only " + String(st.freeEntries) + " free entries — the write is "
-             "almost certainly silently failing because the partition is full or nearly full. Check "
-             "serial log at the moment of Save for a '[Config] WARNING: NVS write FAILED' line to confirm.";
-      } else {
-        h += "NVS has " + String(st.freeEntries) + " free entries (not low) and self-heal hasn't fired "
-             "since boot — this is a genuinely new failure mode. Needs a serial log captured at the "
-             "exact moment Save is clicked to see the actual putLong()/putBool() return values.";
-      }
-      h += "</div>";
+      h += "<br><span class='warn'>&#9888; Mismatch — save didn't persist. Check serial log.</span>";
     } else {
-      h += "<br><span class='ok'>&#10003; Match — flash agrees with what's running.</span>";
+      h += "<br><span class='ok'>&#10003; Match.</span>";
     }
     h += "</div>";
   }
