@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.43 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.44 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -947,7 +947,15 @@ String buildPayload(bool bufferedFlag) {
         if (!vol.hasValue) volObj["value"] = nullptr;
         volObj["unit"]   = vol.unit;
         volObj["status"] = vol.status;
-        c["capacity"] = s.capacity;
+        // CHANGED 2026-09-17: capacity is no longer a stored config value
+        // (s.capacity is gone -- replaced by s.tankLengthM/tankWidthM, see
+        // config.h) -- it's now derived geometry, computed once inside
+        // computeSensorVolume() alongside the volume itself (same unit
+        // conversion, same rounding) and carried back via vol.capacity so
+        // this wire field's shape/meaning is unchanged for the Pi side
+        // (rig-modules.js's fill-% widget, module-traces.js's axis-max
+        // default both still just read `capacity` off this same payload).
+        c["capacity"] = vol.capacity;
       }
     }
 
