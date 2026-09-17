@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.45
+// FIRMWARE VERSION: rig-module-sensors-1.15.46
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.15.45"
+#define FW_VERSION "rig-module-sensors-1.15.46"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -116,23 +116,25 @@ struct SensorConfig {
   int    decimals    = 2;       // rounding for display/report
 
   // --- Tank volume (optional derived calc) -------------------------------
-  // CHANGED 2026-09-17 (Sarah/Gerald: real tank geometry, not an abstract
-  // capacity number). This sensor's engineering value IS a level/distance
-  // reading; volZeroLevel/volMaxLevel are still the sensor's OWN reading
-  // at empty/full (same convention as before, same units as the sensor's
-  // scaled value -- typically meters for a radar's air-gap distance). NEW:
-  // instead of typing a pre-computed tank capacity, enter the tank's real
-  // footprint -- length x width, both meters -- and volume is derived as
-  // area x water height, where water height comes from the existing
-  // frac-of-(zero..max) calc in scaling.h. Rectangular tanks only (Sarah's
-  // rigs); a non-rectangular tank would need a different area model, not
-  // supported here.
+  // CHANGED 2026-09-17 (Sarah/Gerald, second pass): the two-point
+  // calibration (Value @ Empty / Value @ Full) is GONE -- Sarah didn't
+  // understand it and it wasn't needed for how her radar sensors actually
+  // work. This is a top-mounted radar reporting air-gap distance straight
+  // down to the water surface (closer = higher water, further = lower --
+  // the sensor's own reading IS a distance in meters already, no per-
+  // sensor calibration step required). Model is now dead simple: enter
+  // the tank's real physical height (tankHeightM, meters, measured empty
+  // tank floor to sensor face) ONCE, and water height is always
+  // `tankHeightM - reading.value` (see scaling.h computeSensorVolume()).
+  // Combined with tankLengthM/tankWidthM (also entered directly, same as
+  // before), volume = length x width x height. Rectangular tanks only
+  // (Sarah's rigs); a non-rectangular tank would need a different area
+  // model, not supported here.
   bool   volumeEnabled = false;
   float  tankLengthM   = 0.0f;   // tank footprint length, meters
   float  tankWidthM    = 0.0f;   // tank footprint width, meters
+  float  tankHeightM   = 0.0f;   // tank height, meters (floor to sensor face) -- water height = this minus the sensor's own reading
   String capacityUnit  = "m3";   // "m3" or "gal" -- OUTPUT unit only, computed volume is converted to this for display
-  float  volZeroLevel  = 0.0f;
-  float  volMaxLevel   = 1.0f;
 };
 
 // Live reading for one sensor.
@@ -236,9 +238,8 @@ struct SensorConfigPacked {
   bool     volumeEnabled;
   float    tankLengthM;
   float    tankWidthM;
+  float    tankHeightM;
   char     capacityUnit[SENSOR_STR_LEN];
-  float    volZeroLevel;
-  float    volMaxLevel;
 };
 
 struct CanSignalConfigPacked {
@@ -274,9 +275,8 @@ static void packSensor(const SensorConfig& s, SensorConfigPacked& p) {
   p.volumeEnabled = s.volumeEnabled;
   p.tankLengthM = s.tankLengthM;
   p.tankWidthM = s.tankWidthM;
+  p.tankHeightM = s.tankHeightM;
   strncpy(p.capacityUnit, s.capacityUnit.c_str(), SENSOR_STR_LEN - 1); p.capacityUnit[SENSOR_STR_LEN - 1] = 0;
-  p.volZeroLevel = s.volZeroLevel;
-  p.volMaxLevel = s.volMaxLevel;
 }
 
 static void unpackSensor(const SensorConfigPacked& p, SensorConfig& s) {
@@ -296,9 +296,8 @@ static void unpackSensor(const SensorConfigPacked& p, SensorConfig& s) {
   s.volumeEnabled = p.volumeEnabled;
   s.tankLengthM = p.tankLengthM;
   s.tankWidthM = p.tankWidthM;
+  s.tankHeightM = p.tankHeightM;
   s.capacityUnit = String(p.capacityUnit);
-  s.volZeroLevel = p.volZeroLevel;
-  s.volMaxLevel = p.volMaxLevel;
 }
 
 static void packCanSignal(const CanSignalConfig& c, CanSignalConfigPacked& p) {
@@ -495,21 +494,24 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
         c.sensors[i].offset      = p.getFloat((pre + "of").c_str(), 0.0f);
         c.sensors[i].decimals    = p.getInt((pre + "dec").c_str(), 2);
         c.sensors[i].volumeEnabled = p.getBool((pre + "vE").c_str(), false);
-        // CHANGED 2026-09-17: "cap" (single capacity number) replaced by
-        // "len"/"wid" (tank footprint, meters) -- see SensorConfig's
-        // volumeEnabled comment in this file for why. This migration path
-        // only ever runs on a board that saved under the OLD per-key
-        // format AND has never saved since this change (see the blob-vs-
-        // per-key migration note above) -- reading the old "cap" key here
-        // would silently resurrect a capacity number that no longer means
-        // anything under the new length x width model, so it's not read
-        // at all; length/width just come back as 0 (volume disabled,
-        // effectively) until re-entered on /sensors.
+        // CHANGED 2026-09-17 (two passes same day):
+        //   1st pass: "cap" (single capacity number) -> "len"/"wid" (tank
+        //   footprint, meters).
+        //   2nd pass: two-point calibration ("vz"/"vm", Value @ Empty /
+        //   Value @ Full) removed entirely -- Sarah didn't need/understand
+        //   it; replaced by a single "th" (tank height, meters) -- see
+        //   SensorConfig's volumeEnabled comment in this file for the
+        //   current model. This migration path only ever runs on a board
+        //   that saved under the OLD per-key format AND has never saved
+        //   since either change (see the blob-vs-per-key migration note
+        //   above) -- old "cap"/"vz"/"vm" keys are intentionally NOT read
+        //   here, none of them mean anything under the current model;
+        //   length/width/height just come back as 0 (volume disabled,
+        //   effectively) until re-entered on /sensors.
         c.sensors[i].tankLengthM   = p.getFloat((pre + "len").c_str(), 0.0f);
         c.sensors[i].tankWidthM    = p.getFloat((pre + "wid").c_str(), 0.0f);
+        c.sensors[i].tankHeightM   = p.getFloat((pre + "th").c_str(), 0.0f);
         c.sensors[i].capacityUnit  = p.getString((pre + "cu").c_str(), "m3");
-        c.sensors[i].volZeroLevel  = p.getFloat((pre + "vz").c_str(), 0.0f);
-        c.sensors[i].volMaxLevel   = p.getFloat((pre + "vm").c_str(), 1.0f);
       }
     }
   }

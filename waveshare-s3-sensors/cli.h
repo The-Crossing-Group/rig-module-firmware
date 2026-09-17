@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.45 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.46 (see FW_VERSION in config.h)
 // =============================================================================
 // cli.h — Serial command-line interface, mirrors the web UI config pages.
 //
@@ -149,12 +149,12 @@ static void _cliCsHelp() {
     "  cs set <n> <field> <value>    set one field on slot n\n"
     "\n"
     "  fields: name kind unit slave fc reg type wo ro scale offset dec\n"
-    "          vol len wid capu vz vm\n"
+    "          vol len wid th capu\n"
     "    type:  u16 i16 u32 i32 f32\n"
     "    wo:    hi | lo   (word order, only matters for 32-bit types)\n"
     "    vol:   0|1        (tank volume calc enabled)\n"
-    "    len/wid: rectangular tank footprint, meters -- volume = len x wid x\n"
-    "             (Value @ Full - Value @ Empty), see /sensors web page\n"
+    "    len/wid/th: rectangular tank dimensions, meters. For a top-mounted\n"
+    "             distance sensor (radar): volume = len x wid x (th - reading)\n"
     "    capu:  m3 | gal   (output unit only)\n"
     "\n"
     "  e.g. cs set 0 name Standpipe Pressure\n"
@@ -323,9 +323,8 @@ static void _cliCsPrint(int i) {
   Serial.printf("vol     : %s\n", s.volumeEnabled ? "1" : "0");
   Serial.printf("len     : %g\n", s.tankLengthM);
   Serial.printf("wid     : %g\n", s.tankWidthM);
+  Serial.printf("th      : %g\n", s.tankHeightM);
   Serial.printf("capu    : %s\n", s.capacityUnit.c_str());
-  Serial.printf("vz      : %g\n", s.volZeroLevel);
-  Serial.printf("vm      : %g\n", s.volMaxLevel);
 }
 
 static void _cliCsList() {
@@ -378,9 +377,8 @@ static void _cliCsSet(int i, const String& field, const String& val) {
   else if (field == "vol") s.volumeEnabled = _cliBoolVal(val);
   else if (field == "len") s.tankLengthM = val.toFloat();
   else if (field == "wid") s.tankWidthM = val.toFloat();
+  else if (field == "th") s.tankHeightM = val.toFloat();
   else if (field == "capu") s.capacityUnit = val;
-  else if (field == "vz") s.volZeroLevel = val.toFloat();
-  else if (field == "vm") s.volMaxLevel = val.toFloat();
   else { _cliErr("unknown field: " + field); return; }
   _cliOk("sensor " + String(i) + " " + field);
 }

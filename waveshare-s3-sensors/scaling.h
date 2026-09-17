@@ -9,18 +9,26 @@
 // sensor whose value is a level reading can have Compute Tank Volume
 // checked to also report a derived volume.
 //
-// CHANGED 2026-09-17 (Sarah/Gerald): volume used to be a straight
-// frac * (a single, pre-computed capacity number). Now it's real
-// rectangular-tank geometry: frac -> a water HEIGHT (meters), then
-// length x width x height -> volume (m3), then converted to the
-// configured display unit. This is the standard tank-gauging approach
-// for a rectangular tank with a top-mounted level sensor -- volume scales
-// linearly with height for a constant cross-section, so frac-of-range
-// applied to the tank's total usable height gives the true water height
-// directly; no lookup table or non-linear correction needed (that would
-// only be a concern for a tank with a non-constant cross-section, e.g. a
-// cylinder lying on its side -- not the case here, Sarah's rigs use
-// rectangular tanks).
+// CHANGED 2026-09-17 (Sarah/Gerald, two passes same day):
+//   1st pass: volume used to be a straight frac * (a single, pre-computed
+//   capacity number) -> replaced with real rectangular-tank geometry
+//   (length x width x height).
+//   2nd pass: the two-point calibration (frac-of-(Value @ Empty..Value @
+//   Full)) that 1st pass still used to derive water height is GONE.
+//   Sarah's actual words: "i dont really understand the volume @ empty
+//   options... remember this is for the tank volume" -- she doesn't want
+//   a calibration step at all. Her radar sensors report a plain distance
+//   in meters, straight down from the sensor to the water surface
+//   (closer = more water). Water height is now computed DIRECTLY:
+//   `waterHeightM = tankHeightM - reading.value`, no frac, no
+//   calibration, no min/max readings to configure. tankHeightM is a
+//   single physical measurement (tape-measure the empty tank, floor to
+//   sensor face) entered once, same as length/width.
+// This is still the standard tank-gauging approach for a rectangular tank
+// with a top-mounted level sensor -- volume scales linearly with height
+// for a constant cross-section (not a concern here; that only matters for
+// a non-constant cross-section, e.g. a cylinder lying on its side --
+// Sarah's rigs use rectangular tanks).
 // =============================================================================
 #pragma once
 #include "config.h"
@@ -52,7 +60,9 @@ struct VolumeReading {
 
 // level: this sensor's OWN latest reading (must be a level-type value for
 // this to make sense — that's on the person configuring it, same as every
-// other rig-module variant).
+// other rig-module variant). Assumed to be a distance in meters, straight
+// down from a top-mounted sensor to the water surface (radar air-gap
+// convention) — see this file's header comment for the current model.
 void computeSensorVolume(SensorConfig& s, SensorReading& reading, VolumeReading& out) {
   out.hasValue = false;
   out.value    = 0.0f;
@@ -60,20 +70,12 @@ void computeSensorVolume(SensorConfig& s, SensorReading& reading, VolumeReading&
   out.status   = "disabled";
 
   if (!s.volumeEnabled) return;
-  // Both tank footprint dimensions must be real, positive numbers — a
-  // zero-area footprint can't sensibly produce a volume (and would
-  // silently report 0 forever, indistinguishable from "genuinely empty",
-  // if we let it through instead of bailing out to "disabled" here).
-  if (s.tankLengthM <= 0.0f || s.tankWidthM <= 0.0f) return;
-  // Only reject an exact match (divide-by-zero) — volMaxLevel is allowed
-  // to be LESS than volZeroLevel on purpose. Distance-based level sensors
-  // (e.g. a radar unit reporting air-gap-to-surface, like the SM7779)
-  // report a SMALLER raw value as the tank fills, so the natural config
-  // is volZeroLevel=large (empty) / volMaxLevel=small (full). The frac
-  // formula below is a symmetric ratio and produces the right 0..1 curve
-  // either way — this used to require volMaxLevel > volZeroLevel, which
-  // silently disabled Tank Volume for every inverted-direction sensor.
-  if (s.volMaxLevel == s.volZeroLevel) return;
+  // All three tank dimensions must be real, positive numbers — a
+  // zero-area footprint or zero height can't sensibly produce a volume
+  // (and would silently report 0 forever, indistinguishable from
+  // "genuinely empty", if we let it through instead of bailing out to
+  // "disabled" here).
+  if (s.tankLengthM <= 0.0f || s.tankWidthM <= 0.0f || s.tankHeightM <= 0.0f) return;
 
   // Use the debounced displayStatus, not raw valid/status, for the same
   // reason the sensor's own /sensors and /live display debounces a lone
@@ -90,21 +92,18 @@ void computeSensorVolume(SensorConfig& s, SensorReading& reading, VolumeReading&
     return;
   }
 
-  float frac = (reading.value - s.volZeroLevel) / (s.volMaxLevel - s.volZeroLevel);
-  if (frac < 0.0f) frac = 0.0f;
-  if (frac > 1.0f) frac = 1.0f;
-
-  // frac-of-range -> water height (meters). volZeroLevel/volMaxLevel are
-  // the sensor's OWN reading (e.g. radar air-gap distance) at empty/full,
-  // in the same units as reading.value — by existing convention (unchanged
-  // from before this fix) that's meters, so their absolute difference IS
-  // the tank's usable height range directly, no unit conversion needed.
-  float heightRangeM = fabs(s.volMaxLevel - s.volZeroLevel);
-  float waterHeightM = frac * heightRangeM;
+  // Direct calc, no calibration step: water height = tank height minus
+  // the sensor's own (air-gap distance) reading. Clamped to the tank's
+  // physical range — a reading beyond either end (sensor noise, or the
+  // tank genuinely empty/overfull) shouldn't produce a negative or
+  // over-100%-full volume.
+  float waterHeightM = s.tankHeightM - reading.value;
+  if (waterHeightM < 0.0f) waterHeightM = 0.0f;
+  if (waterHeightM > s.tankHeightM) waterHeightM = s.tankHeightM;
 
   // Rectangular tank: volume = footprint area x water height.
   float volM3 = s.tankLengthM * s.tankWidthM * waterHeightM;
-  float capM3 = s.tankLengthM * s.tankWidthM * heightRangeM; // full-tank volume (height range, not just current)
+  float capM3 = s.tankLengthM * s.tankWidthM * s.tankHeightM; // full-tank volume
   bool  toGal = (s.capacityUnit == "gal");
   float vol = toGal ? (volM3 * M3_TO_US_GALLONS) : volM3;
   float cap = toGal ? (capM3 * M3_TO_US_GALLONS) : capM3;

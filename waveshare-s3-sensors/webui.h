@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.45 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.46 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -449,19 +449,22 @@ static String sensorsPage(ModuleConfig& cfg) {
     if (s.volumeEnabled) h += " checked";
     h += "> Compute Tank Volume from this sensor</label>";
     h += "<div id='volFields" + String(i) + "' style='display:" + String(s.volumeEnabled ? "block" : "none") + "'>";
-    // CHANGED 2026-09-17 (Sarah/Gerald): a single "Capacity" number
-    // replaced by real tank footprint (length x width, meters) -- volume
-    // is now derived as area x water height instead of typed in directly.
-    // See scaling.h's computeSensorVolume() for the actual math.
-    h += "<div class='small'>Rectangular tank footprint. Empty = 0 volume, Full = "
-         "Length &times; Width &times; (Value @ Full &minus; Value @ Empty).</div>";
+    // CHANGED 2026-09-17 (Sarah/Gerald, two passes same day): 1st pass
+    // replaced a single "Capacity" number with tank footprint (length x
+    // width). 2nd pass removed the Value @ Empty / Value @ Full
+    // calibration entirely -- Sarah didn't understand it and didn't need
+    // it. Now just a third physical measurement (Tank Height) plus the
+    // assumption baked into the wording below: this sensor is a
+    // top-mounted radar/distance sensor, reading = air gap down to the
+    // water surface. See scaling.h's computeSensorVolume() for the math.
+    h += "<div class='small'>For a top-mounted distance sensor (e.g. radar): closer reading = "
+         "more water. Volume = Length &times; Width &times; (Tank Height &minus; current reading).</div>";
     h += "<div class='row'><div><label>Tank Length (m)</label><input name='s" + String(i) + "len' type='number' step='any' min='0' value='" + _f(s.tankLengthM) + "'></div>";
     h += "<div><label>Tank Width (m)</label><input name='s" + String(i) + "wid' type='number' step='any' min='0' value='" + _f(s.tankWidthM) + "'></div></div>";
-    h += "<div class='row'><div><label>Output Unit</label><select name='s" + String(i) + "cu'>";
+    h += "<div class='row'><div><label>Tank Height (m)</label><input name='s" + String(i) + "th' type='number' step='any' min='0' value='" + _f(s.tankHeightM) + "'></div>";
+    h += "<div><label>Output Unit</label><select name='s" + String(i) + "cu'>";
     h += "<option value='m3'" + String(s.capacityUnit == "m3" ? " selected" : "") + ">m&#179;</option>";
     h += "<option value='gal'" + String(s.capacityUnit == "gal" ? " selected" : "") + ">gal</option></select></div></div>";
-    h += "<div class='row'><div><label>Value @ Empty</label><input name='s" + String(i) + "vz' type='number' step='any' value='" + _f(s.volZeroLevel) + "'></div>";
-    h += "<div><label>Value @ Full</label><input name='s" + String(i) + "vm' type='number' step='any' value='" + _f(s.volMaxLevel) + "'></div></div>";
     h += "</div>";
 
     h += "<div class='row' style='margin-top:8px'><button type='button' onclick='probeSensor(" + String(i) + ")'>&#128269; Probe Now</button>";
@@ -1191,14 +1194,15 @@ static void handleSensorsSave() {
     if (_srv->hasArg((pre + "sc").c_str()))  s.scale = _srv->arg((pre + "sc").c_str()).toFloat();
     if (_srv->hasArg((pre + "of").c_str()))  s.offset = _srv->arg((pre + "of").c_str()).toFloat();
     s.volumeEnabled = _srv->hasArg((pre + "volEn").c_str());
-    // CHANGED 2026-09-17: "cap" (single capacity number) replaced by
-    // "len"/"wid" (tank footprint, meters) -- see SensorConfig's
-    // volumeEnabled comment in config.h.
+    // CHANGED 2026-09-17 (two passes same day): "cap" (single capacity
+    // number) -> "len"/"wid" (tank footprint, meters) -> "vz"/"vm"
+    // (Value @ Empty/Full calibration) removed entirely, replaced by a
+    // single "th" (tank height, meters) -- see SensorConfig's
+    // volumeEnabled comment in config.h for the current model.
     if (_srv->hasArg((pre + "len").c_str())) s.tankLengthM = _srv->arg((pre + "len").c_str()).toFloat();
     if (_srv->hasArg((pre + "wid").c_str())) s.tankWidthM = _srv->arg((pre + "wid").c_str()).toFloat();
+    if (_srv->hasArg((pre + "th").c_str()))  s.tankHeightM = _srv->arg((pre + "th").c_str()).toFloat();
     if (_srv->hasArg((pre + "cu").c_str()))  s.capacityUnit = _srv->arg((pre + "cu").c_str());
-    if (_srv->hasArg((pre + "vz").c_str()))  s.volZeroLevel = _srv->arg((pre + "vz").c_str()).toFloat();
-    if (_srv->hasArg((pre + "vm").c_str()))  s.volMaxLevel = _srv->arg((pre + "vm").c_str()).toFloat();
   }
   saveConfig(*_prefs, *_cfg);
 
