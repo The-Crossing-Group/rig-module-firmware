@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.42 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.43 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -1107,16 +1107,26 @@ static void handleConfig() {
       " — the NVS write did not stick.</p>";
   }
 
+  // BUG FIXED 2026-09-17 (Sarah's "spot sneaky bugs" pass): apModeActive
+  // used to be checked BEFORE baudChanged/canChanged. modbusInit()/
+  // canStart() only ever run once, from setup() — a baud or CAN/CANopen
+  // change only takes effect after a reboot, same as WiFi. But if you're
+  // on the setup AP (totally normal during first-time bench setup, before
+  // WiFi is even configured) and change ONLY the baud rate or CAN
+  // settings — no WiFi field touched — the old ordering hit the
+  // apModeActive branch first and told you "Saved. No SSID change
+  // detected, so NOT rebooting", implying nothing needed a reboot. That
+  // was wrong for exactly this case: the change WAS saved to NVS, but
+  // silently never applied to the running board until some unrelated
+  // future reboot happened to pick it up. baudChanged/canChanged now
+  // come first — they need a reboot regardless of AP/STA state, and
+  // rebooting while on the AP is safe (v1.15.32+: the AP is unconditional
+  // and comes right back up either way). apModeActive now only fires
+  // when it's true AND genuinely nothing needs a reboot.
   if (wifiChanged) {
     _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to connect to new WiFi...</p>" + verifyMsg);
     delay(1000);
     ESP.restart();
-  } else if (apModeActive) {
-    // v1.15.14: don't reboot-loop in the AP when nothing WiFi-related changed.
-    _srv->send(200, "text/html; charset=utf-8",
-      "<p>Saved. <b>No SSID change detected, so NOT rebooting</b> — the unit is still in setup-AP mode"
-      " and would just come back here. Pick a network from the scan list (or Type manually...) and"
-      " press Save again to join it. Current saved SSID: <b>" + _esc(_cfg->wifiSSID) + "</b></p>" + verifyMsg);
   } else if (baudChanged) {
     _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to apply new RS485 baud rate...</p>" + verifyMsg);
     delay(1000);
@@ -1128,6 +1138,13 @@ static void handleConfig() {
     _srv->send(200, "text/html; charset=utf-8", "<p>Saved. Rebooting to apply CAN settings...</p>");
     delay(1000);
     ESP.restart();
+  } else if (apModeActive) {
+    // v1.15.14: don't reboot-loop in the AP when nothing WiFi-related
+    // (or, as of this fix, baud/CAN-related) actually changed.
+    _srv->send(200, "text/html; charset=utf-8",
+      "<p>Saved. <b>No SSID change detected, so NOT rebooting</b> — the unit is still in setup-AP mode"
+      " and would just come back here. Pick a network from the scan list (or Type manually...) and"
+      " press Save again to join it. Current saved SSID: <b>" + _esc(_cfg->wifiSSID) + "</b></p>" + verifyMsg);
   } else {
     _srv->sendHeader("Location", "/");
     _srv->send(302, "text/plain", "");

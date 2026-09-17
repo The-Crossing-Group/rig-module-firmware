@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.42
+// FIRMWARE VERSION: rig-module-sensors-1.15.43
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
@@ -14,150 +14,33 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.15.42"
+#define FW_VERSION "rig-module-sensors-1.15.43"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
 //  =============================================================================
-//  1 = ON, 0 = OFF. All of these used to be scattered through the .ino buried in
-//  commentary. They are collected here so a rebuild is a one-line change.
-//  config.h is included FIRST in the sketch, so setting a value here wins; each
-//  definition below is still wrapped in #ifndef so an -D on the command line or an
-//  old note in the .ino can never silently override what you typed here.
+//  REMOVED 2026-09-17 (Sarah: "we don't need the build switches in
+//  production, those were put there for troubleshooting and we don't need
+//  them anymore as we got the major bugs and troubles figured out"). This
+//  block used to define 16 switches; a "spot sneaky bugs" pass the same day
+//  found that 13 of them (NO_WIFI, ENABLE_MODBUS_POLL_TASK, ENABLE_CAN,
+//  CANOPEN_ENCODER_PRESENT, CAN_DEBUG, MODBUS_DEBUG, RS485_DEBUG,
+//  BUFFER_DEBUG, CANOPEN_DEBUG, CAN_TASK_DEBUG, DEBUG_BOOT_IN_AP, AUTO_POST,
+//  WEBUI_ENABLE, DEBUG_PAGE_ENABLED, ENABLE_OTA, ESP32PING_AVAILABLE — that's
+//  actually 16, all of them except the 3 below) were dead: defined here,
+//  documented in a "quick reference" as if flipping them changed behavior,
+//  but never once checked by an #if/if anywhere in the codebase. Deleting
+//  them outright rather than leaving harmless dead defines around, since the
+//  quick-reference comment actively lied about what they did and that's
+//  worse than nothing being there at all.
 //
-//  QUICK REFERENCE — "I need to ..."
-//    ...wipe all config (WiFi, sensors, channels)      → FACTORY_RESET_ONCE   = 1
-//    ...forget WiFi only, keep sensors                 → FORGET_WIFI_ONCE     = 1
-//    ...see serial from the very first line            → QUIET_SERIAL_BOOT    = 1
-//    ...stop the module joining WiFi at all (bench)    → NO_WIFI              = 1
-//    ...watch raw CAN traffic                          → CAN_DEBUG            = 1
-//    ...watch every Modbus frame                       → MODBUS_DEBUG         = 1
-//    ...watch the RS485 DE/RE timing                   → RS485_DEBUG          = 1
-//    ...watch the buffer drain                         → BUFFER_DEBUG         = 1
-//    ...watch CANopen encoder bring-up                 → CANOPEN_DEBUG        = 1
-//    ...watch the CAN RX task start                    → CAN_TASK_DEBUG       = 1
-//  v1.15.36: *_ONCE switches now track their own "already fired" flag in NVS
-//  (see waveshare-s3-sensors.ino's setup()), so leaving one at 1 no longer
-//  re-wipes on every subsequent boot/reboot — it truly only fires once per
-//  0->1 arm. Still good practice to set it back to 0 after use so a future
-//  intentional 0->1 re-arms cleanly, but it's no longer a footgun if you
-//  forget: it just stays a harmless no-op until you do.
-// =============================================================================
-
-// --- One-shot rescue switches -------------------------------------------------
-// Wipe the entire "rigmod" NVS namespace before config loads. Board boots to a
-// factory-fresh setup AP. Use when the config page is unreachable or a stale
-// network is wedging boot.
-#ifndef FACTORY_RESET_ONCE
-#define FACTORY_RESET_ONCE      0
-#endif
-
-// Clear ONLY wifiSSID/wifiPass, keep sensor and channel config. For "wrong WiFi
-// password, can't reach the page." Prefer the red Forget WiFi button on /config
-// when the page loads.
-#ifndef FORGET_WIFI_ONCE
-#define FORGET_WIFI_ONCE        0
-#endif
-
-// --- Serial / diagnostics -----------------------------------------------------
-// Mute wifi/phy/nvs driver logs for the WHOLE boot and skip Serial.setDebugOutput.
-// Use when the USB-CDC monitor drops during boot. Costs you the driver chatter
-// that usually explains a radio failure, so turn it off once you can see.
-#ifndef QUIET_SERIAL_BOOT
-#define QUIET_SERIAL_BOOT       0
-#endif
-
-// NOTE: there used to be an AP_FIRST_NO_WIFI_WAIT switch here to bring the
-// setup AP up before any STA attempt. Removed in v1.15.32 — the setup AP is
-// now ALWAYS brought up first, unconditionally, with no switch needed. See
-// bringUpWifi() in the .ino for why (root cause of the "changing WiFi
-// boot-loops the board" field report).
-
-// --- Radio --------------------------------------------------------------------
-// Compile the WiFi stack out entirely. Bench/USB-only; no radio, no AP, no POST.
-#ifndef NO_WIFI
-#define NO_WIFI                 0
-#endif
-
-// --- Subsystem kill switches --------------------------------------------------
-// 0 = do not start the background Modbus sensor poll task.
-#ifndef ENABLE_MODBUS_POLL_TASK
-#define ENABLE_MODBUS_POLL_TASK 1
-#endif
-
-// 1 = compile in the CAN transceiver / sniffer / CANopen encoder code.
-#ifndef ENABLE_CAN
-#define ENABLE_CAN              1
-#endif
-
-// 1 = CANopen encoder is fitted on this machine. 0 = leave its bus alone entirely.
-#ifndef CANOPEN_ENCODER_PRESENT
-#define CANOPEN_ENCODER_PRESENT 0
-#endif
-
-// --- Verbose logging ----------------------------------------------------------
-// Every CAN frame: id, dlc, data bytes.
-#ifndef CAN_DEBUG
-#define CAN_DEBUG               0
-#endif
-
-// Every Modbus request/response, hex.
-#ifndef MODBUS_DEBUG
-#define MODBUS_DEBUG            0
-#endif
-
-// RS485 DE/RE toggle timing.
-#ifndef RS485_DEBUG
-#define RS485_DEBUG             0
-#endif
-
-// Buffer drain / POST retry detail.
-#ifndef BUFFER_DEBUG
-#define BUFFER_DEBUG            0
-#endif
-
-// CANopen NMT/SYNC/RPDO bring-up detail.
-#ifndef CANOPEN_DEBUG
-#define CANOPEN_DEBUG           0
-#endif
-
-// CAN RX task startup detail.
-#ifndef CAN_TASK_DEBUG
-#define CAN_TASK_DEBUG          0
-#endif
-
-// 1 = print the boot banner + diagnostics even in AP mode.
-#ifndef DEBUG_BOOT_IN_AP
-#define DEBUG_BOOT_IN_AP        1
-#endif
-
-// --- Feature flags ------------------------------------------------------------
-// 1 = POST buffered samples to the logger automatically.
-#ifndef AUTO_POST
-#define AUTO_POST               1
-#endif
-
-// 1 = accept sensor config over HTTP (off = read-only firmware).
-#ifndef WEBUI_ENABLE
-#define WEBUI_ENABLE            1
-#endif
-
-// 1 = serve the /debug page.
-#ifndef DEBUG_PAGE_ENABLED
-#define DEBUG_PAGE_ENABLED      1
-#endif
-
-// 1 = ESP32 OTA updates.
-#ifndef ENABLE_OTA
-#define ENABLE_OTA              1
-#endif
-
-// 1 = run the /24 broadcast sweep when mDNS finds nothing. Needs ESP32Ping.
-#ifndef ESP32PING_AVAILABLE
-#define ESP32PING_AVAILABLE     1
-#endif
-// =============================================================================
-//  ⚙️  END BUILD SWITCHES
+//  The 3 switches that WERE real (FACTORY_RESET_ONCE, FORGET_WIFI_ONCE,
+//  QUIET_SERIAL_BOOT) are gone too, per the same instruction — troubleshooting-
+//  only, not needed now that the bugs they existed to recover from are fixed.
+//  If a genuine field rescue is ever needed again (bricked config, dead WiFi
+//  credentials wedging boot), the equivalent web UI actions still exist:
+//  /system's "Factory Reset" button, and /config's "Forget WiFi" button —
+//  those don't need a reflash at all, unlike these switches ever did.
 // =============================================================================
 
 #include <WiFi.h>
@@ -441,7 +324,14 @@ struct CanSignalReading {
   bool   hasValue = false;
   float  rawValue = 0.0f;
   float  value    = 0.0f;
-  String status   = "stale"; // "ok" | "stale" (no matching frame seen yet)
+  // "ok" | "stale" -- "stale" means no matching frame seen yet OR (fixed
+  // 2026-09-17, see can.h's checkCanSignalStaleness()) it USED to be "ok"
+  // but no matching frame has arrived in the last CAN_SIGNAL_STALE_MS.
+  // hasValue/value/rawValue are deliberately left at their last real
+  // reading even after going stale -- same "show it, don't blank it"
+  // convention as the rest of this signal's stale-not-hidden handling on
+  // the Modules page.
+  String status   = "stale";
   unsigned long lastSeenMs = 0;
 };
 

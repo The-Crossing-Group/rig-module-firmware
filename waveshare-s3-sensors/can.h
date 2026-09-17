@@ -177,12 +177,55 @@ void canStop() {
 
 bool canIsRunning() { return _canStarted; }
 
+// =============================================================================
+// BUG FIXED 2026-09-17 (Sarah's "spot sneaky bugs" pass): a CAN signal
+// could never go back to "stale" once it had reported "ok" at least once.
+// canReadings[s].lastSeenMs WAS being written on every successful match
+// (see the extraction loop below) but nothing anywhere ever read it back —
+// so if the encoder/sensor a signal was decoding went dead, or was simply
+// never wired up correctly in the first place, the signal's status field
+// stayed frozen at "ok" forever, showing whatever its last (possibly hours-
+// old) value was as if it were still live. RS485 sensors already have real
+// recency tracking (consecutiveTimeouts / TIMEOUT_DISPLAY_THRESHOLD in the
+// .ino's pollTask); CAN signals had none at all — this closes that gap with
+// the same "stale" status value CanSignalReading already defines, just
+// actually wired up to fire now.
+// =============================================================================
+static const unsigned long CAN_SIGNAL_STALE_MS       = 5000UL; // no matching frame this long -> "stale"
+static const unsigned long CAN_SIGNAL_STALE_CHECK_MS = 1000UL; // how often to sweep for staleness
+
+// Sweeps every enabled CAN signal and reverts "ok" back to "stale" if its
+// specific ID/byte range hasn't matched a frame recently — independent of
+// whether a frame arrived THIS call (that's the whole point: nothing
+// arriving is exactly the case this needs to catch). Rate-limited via its
+// own static timer so it doesn't take the mutex on every single loop()
+// iteration (canPoll() is called every ~20ms) for no reason.
+static void checkCanSignalStaleness(ModuleConfig& cfg, CanSignalReading* canReadings, SemaphoreHandle_t mtx) {
+  static unsigned long _lastStaleCheckMs = 0;
+  unsigned long nowMs = millis();
+  if (nowMs - _lastStaleCheckMs < CAN_SIGNAL_STALE_CHECK_MS) return;
+  _lastStaleCheckMs = nowMs;
+
+  if (xSemaphoreTake(mtx, pdMS_TO_TICKS(20)) == pdTRUE) {
+    for (int s = 0; s < MAX_CAN_SIGNALS; s++) {
+      if (!cfg.canSignals[s].enabled) continue;
+      CanSignalReading& r = canReadings[s];
+      if (r.status == "ok" && (nowMs - r.lastSeenMs) > CAN_SIGNAL_STALE_MS) {
+        r.status = "stale";
+      }
+    }
+    xSemaphoreGive(mtx);
+  }
+}
+
 // Call this frequently (e.g. every loop() iteration or from a dedicated
 // task) — drains any pending RX frames, logs them to the ring buffer, and
 // runs them through every enabled CanSignalConfig for extraction.
 // nonBlockingTimeoutMs=0 means "don't block if nothing's waiting".
 void canPoll(ModuleConfig& cfg, CanSignalReading* canReadings, SemaphoreHandle_t mtx) {
   if (!_canStarted) return;
+
+  checkCanSignalStaleness(cfg, canReadings, mtx);
 
   twai_message_t msg;
   // Drain everything currently queued, but cap iterations per call so a

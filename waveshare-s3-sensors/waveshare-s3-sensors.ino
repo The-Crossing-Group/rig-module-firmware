@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.42 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.43 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -52,12 +52,6 @@
 #include <nvs_flash.h>
 #include <nvs.h>
 
-// =============================================================================
-// ⚙️  BUILD SWITCHES ARE AT THE TOP OF config.h — edit them there.
-//     QUIET_SERIAL_BOOT, FACTORY_RESET_ONCE, FORGET_WIFI_ONCE,
-//     every *_DEBUG flag, ENABLE_CAN, NO_WIFI, etc.
-//     config.h is included below, before any of them is used.
-// =============================================================================
 #include "config.h"
 #include "discovery.h"
 #include "modbus.h"
@@ -190,71 +184,18 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
-#if QUIET_SERIAL_BOOT
-  Serial.println("[BOOT] QUIET_SERIAL_BOOT=1 — radio driver logs muted for the");
-  Serial.println("[BOOT] whole boot to keep the USB-CDC console alive. Our own");
-  Serial.println("[BOOT] [BOOT]/[WiFi]/[HTTP] lines still print.");
-  quietUsbForRadioWork();
-#endif
-
-  // BUG FOUND 2026-09-16 (Sarah: "wifi settings and sensor settings ...
-  // everything seems to be resetting while im testing"): FORGET_WIFI_ONCE
-  // and FACTORY_RESET_ONCE were named/documented like one-shot switches
-  // ("self-clears in NVS") but were plain #if checks with NO tracking of
-  // whether they'd already fired. Leaving either at 1 in the flashed
-  // binary (exactly what the old comment warned you to remember NOT to
-  // do) wiped config on EVERY SINGLE BOOT for as long as that build kept
-  // running -- a plain power-cycle reboot included, not just the next
-  // reflash. That silently explains "resetting between flashes AND
-  // reboots": a normal reboot never touches NVS at all unless something
-  // is actively re-wiping it every time, and this was doing exactly that.
-  //
-  // Fix: each switch now only fires on the first boot after being
-  // "armed" (flipped to 1 and flashed), tracked via its own NVS done-flag.
-  // Once fired, leaving the switch at 1 on later reboots is now a no-op --
-  // it actually behaves like "ONCE" this time. Flipping the switch back
-  // to 0 (even briefly, one flash) clears the done-flag so a future 0->1
-  // re-arms it properly instead of it staying permanently spent.
-#if FORGET_WIFI_ONCE
-  prefs.begin("rigmod", false);
-  if (!prefs.getBool("wifiFgtDone", false)) {
-    Serial.println("[BOOT] FORGET_WIFI_ONCE=1, first boot since armed — clearing saved WiFi credentials.");
-    prefs.remove("wifiSSID");
-    prefs.remove("wifiPass");
-    prefs.putBool("wifiFgtDone", true);
-  } else {
-    Serial.println("[BOOT] FORGET_WIFI_ONCE=1 but already fired since last armed — NOT wiping again.");
-    Serial.println("[BOOT] Flip it to 0, reflash once, then back to 1 to re-arm if you need it again.");
-  }
-  prefs.end();
-#else
-  // Switch is off in THIS build -- clear any stale done-flag so a future
-  // 0->1 flip fires fresh instead of silently staying "already done"
-  // forever from some past flash.
-  prefs.begin("rigmod", false);
-  if (prefs.getBool("wifiFgtDone", false)) prefs.remove("wifiFgtDone");
-  prefs.end();
-#endif
-
-#if FACTORY_RESET_ONCE
-  prefs.begin("rigmod", false);
-  if (!prefs.getBool("facRstDone", false)) {
-    Serial.println("[BOOT] FACTORY_RESET_ONCE=1, first boot since armed — wiping ALL saved module config.");
-    prefs.clear();
-    prefs.putBool("facRstDone", true);
-    Serial.println("[BOOT] Namespace cleared: everything from here on is the");
-    Serial.println("[BOOT] compiled-in default, and no network is saved, so boot");
-    Serial.println("[BOOT] goes straight to the setup AP.");
-  } else {
-    Serial.println("[BOOT] FACTORY_RESET_ONCE=1 but already fired since last armed — NOT wiping again.");
-    Serial.println("[BOOT] Flip it to 0, reflash once, then back to 1 to re-arm if you need it again.");
-  }
-  prefs.end();
-#else
-  prefs.begin("rigmod", false);
-  if (prefs.getBool("facRstDone", false)) prefs.remove("facRstDone");
-  prefs.end();
-#endif
+  // REMOVED 2026-09-17 (Sarah: build switches no longer needed in
+  // production — see config.h's "BUILD SWITCHES" section header for the
+  // full removal note). This used to be three troubleshooting-only
+  // blocks here: QUIET_SERIAL_BOOT (muted radio logs for the whole boot),
+  // FORGET_WIFI_ONCE (one-shot WiFi-credential wipe), and
+  // FACTORY_RESET_ONCE (one-shot full NVS wipe) — each gated by a
+  // compile-time #if plus its own NVS "already fired" done-flag so
+  // leaving the switch at 1 in a flashed binary wouldn't re-wipe on
+  // every subsequent boot. All three needed a reflash to trigger anyway;
+  // the equivalent recovery actions are one tap in the web UI with no
+  // reflash needed at all: /config's "Forget WiFi" button, and
+  // /system's "Factory Reset" button.
 
   // See modbus/WiFi self-heal rationale below (ensureStaStarted) — these
   // two logging systems both matter for diagnosing WiFi driver failures.
@@ -762,14 +703,11 @@ void bringUpWifi() {
   Serial.println("[WiFi] ----------------------------------------");
 
   // Bring the radio logs back now that the worst of the CPU burst is over —
-  // restored regardless of outcome (connected OR still on AP-only) so /system
-  // and the console stay useful either way. QUIET_SERIAL_BOOT is the explicit
-  // opt-out if the port genuinely can't handle it.
-#if QUIET_SERIAL_BOOT
-  Serial.println("[WiFi] (QUIET_SERIAL_BOOT: radio logs left muted this boot)");
-#else
+  // restored regardless of outcome (connected OR still on AP-only) so
+  // /system and the console stay useful either way. (QUIET_SERIAL_BOOT, the
+  // old opt-out for a port that couldn't handle the restored verbosity, was
+  // removed 2026-09-17 along with the rest of the build switches.)
   restoreVerboseRadioLogs();
-#endif
 }
 
 // =============================================================================

@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.42 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.43 (see FW_VERSION in config.h)
 // =============================================================================
 // cli.h — Serial command-line interface, mirrors the web UI config pages.
 //
@@ -172,7 +172,7 @@ static void _cliCcHelp() {
     "  cc set <n> <field> <value>    set one field on slot n\n"
     "\n"
     "  fields: name kind unit id ext bo bl be sv scale offset dec\n"
-    "    id:    CAN ID, decimal or 0x-hex\n"
+    "    id:    CAN ID in hex, same as the /can web page (e.g. 18FEF200, no 0x needed)\n"
     "    ext:   0|1   (29-bit extended vs 11-bit standard)\n"
     "    be:    0|1   (big-endian; most CAN/J1939 = 1)\n"
     "    sv:    0|1   (signed value)\n"
@@ -352,7 +352,16 @@ static void _cliCsSet(int i, const String& field, const String& val) {
   else if (field == "unit") s.unit = val;
   else if (field == "slave") s.slaveId = (uint8_t)constrain(val.toInt(), 1, 247);
   else if (field == "fc") s.funcCode = (uint8_t)val.toInt();
-  else if (field == "reg") s.regAddr = (uint16_t)val.toInt();
+  // BUG FIXED 2026-09-17 (Sarah's "spot sneaky bugs" pass): this used
+  // .toInt(), which is decimal-only and truncates at the first non-digit
+  // -- "0x1000" silently read as 0 with no error. Every OTHER register-
+  // address parser in this codebase (webui.h's /sensors save AND probe
+  // handlers, and this same file's own `pr` command below) already uses
+  // strtol(..., 0), which auto-detects a "0x" prefix or falls back to
+  // decimal -- and the web UI's own field for this exact value is
+  // labeled "(hex or dec)". `cs set` was the one path that silently
+  // didn't honor that.
+  else if (field == "reg") s.regAddr = (uint16_t)strtol(val.c_str(), nullptr, 0);
   else if (field == "type") {
     uint8_t dt;
     if (!_cliDataTypeFromStr(val, dt)) { _cliErr("type must be u16/i16/u32/i32/f32"); return; }
@@ -436,8 +445,19 @@ static void _cliCcSet(int i, const String& field, const String& val) {
   else if (field == "kind") s.kind = val;
   else if (field == "unit") s.unit = val;
   else if (field == "id") {
-    // accepts decimal or 0x-prefixed hex
-    s.canId = (uint32_t)strtoul(val.c_str(), nullptr, 0);
+    // BUG FIXED 2026-09-17 (Sarah's "spot sneaky bugs" pass): this used
+    // strtoul(..., 0) -- base 0 means "auto-detect from prefix", so a
+    // bare "18FEF200" (no "0x") was silently read as DECIMAL 18FEF200 --
+    // wait, that's not even a valid decimal number, so it actually
+    // parsed only the leading "18" and silently truncated everything
+    // after the first non-digit ('F'), giving canId=18 with zero
+    // indication anything went wrong. The web UI's /can page always
+    // displays and expects this field as raw hex digits with NO "0x"
+    // prefix (label: "CAN ID (hex, e.g. 18FEF200)") -- copying that
+    // exact value into the CLI hit this bug. Base 16 matches the web UI
+    // convention AND still accepts an explicit "0x"/"0X" prefix if typed
+    // (strtoul auto-skips it when base is given explicitly as 16).
+    s.canId = (uint32_t)strtoul(val.c_str(), nullptr, 16);
   }
   else if (field == "ext") s.extended = _cliBoolVal(val);
   else if (field == "bo") s.byteOffset = (uint8_t)constrain(val.toInt(), 0, 7);
