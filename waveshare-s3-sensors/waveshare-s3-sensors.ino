@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.41 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.42 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -885,6 +885,30 @@ void pollTask(void* param) {
           } else {
             Serial.printf("  %-20s slave=%-3d reg=0x%04X  -- (%s)\n",
               label.c_str(), s.slaveId, s.regAddr, r.status.c_str());
+          }
+        }
+        // CAN signals (Sarah, 2026-09-17: wanted them in this same [Poll]
+        // serial summary alongside RS485 -- previously only RS485 sensors
+        // printed here; CAN readings only ever showed up on the web UI's
+        // /can or /live pages, invisible over plain USB serial). Same
+        // table style/column widths as the RS485 loop above so the two
+        // read as one consistent block, just keyed by CAN ID instead of
+        // Modbus slave+register -- canReadings[]/canPoll() (can.h) update
+        // independently of this task's own poll cycle (driven by whatever
+        // frames have actually arrived on the bus), so this only ever
+        // prints whatever canReadings currently holds, same read-only
+        // spirit as the RS485 print above, not a fresh poll of its own.
+        for (int i = 0; i < MAX_CAN_SIGNALS; i++) {
+          if (!cfg.canSignals[i].enabled) continue;
+          CanSignalConfig& sg = cfg.canSignals[i];
+          CanSignalReading& r = canReadings[i];
+          String label = sg.name.isEmpty() ? ("CanSig" + String(i)) : sg.name;
+          if (r.hasValue) {
+            Serial.printf("  %-20s canId=0x%-6X            = %8.2f %-6s (%s)\n",
+              label.c_str(), sg.canId, r.value, sg.unit.c_str(), r.status.c_str());
+          } else {
+            Serial.printf("  %-20s canId=0x%-6X            -- (%s)\n",
+              label.c_str(), sg.canId, r.status.c_str());
           }
         }
         xSemaphoreGive(stateMutex);
