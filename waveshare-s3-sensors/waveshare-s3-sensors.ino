@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.44 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.45 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -410,6 +410,11 @@ void loop() {
     }
   }
 
+  // Runtime WiFi reconnect watchdog (see its own header comment above) —
+  // called BEFORE the apModeActive check below so a drop noticed THIS tick
+  // immediately gates discovery/postToPi the same tick, not one tick late.
+  wifiWatchdog();
+
   ArduinoOTA.handle();
   webServer.handleClient();
   ntpClient.update();
@@ -425,7 +430,29 @@ void loop() {
     canopenBringupIfDue(cfg.canopenNodeId, cfg.canopenTargetSpecific);
   }
 
-  if (!apModeActive) {
+  // BUG CAUGHT + FIXED 2026-09-17 (before ever shipping — found while adding
+  // wifiWatchdog() above): this used to be gated on `if (!apModeActive)`.
+  // Before wifiWatchdog() existed, apModeActive was ONLY ever set at boot
+  // (true if STA failed, false if it connected) and NEVER updated again —
+  // so a module that connected fine at boot and then dropped WiFi mid-
+  // session in the field kept apModeActive stuck at false, meaning this
+  // block kept running the whole time it was actually offline. That was an
+  // accident, not a design — but it's exactly what made buffering work
+  // during a real outage: postToPi() -> httpPost() fails fast (Pi
+  // unreachable), and postToPi()'s OWN failure path calls
+  // appendBufferEntry() to save the sample to flash. Once wifiWatchdog()
+  // started keeping apModeActive ACCURATE (true the moment a drop is
+  // noticed, which is the whole point of the fix), this gate would have
+  // started SKIPPING resolvePi()/postToPi() entirely during every outage —
+  // silently losing data instead of buffering it, the opposite of what
+  // Sarah asked for ("modules in poor WiFi locations"). Removed the gate:
+  // resolvePi()/postToPi()/discoverLogger() were already designed to be
+  // called unconditionally and degrade gracefully with no connectivity
+  // (sweepSubnet() bails out cleanly on no local IP, mDNS just returns 0,
+  // httpPost() just fails and gets buffered) — that graceful-failure path
+  // IS the buffering mechanism, so it needs to keep running through an
+  // outage, not stop the moment one is detected.
+  {
     // Discovery is a state machine with its own timers (see discovery.h):
     // calling it every cycle is cheap when resolved and lets it retry
     // promptly when not. resolvedPiIp is core-1-owned, same as before.
@@ -708,6 +735,70 @@ void bringUpWifi() {
   // old opt-out for a port that couldn't handle the restored verbosity, was
   // removed 2026-09-17 along with the rest of the build switches.)
   restoreVerboseRadioLogs();
+}
+
+// =============================================================================
+// ADDED 2026-09-17 (Sarah: modules are going into locations with poor WiFi —
+// needs to automatically retry the saved network if it drops). bringUpWifi()
+// above only ever runs ONCE, from setup() — before this, nothing in loop()
+// noticed or reacted to a runtime disconnect at all. WiFi.setAutoReconnect
+// (false) was set deliberately in bringUpWifi() (see that function's header
+// comment on why the ESP32 driver's own reconnect churn was part of the
+// original boot-loop bug), so turning that back on is NOT the fix -- this is
+// a separate, deliberately gentler watchdog, called from loop() every tick:
+//
+//   - Does nothing if no SSID is saved (nothing to reconnect to) or already
+//     connected -- near-zero cost on the common path.
+//   - On WL_CONNECTED -> anything else, immediately marks apModeActive=true
+//     (this was ALSO a latent bug: apModeActive is documented since v1.15.32
+//     as meaning "not currently connected to a site network", but nothing
+//     ever set it back to true after a runtime drop -- it would stay stuck
+//     at false, showing a stale "connected" state on /config's save-message
+//     branch and the [HB] heartbeat line, even while genuinely offline).
+//   - Retries via a bare WiFi.begin(ssid, pass) call, rate-limited to once
+//     every WIFI_RECONNECT_INTERVAL_MS -- same "just call begin() again on
+//     the live AP_STA interface, no disconnect()/mode() churn" pattern
+//     bringUpWifi() already uses, just spread out over wall-clock time
+//     instead of a tight retry loop. WiFi.begin() itself returns
+//     immediately (the actual association happens in the background), so
+//     this never blocks loop() -- a later tick's cheap WiFi.status() check
+//     is what notices success, same as the heartbeat line already does.
+//   - No log-muting around the retry call (unlike bringUpWifi()'s quiet-
+//     during-connect-storm handling): a single begin() call every 15s is a
+//     light, one-shot radio operation, not the sustained multi-attempt CPU
+//     burst that motivated muting at boot -- muting here would just
+//     suppress useful ongoing diagnostics on a board that's supposed to run
+//     unattended for a long time.
+//   - Deliberately does NOT touch NVS, WiFi.mode(), or call disconnect() --
+//     see bringUpWifi()'s header comment for exactly why each of those was
+//     the real root cause of the earlier boot-loop bug this firmware
+//     already fixed once.
+// =============================================================================
+static const unsigned long WIFI_RECONNECT_INTERVAL_MS = 15000UL;
+
+void wifiWatchdog() {
+  if (cfg.wifiSSID.isEmpty()) return; // nothing saved to reconnect to
+  if (WiFi.status() == WL_CONNECTED) {
+    if (apModeActive) {
+      Serial.println("[WiFi] Watchdog: reconnected.");
+      apModeActive = false;
+    }
+    return;
+  }
+
+  // Not connected right now. Make sure apModeActive reflects that truthfully
+  // even on the very first tick this is noticed (a runtime drop, not just
+  // the already-failed-at-boot case bringUpWifi() itself already flags).
+  apModeActive = true;
+
+  static unsigned long lastAttemptMs = 0;
+  unsigned long now = millis();
+  if (now - lastAttemptMs < WIFI_RECONNECT_INTERVAL_MS) return;
+  lastAttemptMs = now;
+
+  Serial.printf("[WiFi] Watchdog: not connected (status=%d) — retrying \"%s\"...\n",
+    (int)WiFi.status(), cfg.wifiSSID.c_str());
+  WiFi.begin(cfg.wifiSSID.c_str(), cfg.wifiPass.c_str());
 }
 
 // =============================================================================

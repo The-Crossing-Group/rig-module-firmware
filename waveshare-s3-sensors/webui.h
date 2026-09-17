@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.44 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.15.45 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -119,12 +119,6 @@ static const char NAV[] PROGMEM = R"(
 </div>
 )";
 
-static String apBanner() {
-  if (!apModeActive) return "";
-  return "<div class='ap-banner'>No WiFi configured yet — connect a device to this AP and "
-         "set your network below.</div>";
-}
-
 static String _p(const char* name) {
   if (_srv->hasArg(name)) return _srv->arg(name);
   return "";
@@ -178,6 +172,28 @@ static String _esc(const String& v) {
   return s;
 }
 
+// Moved here 2026-09-17 (was above _p(), before _esc() existed in the file
+// yet -- unlike the .ino, this is a plain header parsed top-to-bottom with
+// no auto-prototyping, so calling _esc() before its definition would not
+// have compiled). Takes cfg explicitly (not the bare global) since this
+// file never extern-declares ModuleConfig cfg — its one caller (cfgPage())
+// already has it in scope as a parameter.
+static String apBanner(ModuleConfig& cfg) {
+  if (!apModeActive) return "";
+  // CHANGED 2026-09-17: apModeActive can now also mean "was connected, just
+  // dropped, the runtime watchdog (see .ino's wifiWatchdog()) is retrying in
+  // the background" -- not just "never configured/failed at boot". Wording
+  // updated so it's still accurate for a saved-but-currently-unreachable
+  // network, not just the never-configured case.
+  if (!cfg.wifiSSID.isEmpty()) {
+    return "<div class='ap-banner'>Not currently connected to \"" + _esc(cfg.wifiSSID) +
+           "\" — retrying automatically in the background. This setup AP stays "
+           "reachable the whole time if you need to change anything below.</div>";
+  }
+  return "<div class='ap-banner'>No WiFi configured yet — connect a device to this AP and "
+         "set your network below.</div>";
+}
+
 static const char* dataTypeName(uint8_t dt) {
   switch (dt) {
     case MB_UINT16: return "uint16";
@@ -192,7 +208,7 @@ static const char* dataTypeName(uint8_t dt) {
 // ─── /  CONFIG PAGE ──────────────────────────────────────────────────────────
 static String cfgPage(ModuleConfig& cfg) {
   String h = FPSTR(NAV);
-  h += apBanner();
+  h += apBanner(cfg);
   h += "<div class='page'><h2>&#9881; Module Configuration</h2>";
   h += "<div class='card'><b>Module ID:</b> " + cfg.moduleId + " <span class='small'>(fixed, derived from MAC)</span></div>";
   h += "<form method='POST' action='/api/config'>";
