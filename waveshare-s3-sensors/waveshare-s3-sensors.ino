@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.16.0 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.17.0 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -88,6 +88,8 @@ ModuleConfig cfg;
 SensorReading    sensorReadings[MAX_SENSORS];
 CanSignalReading canReadings[MAX_CAN_SIGNALS];
 ModbusChannelReading modbusReadings[MAX_MODBUS_CHANNELS];
+ModbusDigitalReading modbusDinReadings[4];  // adapter board DI state (AMIDJ14 only)
+ModbusDigitalReading modbusDoutReadings[4]; // adapter board DO state (AMIDJ14 only)
 String modbusDetectedType = "unknown";
 
 WebServer webServer(80);
@@ -835,9 +837,13 @@ void pollTask(void* param) {
     int okCount = 0, failCount = 0;
 
     if (cfg.modbusBoard.enabled && xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      int boardRc = modbusPollBoard(cfg.modbusBoard, modbusReadings, modbusDetectedType);
+      int boardRc = modbusPollBoard(cfg.modbusBoard, modbusReadings, modbusDetectedType, modbusDinReadings, modbusDoutReadings);
       xSemaphoreGive(modbusBusMutex);
-      if (boardRc != MB_OK) { for (int i=0;i<MAX_MODBUS_CHANNELS;i++) { if (cfg.modbusBoard.channels[i].enabled) modbusReadings[i].status="timeout"; modbusReadings[i].valid=false; } }
+      if (boardRc != MB_OK) {
+        for (int i=0;i<MAX_MODBUS_CHANNELS;i++) { if (cfg.modbusBoard.channels[i].enabled) modbusReadings[i].status="timeout"; modbusReadings[i].valid=false; }
+        for (int i=0;i<4;i++) { if (cfg.modbusBoard.din[i].enabled) modbusDinReadings[i].status="timeout"; modbusDinReadings[i].valid=false; }
+        for (int i=0;i<4;i++) { if (cfg.modbusBoard.dout[i].enabled) modbusDoutReadings[i].status="timeout"; modbusDoutReadings[i].valid=false; }
+      }
     }
 
     for (int i = 0; i < MAX_SENSORS; i++) {
@@ -1070,6 +1076,30 @@ String buildPayload(bool bufferedFlag) {
         c["value"]=modbusReadings[i].hasValue ? modbusReadings[i].value : (float)0;
         if (!modbusReadings[i].hasValue) { c["ma"]=nullptr; c["value"]=nullptr; }
         c["status"]=modbusReadings[i].status; c["slaveId"]=MODBUS_BOARD_SLAVE_ID; c["boardType"]=modbusDetectedType;
+      }
+
+      // Digital I/O on the adapter board — only present when the detected
+      // board actually has it (AMIDJ14). Omitted entirely on Waveshare 8AI,
+      // same "don't report phantom hardware" convention used elsewhere.
+      if (modbusDetectedType == "amidj14") {
+        JsonArray diArr = doc.createNestedArray("modbusDigitalInputs");
+        for (int i=0;i<4;i++) {
+          if (!cfg.modbusBoard.din[i].enabled) continue;
+          JsonObject d = diArr.createNestedObject();
+          d["ch"] = i; d["name"] = cfg.modbusBoard.din[i].name;
+          if (modbusDinReadings[i].valid) d["state"] = modbusDinReadings[i].state;
+          else                            d["state"] = nullptr;
+          d["status"] = modbusDinReadings[i].status;
+        }
+        JsonArray doArr = doc.createNestedArray("modbusDigitalOutputs");
+        for (int i=0;i<4;i++) {
+          if (!cfg.modbusBoard.dout[i].enabled) continue;
+          JsonObject d = doArr.createNestedObject();
+          d["ch"] = i; d["name"] = cfg.modbusBoard.dout[i].name;
+          if (modbusDoutReadings[i].valid) d["state"] = modbusDoutReadings[i].state;
+          else                             d["state"] = nullptr;
+          d["status"] = modbusDoutReadings[i].status;
+        }
       }
     }
 

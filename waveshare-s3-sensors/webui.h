@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.16.0 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.17.0 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -33,7 +33,11 @@ extern bool lastPostOk;
 extern SensorReading    sensorReadings[MAX_SENSORS];
 extern CanSignalReading canReadings[MAX_CAN_SIGNALS];
 extern ModbusChannelReading modbusReadings[MAX_MODBUS_CHANNELS];
+extern ModbusDigitalReading modbusDinReadings[4];
+extern ModbusDigitalReading modbusDoutReadings[4];
 extern String modbusDetectedType;
+// modbusWriteBoardDO() is declared+defined in modbus.h, included before
+// this file in the .ino.
 extern SemaphoreHandle_t stateMutex;
 extern SemaphoreHandle_t modbusBusMutex;
 // modbusAutoDetectBaud(), modbusReadRegs(), modbusRegCount(),
@@ -399,11 +403,50 @@ static String modbusPage(ModuleConfig& cfg) {
   h += "<form method='POST' action='/api/modbus/save'><div class='card'><label><input type='checkbox' name='enabled'" + String(cfg.modbusBoard.enabled?" checked":"") + "> Enable Modbus board at slave ID 1</label>";
   h += "<label>Board type</label><select name='boardType'><option value='auto'"+String(cfg.modbusBoard.boardType=="auto"?" selected":"")+">Auto-detect</option><option value='waveshare'"+String(cfg.modbusBoard.boardType=="waveshare"?" selected":"")+">Waveshare 8AI</option><option value='amidj14'"+String(cfg.modbusBoard.boardType=="amidj14"?" selected":"")+">Eletechsup AMIDJ14 (6AI)</option></select>";
   h += "<div class='small'>Raw scaling: Waveshare uses microamps; AMIDJ14 uses hundredths of a milliamp. The board is read using the shared RS485 baud setting on Config.</div></div>";
+  h += "<h3>Analog Inputs</h3>";
   for(int i=0;i<MAX_MODBUS_CHANNELS;i++){ auto& c=cfg.modbusBoard.channels[i]; h += "<div class='card'><b>AI"+String(i+1)+"</b><span class='small' id='mbLive"+String(i)+"'> loading...</span>";
     h += "<label><input type='checkbox' name='mb"+String(i)+"en'"+String(c.enabled?" checked":"")+"> Enabled</label><div class='row'><div><label>Name</label><input name='mb"+String(i)+"nm' value='"+_esc(c.name)+"' placeholder='e.g. Mud Pressure'></div><div><label>Kind</label><input name='mb"+String(i)+"kd' value='"+_esc(c.kind)+"' placeholder='pressure'></div><div><label>Unit</label><input name='mb"+String(i)+"ut' value='"+_esc(c.unit)+"' placeholder='psi'></div></div>";
     h += "<div class='row'><div><label>Engineering Min @ 4mA</label><input name='mb"+String(i)+"lo' type='number' step='any' value='"+String(c.engMin,3)+"'></div><div><label>Engineering Max @ 20mA</label><input name='mb"+String(i)+"hi' type='number' step='any' value='"+String(c.engMax,3)+"'></div></div></div>";
   }
-  h += "<button type='submit'>&#128190; Save Modbus Settings</button></form><script>function mbLive(){fetch('/api/modbus/live').then(r=>r.json()).then(d=>(d.channels||[]).forEach(c=>{let e=document.getElementById('mbLive'+c.ch);if(e)e.textContent=c.value==null?' -- ('+c.status+')':' '+c.value+' '+(c.unit||'')+' / '+c.ma+'mA ('+c.status+')';}));}setInterval(mbLive,2000);mbLive();</script></div>";
+
+  // Digital I/O only exists on the AMIDJ14 — shown regardless of the
+  // currently-detected type (so it can be configured ahead of time / even
+  // if "auto" hasn't run yet), but with a plain note when the board isn't
+  // an AMIDJ14. Same "still render, just say so" convention as the
+  // analog-board variant's /digital page for a board with no DI/DO at all.
+  h += "<h3>Digital I/O <span class='small'>(Eletechsup AMIDJ14 only)</span></h3>";
+  if (cfg.modbusBoard.boardType != "amidj14" && modbusDetectedType != "amidj14") {
+    h += "<p class='small'>Detected/selected board type is not AMIDJ14 — digital channels below "
+         "won't be polled unless the board type is (or auto-detects as) AMIDJ14.</p>";
+  }
+  h += "<div class='row'>";
+  h += "<div><h4>Digital Inputs</h4>";
+  for (int i=0;i<4;i++) {
+    auto& d = cfg.modbusBoard.din[i];
+    h += "<div class='card'><b>DI"+String(i+1)+"</b>&nbsp;<span class='small' id='mbDiState"+String(i)+"'></span>";
+    h += "<label><input type='checkbox' name='mbdi"+String(i)+"en'"+String(d.enabled?" checked":"")+"> Enabled</label>";
+    h += "<label>Name</label><input name='mbdi"+String(i)+"nm' value='"+_esc(d.name)+"' placeholder='e.g. Low Level Switch'></div>";
+  }
+  h += "</div><div><h4>Digital Outputs</h4>";
+  for (int i=0;i<4;i++) {
+    auto& d = cfg.modbusBoard.dout[i];
+    h += "<div class='card'><b>DO"+String(i+1)+"</b>&nbsp;<span class='small' id='mbDoState"+String(i)+"'></span>";
+    h += "<label><input type='checkbox' name='mbdo"+String(i)+"en'"+String(d.enabled?" checked":"")+"> Enabled</label>";
+    h += "<label>Name</label><input name='mbdo"+String(i)+"nm' value='"+_esc(d.name)+"' placeholder='e.g. Alarm Beacon'>";
+    h += "<div class='row' style='margin-top:8px'><button type='button' onclick='mbWriteDO("+String(i)+",true)'>ON</button>&nbsp;";
+    h += "<button type='button' onclick='mbWriteDO("+String(i)+",false)'>OFF</button></div></div>";
+  }
+  h += "</div></div>";
+
+  h += "<button type='submit'>&#128190; Save Modbus Settings</button></form><script>"
+       "function mbLive(){fetch('/api/modbus/live').then(r=>r.json()).then(d=>{"
+       "(d.channels||[]).forEach(c=>{let e=document.getElementById('mbLive'+c.ch);if(e)e.textContent=c.value==null?' -- ('+c.status+')':' '+c.value+' '+(c.unit||'')+' / '+c.ma+'mA ('+c.status+')';});"
+       "(d.din||[]).forEach(c=>{let e=document.getElementById('mbDiState'+c.ch);if(e)e.textContent=c.status!=='ok'?'(stale)':(c.state?'ON':'OFF');});"
+       "(d.dout||[]).forEach(c=>{let e=document.getElementById('mbDoState'+c.ch);if(e)e.textContent=c.status!=='ok'?'(stale)':(c.state?'ON':'OFF');});"
+       "});}"
+       "setInterval(mbLive,2000);mbLive();"
+       "function mbWriteDO(ch,val){fetch('/api/modbus/digital/write?ch='+ch+'&value='+(val?1:0),{method:'POST'}).then(()=>mbLive());}"
+       "</script></div>";
   return h;
 }
 
@@ -1196,14 +1239,50 @@ static void handleConfig() {
 
 // Saves the whole RS485 sensor list from /sensors' single shared form.
 static void handleModbusLive() {
-  DynamicJsonDocument doc(2048); JsonArray a=doc.createNestedArray("channels");
+  DynamicJsonDocument doc(2560); JsonArray a=doc.createNestedArray("channels");
   for(int i=0;i<MAX_MODBUS_CHANNELS;i++){if(!_cfg->modbusBoard.channels[i].enabled)continue;JsonObject o=a.createNestedObject();o["ch"]=i;o["name"]=_cfg->modbusBoard.channels[i].name;o["kind"]=_cfg->modbusBoard.channels[i].kind;o["unit"]=_cfg->modbusBoard.channels[i].unit;o["ma"]=modbusReadings[i].hasValue?modbusReadings[i].mA:(float)0;o["value"]=modbusReadings[i].hasValue?modbusReadings[i].value:(float)0;if(!modbusReadings[i].hasValue){o["ma"]=nullptr;o["value"]=nullptr;}o["status"]=modbusReadings[i].status;}
+  JsonArray din=doc.createNestedArray("din");
+  for(int i=0;i<4;i++){if(!_cfg->modbusBoard.din[i].enabled)continue;JsonObject o=din.createNestedObject();o["ch"]=i;if(modbusDinReadings[i].valid)o["state"]=modbusDinReadings[i].state;else o["state"]=nullptr;o["status"]=modbusDinReadings[i].status;}
+  JsonArray dout=doc.createNestedArray("dout");
+  for(int i=0;i<4;i++){if(!_cfg->modbusBoard.dout[i].enabled)continue;JsonObject o=dout.createNestedObject();o["ch"]=i;if(modbusDoutReadings[i].valid)o["state"]=modbusDoutReadings[i].state;else o["state"]=nullptr;o["status"]=modbusDoutReadings[i].status;}
   String out;serializeJson(doc,out);_srv->send(200,"application/json",out);
 }
 static void handleModbusSave() {
   _cfg->modbusBoard.enabled=_srv->hasArg("enabled"); if(_srv->hasArg("boardType"))_cfg->modbusBoard.boardType=_srv->arg("boardType");
   for(int i=0;i<MAX_MODBUS_CHANNELS;i++){String p="mb"+String(i);auto& c=_cfg->modbusBoard.channels[i];c.enabled=_srv->hasArg((p+"en").c_str());if(_srv->hasArg((p+"nm").c_str()))c.name=_srv->arg((p+"nm").c_str());if(_srv->hasArg((p+"kd").c_str()))c.kind=_srv->arg((p+"kd").c_str());if(_srv->hasArg((p+"ut").c_str()))c.unit=_srv->arg((p+"ut").c_str());if(_srv->hasArg((p+"lo").c_str()))c.engMin=_srv->arg((p+"lo").c_str()).toFloat();if(_srv->hasArg((p+"hi").c_str()))c.engMax=_srv->arg((p+"hi").c_str()).toFloat();}
+  for(int i=0;i<4;i++){String p="mbdi"+String(i);auto& d=_cfg->modbusBoard.din[i];d.enabled=_srv->hasArg((p+"en").c_str());if(_srv->hasArg((p+"nm").c_str()))d.name=_srv->arg((p+"nm").c_str());}
+  for(int i=0;i<4;i++){String p="mbdo"+String(i);auto& d=_cfg->modbusBoard.dout[i];d.enabled=_srv->hasArg((p+"en").c_str());if(_srv->hasArg((p+"nm").c_str()))d.name=_srv->arg((p+"nm").c_str());}
   saveConfig(*_prefs,*_cfg);_srv->sendHeader("Location","/modbus");_srv->send(302,"text/plain","");
+}
+
+// Writes a single digital output on the adapter board (FC05) — an
+// immediate, non-persisted bus write, same "instant action button"
+// pattern as the analog-board variant's /api/digital/write. Only valid
+// when the detected board is AMIDJ14 (the Waveshare 8AI has no DO coils
+// at all); holds modbusBusMutex since this is a genuine extra wire
+// transaction outside the poll task's own cycle.
+static void handleModbusDigitalWrite() {
+  if (modbusDetectedType != "amidj14") {
+    _srv->send(400, "application/json", "{\"ok\":false,\"error\":\"detected board has no digital outputs\"}");
+    return;
+  }
+  int ch = _srv->hasArg("ch") ? _srv->arg("ch").toInt() : -1;
+  bool value = _srv->hasArg("value") && _srv->arg("value").toInt() != 0;
+  if (ch < 0 || ch > 3) {
+    _srv->send(400, "application/json", "{\"ok\":false,\"error\":\"ch must be 0-3\"}");
+    return;
+  }
+  bool ok = false;
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    ok = modbusWriteBoardDO(ch, value);
+    xSemaphoreGive(modbusBusMutex);
+  }
+  if (ok) {
+    modbusDoutReadings[ch].valid = true;
+    modbusDoutReadings[ch].state = value;
+    modbusDoutReadings[ch].status = "ok";
+  }
+  _srv->send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
 static void handleSensorsSave() {
@@ -1436,6 +1515,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/wifi/forget",    HTTP_POST, handleWifiForget);
   srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);
   srv.on("/api/modbus/autodetect-enable", HTTP_POST, handleAutoDetectEnable);
+  srv.on("/api/modbus/digital/write", HTTP_POST, handleModbusDigitalWrite);
 
 
   srv.on("/api/buffer/flush", HTTP_POST, [](){

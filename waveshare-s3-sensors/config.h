@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.16.0
+// FIRMWARE VERSION: rig-module-sensors-1.17.0
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.16.0"
+#define FW_VERSION "rig-module-sensors-1.17.0"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -175,8 +175,21 @@ struct SensorReading {
 
 // Fixed 4-20mA channel configuration for the adapter board at slave 1.
 struct ModbusChannelConfig { bool enabled=true; String name=""; String kind=""; String unit=""; float engMin=0.0f; float engMax=1.0f; };
-struct ModbusBoardConfig { bool enabled=true; String boardType="auto"; ModbusChannelConfig channels[MAX_MODBUS_CHANNELS]; };
+// Digital I/O config for the adapter board — only real on the AMIDJ14
+// variant (4 DI + 4 DO). The Waveshare 8AI variant has no DI/DO hardware
+// at all; gated at poll/render time on the auto-detected board type
+// (modbusDetectedType == "amidj14"), same "don't report phantom hardware"
+// convention as boardProfile.hasDigitalIO in the analog-board variant.
+struct ModbusDigitalConfig { bool enabled=true; String name=""; };
+struct ModbusBoardConfig {
+  bool enabled=true;
+  String boardType="auto";
+  ModbusChannelConfig channels[MAX_MODBUS_CHANNELS];
+  ModbusDigitalConfig din[4];
+  ModbusDigitalConfig dout[4];
+};
 struct ModbusChannelReading { bool valid=false; bool hasValue=false; float mA=0.0f; float value=0.0f; String status="stale"; };
+struct ModbusDigitalReading { bool valid=false; bool state=false; String status="stale"; };
 
 // One independently-configured CAN signal — a byte range extracted from
 // frames matching a given CAN ID, interpreted as a value. Same idea as a
@@ -252,9 +265,26 @@ struct SensorConfigPacked {
 
 #define MODBUS_STR_LEN 32
 struct ModbusChannelPacked { bool enabled; char name[MODBUS_STR_LEN]; char kind[MODBUS_STR_LEN]; char unit[MODBUS_STR_LEN]; float engMin; float engMax; };
-struct ModbusBoardPacked { bool enabled; char boardType[MODBUS_STR_LEN]; ModbusChannelPacked channels[MAX_MODBUS_CHANNELS]; };
-static void packModbus(const ModbusBoardConfig& b, ModbusBoardPacked& p) { p.enabled=b.enabled; strncpy(p.boardType,b.boardType.c_str(),MODBUS_STR_LEN-1); p.boardType[MODBUS_STR_LEN-1]=0; for(int i=0;i<MAX_MODBUS_CHANNELS;i++){const auto& c=b.channels[i];auto& q=p.channels[i];q.enabled=c.enabled;strncpy(q.name,c.name.c_str(),MODBUS_STR_LEN-1);q.name[MODBUS_STR_LEN-1]=0;strncpy(q.kind,c.kind.c_str(),MODBUS_STR_LEN-1);q.kind[MODBUS_STR_LEN-1]=0;strncpy(q.unit,c.unit.c_str(),MODBUS_STR_LEN-1);q.unit[MODBUS_STR_LEN-1]=0;q.engMin=c.engMin;q.engMax=c.engMax;}}
-static void unpackModbus(const ModbusBoardPacked& p, ModbusBoardConfig& b) { b.enabled=p.enabled;b.boardType=String(p.boardType);if(b.boardType.isEmpty())b.boardType="auto";for(int i=0;i<MAX_MODBUS_CHANNELS;i++){const auto& q=p.channels[i];auto& c=b.channels[i];c.enabled=q.enabled;c.name=String(q.name);c.kind=String(q.kind);c.unit=String(q.unit);c.engMin=q.engMin;c.engMax=q.engMax;}}
+struct ModbusDigitalPacked { bool enabled; char name[MODBUS_STR_LEN]; };
+struct ModbusBoardPacked {
+  bool enabled;
+  char boardType[MODBUS_STR_LEN];
+  ModbusChannelPacked channels[MAX_MODBUS_CHANNELS];
+  ModbusDigitalPacked din[4];
+  ModbusDigitalPacked dout[4];
+};
+static void packModbus(const ModbusBoardConfig& b, ModbusBoardPacked& p) {
+  p.enabled=b.enabled; strncpy(p.boardType,b.boardType.c_str(),MODBUS_STR_LEN-1); p.boardType[MODBUS_STR_LEN-1]=0;
+  for(int i=0;i<MAX_MODBUS_CHANNELS;i++){const auto& c=b.channels[i];auto& q=p.channels[i];q.enabled=c.enabled;strncpy(q.name,c.name.c_str(),MODBUS_STR_LEN-1);q.name[MODBUS_STR_LEN-1]=0;strncpy(q.kind,c.kind.c_str(),MODBUS_STR_LEN-1);q.kind[MODBUS_STR_LEN-1]=0;strncpy(q.unit,c.unit.c_str(),MODBUS_STR_LEN-1);q.unit[MODBUS_STR_LEN-1]=0;q.engMin=c.engMin;q.engMax=c.engMax;}
+  for(int i=0;i<4;i++){p.din[i].enabled=b.din[i].enabled;strncpy(p.din[i].name,b.din[i].name.c_str(),MODBUS_STR_LEN-1);p.din[i].name[MODBUS_STR_LEN-1]=0;}
+  for(int i=0;i<4;i++){p.dout[i].enabled=b.dout[i].enabled;strncpy(p.dout[i].name,b.dout[i].name.c_str(),MODBUS_STR_LEN-1);p.dout[i].name[MODBUS_STR_LEN-1]=0;}
+}
+static void unpackModbus(const ModbusBoardPacked& p, ModbusBoardConfig& b) {
+  b.enabled=p.enabled;b.boardType=String(p.boardType);if(b.boardType.isEmpty())b.boardType="auto";
+  for(int i=0;i<MAX_MODBUS_CHANNELS;i++){const auto& q=p.channels[i];auto& c=b.channels[i];c.enabled=q.enabled;c.name=String(q.name);c.kind=String(q.kind);c.unit=String(q.unit);c.engMin=q.engMin;c.engMax=q.engMax;}
+  for(int i=0;i<4;i++){b.din[i].enabled=p.din[i].enabled;b.din[i].name=String(p.din[i].name);}
+  for(int i=0;i<4;i++){b.dout[i].enabled=p.dout[i].enabled;b.dout[i].name=String(p.dout[i].name);}
+}
 
 struct CanSignalConfigPacked {
   bool     enabled;

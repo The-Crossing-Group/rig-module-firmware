@@ -381,11 +381,124 @@ int modbusPollSensor(SensorConfig& s, float& rawOut, float& valueOut, bool verbo
 
 
 static float modbusBoardRawDivisor(const String& type) { return type == "amidj14" ? 100.0f : 1000.0f; }
-static int modbusPollBoard(ModbusBoardConfig& b, ModbusChannelReading* out, String& detectedType) {
+
+// FC02 — Read Discrete Inputs. Returns true on success, fills bits[count]
+// with 0/1 (one bool per input). Same wire format as the analog-board
+// (waveshare-s3/) variant's modbusReadDiscreteInputs() — reimplemented
+// here rather than shared since this file's modbusSend/modbusReceive are
+// file-local statics, not exported across variants.
+static bool modbusReadDiscreteInputs(uint8_t slaveId, uint16_t startAddr, uint8_t count, bool* bits, int timeoutMs = 300) {
+  if (!_mbSerial) return false;
+  modbusFlushRx();
+  uint8_t req[8];
+  req[0] = slaveId; req[1] = 0x02;
+  req[2] = startAddr >> 8; req[3] = startAddr & 0xFF;
+  req[4] = 0x00; req[5] = count;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF; req[7] = crc >> 8;
+  modbusSend(req, 8, false);
+  uint8_t byteCount = (count + 7) / 8;
+  int expectedLen = 3 + byteCount + 2;
+  uint8_t resp[16];
+  int n = modbusReceive(resp, expectedLen, timeoutMs, false);
+  if (n < expectedLen) return false;
+  uint16_t rxCrc = resp[n-2] | ((uint16_t)resp[n-1] << 8);
+  uint16_t calcCrc = modbusCRC(resp, n-2);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x02) return false;
+  for (int i = 0; i < count; i++) {
+    uint8_t byteIdx = i / 8, bitIdx = i % 8;
+    bits[i] = (resp[3 + byteIdx] >> bitIdx) & 0x01;
+  }
+  return true;
+}
+
+// FC01 — Read Coils. Same shape as FC02 above, different function code.
+static bool modbusReadCoils(uint8_t slaveId, uint16_t startAddr, uint8_t count, bool* bits, int timeoutMs = 300) {
+  if (!_mbSerial) return false;
+  modbusFlushRx();
+  uint8_t req[8];
+  req[0] = slaveId; req[1] = 0x01;
+  req[2] = startAddr >> 8; req[3] = startAddr & 0xFF;
+  req[4] = 0x00; req[5] = count;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF; req[7] = crc >> 8;
+  modbusSend(req, 8, false);
+  uint8_t byteCount = (count + 7) / 8;
+  int expectedLen = 3 + byteCount + 2;
+  uint8_t resp[16];
+  int n = modbusReceive(resp, expectedLen, timeoutMs, false);
+  if (n < expectedLen) return false;
+  uint16_t rxCrc = resp[n-2] | ((uint16_t)resp[n-1] << 8);
+  uint16_t calcCrc = modbusCRC(resp, n-2);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x01) return false;
+  for (int i = 0; i < count; i++) {
+    uint8_t byteIdx = i / 8, bitIdx = i % 8;
+    bits[i] = (resp[3 + byteIdx] >> bitIdx) & 0x01;
+  }
+  return true;
+}
+
+// FC05 — Write Single Coil. value: true=ON (0xFF00), false=OFF (0x0000).
+static bool modbusWriteCoil(uint8_t slaveId, uint16_t coilAddr, bool value, int timeoutMs = 300) {
+  if (!_mbSerial) return false;
+  modbusFlushRx();
+  uint8_t req[8];
+  req[0] = slaveId; req[1] = 0x05;
+  req[2] = coilAddr >> 8; req[3] = coilAddr & 0xFF;
+  req[4] = value ? 0xFF : 0x00; req[5] = 0x00;
+  uint16_t crc = modbusCRC(req, 6);
+  req[6] = crc & 0xFF; req[7] = crc >> 8;
+  modbusSend(req, 8, false);
+  uint8_t resp[16];
+  int n = modbusReceive(resp, 8, timeoutMs, false);
+  if (n < 8) return false;
+  uint16_t rxCrc = resp[6] | ((uint16_t)resp[7] << 8);
+  uint16_t calcCrc = modbusCRC(resp, 6);
+  if (rxCrc != calcCrc || resp[0] != slaveId || resp[1] != 0x05) return false;
+  return true;
+}
+
+// AMIDJ14 digital I/O addresses — confirmed against real Modbus Poll
+// register captures for this board (same addressing as the analog-board
+// waveshare-s3/ variant). DI is 0-based, DO is 1-based (not a typo — the
+// board's own coil numbering genuinely starts at 1 for outputs).
+static const uint16_t MODBUS_BOARD_DI_START = 0; // DI1=0, DI2=1, DI3=2, DI4=3 (FC02)
+static const uint16_t MODBUS_BOARD_DO_START = 1; // DO1=1, DO2=2, DO3=3, DO4=4 (FC01/FC05)
+
+// Writes one digital output on the adapter board (doIndex 0-3 = DO1-DO4).
+// Only meaningful when the detected board is AMIDJ14 — caller checks that.
+static bool modbusWriteBoardDO(int doIndex, bool value) {
+  if (doIndex < 0 || doIndex > 3) return false;
+  return modbusWriteCoil(MODBUS_BOARD_SLAVE_ID, MODBUS_BOARD_DO_START + doIndex, value);
+}
+
+static int modbusPollBoard(ModbusBoardConfig& b, ModbusChannelReading* out, String& detectedType,
+                            ModbusDigitalReading* dinOut = nullptr, ModbusDigitalReading* doutOut = nullptr) {
   if (!b.enabled) return MB_TIMEOUT; uint16_t product[1]={0};
   if (b.boardType == "auto") { if(modbusReadRegs(MODBUS_BOARD_SLAVE_ID,3,0x00F7,1,product)==MB_OK) detectedType=(product[0]==2814)?"amidj14":"waveshare"; else detectedType="waveshare"; } else detectedType=b.boardType;
   int count=detectedType=="amidj14"?6:8; uint16_t raw[MAX_MODBUS_CHANNELS]={0}; int rc=modbusReadRegs(MODBUS_BOARD_SLAVE_ID,4,0,count,raw); if(rc!=MB_OK)return rc; float div=modbusBoardRawDivisor(detectedType);
-  for(int i=0;i<MAX_MODBUS_CHANNELS;i++){if(i>=count||!b.channels[i].enabled)continue;auto&r=out[i];r.valid=true;r.hasValue=true;r.mA=raw[i]/div;r.value=b.channels[i].engMin+(r.mA-4.0f)*(b.channels[i].engMax-b.channels[i].engMin)/16.0f;r.status="ok";} return MB_OK;
+  for(int i=0;i<MAX_MODBUS_CHANNELS;i++){if(i>=count||!b.channels[i].enabled)continue;auto&r=out[i];r.valid=true;r.hasValue=true;r.mA=raw[i]/div;r.value=b.channels[i].engMin+(r.mA-4.0f)*(b.channels[i].engMax-b.channels[i].engMin)/16.0f;r.status="ok";}
+
+  // Digital I/O only exists on the AMIDJ14 — the Waveshare 8AI has no
+  // DI/DO hardware at all, same convention as boardProfile.hasDigitalIO
+  // in the analog-board (waveshare-s3/) variant. Separate FC02/FC01
+  // requests right after the analog read; a failure here doesn't affect
+  // the analog channels above (rc==MB_OK already returned for those).
+  if (detectedType == "amidj14" && dinOut && doutOut) {
+    bool din4[4] = {false,false,false,false};
+    if (modbusReadDiscreteInputs(MODBUS_BOARD_SLAVE_ID, MODBUS_BOARD_DI_START, 4, din4)) {
+      for (int i=0;i<4;i++) { if(!b.din[i].enabled) continue; dinOut[i].valid=true; dinOut[i].state=din4[i]; dinOut[i].status="ok"; }
+    } else {
+      for (int i=0;i<4;i++) { if(!b.din[i].enabled) continue; dinOut[i].valid=false; dinOut[i].status="timeout"; }
+    }
+    bool dout4[4] = {false,false,false,false};
+    if (modbusReadCoils(MODBUS_BOARD_SLAVE_ID, MODBUS_BOARD_DO_START, 4, dout4)) {
+      for (int i=0;i<4;i++) { if(!b.dout[i].enabled) continue; doutOut[i].valid=true; doutOut[i].state=dout4[i]; doutOut[i].status="ok"; }
+    } else {
+      for (int i=0;i<4;i++) { if(!b.dout[i].enabled) continue; doutOut[i].valid=false; doutOut[i].status="timeout"; }
+    }
+  }
+  return MB_OK;
 }
 
 // =============================================================================
