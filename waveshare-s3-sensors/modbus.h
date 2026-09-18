@@ -396,6 +396,15 @@ struct ModbusBoardPreset { const char* type; const char* label; long baud; int n
 static const ModbusBoardPreset MODBUS_BOARD_PRESETS[] = {
   { "waveshare", "Waveshare 8AI (B)",       9600, 8, false },
   { "amidj14",   "Eletechsup AMIDJ14 (6AI)", 9600, 6, true  },
+  // Purple Chinese Waveshare-8AI clone (Sarah tested this back on
+  // 2026-06-25 during tank-firmware bring-up, register-compatible with
+  // the real Waveshare 8AI — same 1000 divisor, same 8ch, no DI/DO —
+  // but ships at 4800bps instead of 9600. Register map is identical so
+  // no new code path needed anywhere else (modbusPollBoard's channel
+  // count and modbusBoardRawDivisor() both already default to the
+  // Waveshare-shaped values for any non-"amidj14" boardType); this is
+  // genuinely the one-line addition the comment above predicted.
+  { "sdsin",     "SDSIN SN-3002-I20/V05-485-8 (purple clone)", 4800, 8, false },
 };
 static const ModbusBoardPreset* modbusFindPreset(const String& type) {
   for (auto& p : MODBUS_BOARD_PRESETS) if (type == p.type) return &p;

@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.1
+// FIRMWARE VERSION: rig-module-sensors-1.19.2
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.19.1"
+#define FW_VERSION "rig-module-sensors-1.19.2"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code

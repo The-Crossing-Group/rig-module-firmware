@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.1 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.2 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
