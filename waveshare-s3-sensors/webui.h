@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.18.0 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.0 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -857,6 +857,21 @@ static String sysPage(ModuleConfig& cfg) {
        "the file. See countBufferEntries()/bufferCount comment in the .ino.</div><br>";
   h += "<button onclick='fetch(\"/api/buffer/flush\",{method:\"POST\"}).then(()=>alert(\"Flushing\"))'>Flush Now</button>&nbsp;";
   h += "<button class='btn-red' onclick='if(confirm(\"Clear all buffered data?\"))fetch(\"/api/buffer/clear\",{method:\"POST\"}).then(()=>location.reload())'>Clear Buffer</button></div>";
+
+  h += "<h3>Config Export / Import</h3><div class='card'>";
+  h += "<p class='small'>Download every setting on this device as a single JSON file (RS485 sensors, Modbus board + "
+       "digital I/O, CAN signals, module/Pi/WiFi settings). Restore it later, or upload it onto a different unit to "
+       "clone this one's configuration. <b>Module ID is NOT included</b> — it's always derived from each device's own "
+       "MAC address. The exported file DOES include your WiFi password in plain text — handle it with the same care "
+       "as any written-down password.</p>";
+  h += "<button type='button' onclick=\"window.location.href='/api/config/export'\">&#128190; Download Config (.json)</button>";
+  h += "<div style='margin-top:14px'>";
+  h += "<label>Restore from file:</label>";
+  h += "<input type='file' id='importFile' accept='application/json,.json'>";
+  h += "<button type='button' onclick='doImport()' style='margin-top:8px'>&#128228; Upload &amp; Restore</button>";
+  h += "<div id='importResult' class='small' style='margin-top:8px'></div>";
+  h += "</div></div>";
+
   h += "<h3>Danger Zone</h3><div class='card'>";
   h += "<button onclick='if(confirm(\"Reboot?\"))fetch(\"/api/reboot\",{method:\"POST\"})'>Reboot</button>&nbsp;";
   h += "<button class='btn-red' id='factoryResetBtn' onclick='doFactoryReset()'>Factory Reset</button>"
@@ -874,6 +889,22 @@ function doOTA(){
   let url=document.getElementById('otaUrl').value;
   if(!url)return alert('Enter URL');
   fetch('/api/ota?url='+encodeURIComponent(url)).then(r=>r.text()).then(t=>alert(t));
+}
+function doImport(){
+  let f = document.getElementById('importFile').files[0];
+  let box = document.getElementById('importResult');
+  if(!f){ box.textContent='Choose a file first.'; return; }
+  box.textContent='Reading file...';
+  let reader = new FileReader();
+  reader.onload = function(){
+    box.textContent='Uploading and restoring...';
+    fetch('/api/config/import', {method:'POST', headers:{'Content-Type':'application/json'}, body: reader.result})
+      .then(r=>r.json()).then(d=>{
+        if(d.ok){ box.innerHTML = '<span class="ok">Restored. Rebooting to apply...</span>'; setTimeout(()=>location.reload(), 2000); }
+        else { box.innerHTML = '<span class="warn">Import failed: '+(d.error||'unknown error')+'</span>'; }
+      }).catch(e=>{ box.textContent='Request failed: '+e; });
+  };
+  reader.readAsText(f);
 }
 function doFactoryReset(){
   if(!confirm('Factory reset? ALL config will be lost.'))return;
@@ -1534,6 +1565,54 @@ static void handleOTA() {
   http.end();
 }
 
+// =============================================================================
+// CONFIG EXPORT / IMPORT HANDLERS (2026-09-18, Sarah's request)
+// =============================================================================
+
+// GET /api/config/export — downloads the full config as a JSON file. Sent
+// with Content-Disposition so the browser prompts a save-as with a
+// sensible filename instead of trying to render it inline.
+static void handleConfigExport() {
+  DynamicJsonDocument doc(16384); // generous — full config, all slots
+  doc["exportedFw"] = FW_VERSION;
+  doc["exportedFromModuleId"] = _cfg->moduleId; // informational only — NOT re-imported as moduleId
+  configToJson(*_cfg, doc);
+  String out;
+  serializeJson(doc, out);
+  String filename = "rig-module-config-" + _cfg->moduleId + ".json";
+  _srv->sendHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
+  _srv->send(200, "application/json", out);
+}
+
+// POST /api/config/import — body is a raw JSON config (as produced by
+// /api/config/export, or hand-edited). Parses it, merges into the
+// in-memory config (configFromJson() only touches fields actually present
+// in the JSON), saves to NVS, and reboots so every subsystem (Serial2
+// baud, CAN driver) picks up the restored settings cleanly.
+static void handleConfigImport() {
+  if (!_srv->hasArg("plain")) {
+    _srv->send(400, "application/json", "{\"ok\":false,\"error\":\"no request body\"}");
+    return;
+  }
+  String body = _srv->arg("plain");
+  DynamicJsonDocument doc(16384);
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    String r = "{\"ok\":false,\"error\":\"JSON parse error: " + String(err.c_str()) + "\"}";
+    _srv->send(400, "application/json", r);
+    return;
+  }
+  bool ok = configFromJson(doc, *_cfg);
+  if (!ok) {
+    _srv->send(400, "application/json", "{\"ok\":false,\"error\":\"not a valid config export (empty or not an object)\"}");
+    return;
+  }
+  saveConfig(*_prefs, *_cfg);
+  _srv->send(200, "application/json", "{\"ok\":true}");
+  delay(800);
+  ESP.restart();
+}
+
 // ─── Route setup ─────────────────────────────────────────────────────────────
 void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
                     SensorReading* sReadings, CanSignalReading* cReadings,
@@ -1586,6 +1665,8 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
     bufferCount = 0;
     _srv->send(200,"application/json","{\"ok\":true}");
   });
+  srv.on("/api/config/export", HTTP_GET, handleConfigExport);
+  srv.on("/api/config/import", HTTP_POST, handleConfigImport);
   srv.on("/api/reboot", HTTP_POST, [](){
     _srv->send(200,"application/json","{\"ok\":true}");
     delay(500); ESP.restart();

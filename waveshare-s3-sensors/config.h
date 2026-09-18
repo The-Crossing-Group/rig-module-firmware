@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.18.0
+// FIRMWARE VERSION: rig-module-sensors-1.19.0
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.18.0"
+#define FW_VERSION "rig-module-sensors-1.19.0"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -714,4 +714,250 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   // it anymore, so those old keys become orphaned/harmless once a save
   // happens under the new format (same pattern as the old "canEn" key).
   p.end();
+}
+
+// =============================================================================
+// CONFIG EXPORT / IMPORT (2026-09-18, Sarah's request) — full config as a
+// single JSON blob over the web UI, same feature/shape as the analog-board
+// (waveshare-s3-mudtank) variant. Export downloads everything in this
+// struct (Modbus board + digital I/O + independent RS485 sensors + CAN
+// signals + module/WiFi/Pi/CAN settings) as one file; Import reads that
+// same shape back in, overwrites the in-RAM config, saves to NVS, and
+// reboots so every subsystem (Serial2 baud, CAN driver) picks up the
+// restored settings cleanly — same "changed settings need a clean reboot"
+// convention already used everywhere else in this firmware.
+//
+// Deliberately NOT included: moduleId (derived from this device's own MAC,
+// re-derived fresh on next boot regardless of what's in the file — a
+// cloned config imported onto a DIFFERENT physical module should not carry
+// over the original module's identity). wifiPass IS included (so a full
+// clone-to-a-new-unit workflow doesn't require re-typing it), but note this
+// makes the exported file sensitive — same care as writing down any WiFi
+// password on paper. nvsEraseSelfHealCount also NOT included — it's a
+// legacy diagnostic counter about THIS board's own flash history, not a
+// setting; carrying it into a clone/restore would misrepresent a different
+// board's history as this one's.
+// =============================================================================
+
+// Serializes the full ModuleConfig into a JsonDocument the caller provides
+// (sized by the caller — see webui.h's export handler for the size used).
+// Kept as a plain function (not returning a String directly) so the caller
+// can add extra top-level metadata (e.g. "exportedFw"/"exportedAt") before
+// serializing to the actual HTTP response.
+void configToJson(ModuleConfig& c, JsonDocument& doc) {
+  doc["moduleName"]  = c.moduleName;
+  doc["moduleType"]  = c.moduleType;
+  doc["description"] = c.description;
+
+  doc["modbusBaud"]      = c.modbusBaud;
+  doc["baudManuallySet"] = c.baudManuallySet;
+
+  doc["pollIntervalS"] = c.pollIntervalS;
+  doc["piHost"]         = c.piHost;
+  doc["rigToken"]       = c.rigToken;
+  doc["wifiSSID"]       = c.wifiSSID;
+  doc["wifiPass"]       = c.wifiPass;
+
+  doc["canBitrate"]             = c.canBitrate;
+  doc["canopenBridge"]          = c.canopenBridge;
+  doc["canopenNodeId"]          = c.canopenNodeId;
+  doc["canopenTargetSpecific"]  = c.canopenTargetSpecific;
+
+  JsonArray sArr = doc.createNestedArray("sensors");
+  for (int i = 0; i < MAX_SENSORS; i++) {
+    JsonObject o = sArr.createNestedObject();
+    SensorConfig& s = c.sensors[i];
+    o["enabled"]       = s.enabled;
+    o["name"]          = s.name;
+    o["kind"]          = s.kind;
+    o["unit"]          = s.unit;
+    o["slaveId"]       = s.slaveId;
+    o["funcCode"]      = s.funcCode;
+    o["regAddr"]       = s.regAddr;
+    o["dataType"]      = s.dataType;
+    o["wordOrder"]     = s.wordOrder;
+    o["respRegOffset"] = s.respRegOffset;
+    o["scale"]         = s.scale;
+    o["offset"]        = s.offset;
+    o["decimals"]      = s.decimals;
+    o["volumeEnabled"] = s.volumeEnabled;
+    o["tankLengthM"]   = s.tankLengthM;
+    o["tankWidthM"]    = s.tankWidthM;
+    o["tankHeightM"]   = s.tankHeightM;
+    o["capacityUnit"]  = s.capacityUnit;
+  }
+
+  JsonObject mb = doc.createNestedObject("modbusBoard");
+  mb["enabled"]   = c.modbusBoard.enabled;
+  mb["boardType"] = c.modbusBoard.boardType;
+  JsonArray mbCh = mb.createNestedArray("channels");
+  for (int i = 0; i < MAX_MODBUS_CHANNELS; i++) {
+    JsonObject o = mbCh.createNestedObject();
+    ModbusChannelConfig& ch = c.modbusBoard.channels[i];
+    o["enabled"] = ch.enabled;
+    o["name"]    = ch.name;
+    o["kind"]    = ch.kind;
+    o["unit"]    = ch.unit;
+    o["engMin"]  = ch.engMin;
+    o["engMax"]  = ch.engMax;
+  }
+  JsonArray mbDin = mb.createNestedArray("din");
+  for (int i = 0; i < 4; i++) {
+    JsonObject o = mbDin.createNestedObject();
+    o["enabled"] = c.modbusBoard.din[i].enabled;
+    o["name"]    = c.modbusBoard.din[i].name;
+  }
+  JsonArray mbDout = mb.createNestedArray("dout");
+  for (int i = 0; i < 4; i++) {
+    JsonObject o = mbDout.createNestedObject();
+    o["enabled"] = c.modbusBoard.dout[i].enabled;
+    o["name"]    = c.modbusBoard.dout[i].name;
+  }
+
+  JsonArray cArr = doc.createNestedArray("canSignals");
+  for (int i = 0; i < MAX_CAN_SIGNALS; i++) {
+    JsonObject o = cArr.createNestedObject();
+    CanSignalConfig& sg = c.canSignals[i];
+    o["enabled"]    = sg.enabled;
+    o["name"]       = sg.name;
+    o["kind"]       = sg.kind;
+    o["unit"]       = sg.unit;
+    o["canId"]      = sg.canId;
+    o["extended"]   = sg.extended;
+    o["byteOffset"] = sg.byteOffset;
+    o["byteLen"]    = sg.byteLen;
+    o["bigEndian"]  = sg.bigEndian;
+    o["signedVal"]  = sg.signedVal;
+    o["scale"]      = sg.scale;
+    o["offset"]     = sg.offset;
+    o["decimals"]   = sg.decimals;
+  }
+}
+
+// Reverse of configToJson() — reads a previously-exported (or hand-edited)
+// JSON document back into a ModuleConfig. Every field uses the CURRENT
+// value in `c` as its fallback if missing from the JSON, so a partial/
+// hand-trimmed file (e.g. someone deletes the sensors array to reset just
+// that section) doesn't wipe out fields it didn't mention — only fields
+// actually present in the JSON are changed. Returns false only if the
+// document doesn't look like a config export at all (completely empty or
+// not an object); otherwise always returns true, since a genuinely partial
+// file is a valid (if unusual) use case, not an error.
+bool configFromJson(JsonDocument& doc, ModuleConfig& c) {
+  if (doc.isNull() || !doc.is<JsonObject>()) return false;
+
+  if (!doc["moduleName"].isNull())  c.moduleName  = doc["moduleName"].as<String>();
+  if (!doc["moduleType"].isNull())  c.moduleType  = doc["moduleType"].as<String>();
+  if (!doc["description"].isNull()) c.description = doc["description"].as<String>();
+
+  if (!doc["modbusBaud"].isNull())      c.modbusBaud      = doc["modbusBaud"].as<long>();
+  if (!doc["baudManuallySet"].isNull()) c.baudManuallySet = doc["baudManuallySet"].as<bool>();
+
+  if (!doc["pollIntervalS"].isNull()) c.pollIntervalS = constrain(doc["pollIntervalS"].as<int>(), 1, 30);
+  if (!doc["piHost"].isNull())        c.piHost        = doc["piHost"].as<String>();
+  if (!doc["rigToken"].isNull()) {
+    String rt = doc["rigToken"].as<String>();
+    c.rigToken = rt.isEmpty() ? "7804991970" : rt;
+  }
+  if (!doc["wifiSSID"].isNull()) c.wifiSSID = doc["wifiSSID"].as<String>();
+  if (!doc["wifiPass"].isNull()) c.wifiPass = doc["wifiPass"].as<String>();
+
+  if (!doc["canBitrate"].isNull())            c.canBitrate            = doc["canBitrate"].as<long>();
+  if (!doc["canopenBridge"].isNull())         c.canopenBridge         = doc["canopenBridge"].as<bool>();
+  if (!doc["canopenNodeId"].isNull())         c.canopenNodeId         = (uint8_t)doc["canopenNodeId"].as<int>();
+  if (!doc["canopenTargetSpecific"].isNull()) c.canopenTargetSpecific = doc["canopenTargetSpecific"].as<bool>();
+
+  if (doc["sensors"].is<JsonArray>()) {
+    JsonArray arr = doc["sensors"].as<JsonArray>();
+    int i = 0;
+    for (JsonObject o : arr) {
+      if (i >= MAX_SENSORS) break;
+      SensorConfig& s = c.sensors[i];
+      if (!o["enabled"].isNull())       s.enabled       = o["enabled"].as<bool>();
+      if (!o["name"].isNull())          s.name          = o["name"].as<String>();
+      if (!o["kind"].isNull())          s.kind          = o["kind"].as<String>();
+      if (!o["unit"].isNull())          s.unit          = o["unit"].as<String>();
+      if (!o["slaveId"].isNull())       s.slaveId       = (uint8_t)constrain(o["slaveId"].as<int>(), SENSOR_MIN_SLAVE_ID, 247);
+      if (!o["funcCode"].isNull())      s.funcCode      = (uint8_t)o["funcCode"].as<int>();
+      if (!o["regAddr"].isNull())       s.regAddr       = (uint16_t)o["regAddr"].as<int>();
+      if (!o["dataType"].isNull())      s.dataType      = (uint8_t)o["dataType"].as<int>();
+      if (!o["wordOrder"].isNull())     s.wordOrder     = (uint8_t)o["wordOrder"].as<int>();
+      if (!o["respRegOffset"].isNull()) s.respRegOffset = (uint8_t)constrain(o["respRegOffset"].as<int>(), 0, 15);
+      if (!o["scale"].isNull())         s.scale         = o["scale"].as<float>();
+      if (!o["offset"].isNull())        s.offset        = o["offset"].as<float>();
+      if (!o["decimals"].isNull())      s.decimals      = o["decimals"].as<int>();
+      if (!o["volumeEnabled"].isNull()) s.volumeEnabled = o["volumeEnabled"].as<bool>();
+      if (!o["tankLengthM"].isNull())   s.tankLengthM   = o["tankLengthM"].as<float>();
+      if (!o["tankWidthM"].isNull())    s.tankWidthM    = o["tankWidthM"].as<float>();
+      if (!o["tankHeightM"].isNull())   s.tankHeightM   = o["tankHeightM"].as<float>();
+      if (!o["capacityUnit"].isNull())  s.capacityUnit  = o["capacityUnit"].as<String>();
+      i++;
+    }
+  }
+
+  if (doc["modbusBoard"].is<JsonObject>()) {
+    JsonObject mb = doc["modbusBoard"].as<JsonObject>();
+    if (!mb["enabled"].isNull())   c.modbusBoard.enabled   = mb["enabled"].as<bool>();
+    if (!mb["boardType"].isNull()) c.modbusBoard.boardType = mb["boardType"].as<String>();
+    if (mb["channels"].is<JsonArray>()) {
+      JsonArray arr = mb["channels"].as<JsonArray>();
+      int i = 0;
+      for (JsonObject o : arr) {
+        if (i >= MAX_MODBUS_CHANNELS) break;
+        ModbusChannelConfig& ch = c.modbusBoard.channels[i];
+        if (!o["enabled"].isNull()) ch.enabled = o["enabled"].as<bool>();
+        if (!o["name"].isNull())    ch.name    = o["name"].as<String>();
+        if (!o["kind"].isNull())    ch.kind    = o["kind"].as<String>();
+        if (!o["unit"].isNull())    ch.unit    = o["unit"].as<String>();
+        if (!o["engMin"].isNull())  ch.engMin  = o["engMin"].as<float>();
+        if (!o["engMax"].isNull())  ch.engMax  = o["engMax"].as<float>();
+        i++;
+      }
+    }
+    if (mb["din"].is<JsonArray>()) {
+      JsonArray arr = mb["din"].as<JsonArray>();
+      int i = 0;
+      for (JsonObject o : arr) {
+        if (i >= 4) break;
+        if (!o["enabled"].isNull()) c.modbusBoard.din[i].enabled = o["enabled"].as<bool>();
+        if (!o["name"].isNull())    c.modbusBoard.din[i].name    = o["name"].as<String>();
+        i++;
+      }
+    }
+    if (mb["dout"].is<JsonArray>()) {
+      JsonArray arr = mb["dout"].as<JsonArray>();
+      int i = 0;
+      for (JsonObject o : arr) {
+        if (i >= 4) break;
+        if (!o["enabled"].isNull()) c.modbusBoard.dout[i].enabled = o["enabled"].as<bool>();
+        if (!o["name"].isNull())    c.modbusBoard.dout[i].name    = o["name"].as<String>();
+        i++;
+      }
+    }
+  }
+
+  if (doc["canSignals"].is<JsonArray>()) {
+    JsonArray arr = doc["canSignals"].as<JsonArray>();
+    int i = 0;
+    for (JsonObject o : arr) {
+      if (i >= MAX_CAN_SIGNALS) break;
+      CanSignalConfig& sg = c.canSignals[i];
+      if (!o["enabled"].isNull())    sg.enabled    = o["enabled"].as<bool>();
+      if (!o["name"].isNull())       sg.name       = o["name"].as<String>();
+      if (!o["kind"].isNull())       sg.kind       = o["kind"].as<String>();
+      if (!o["unit"].isNull())       sg.unit       = o["unit"].as<String>();
+      if (!o["canId"].isNull())      sg.canId      = o["canId"].as<uint32_t>();
+      if (!o["extended"].isNull())   sg.extended   = o["extended"].as<bool>();
+      if (!o["byteOffset"].isNull()) sg.byteOffset = (uint8_t)constrain(o["byteOffset"].as<int>(), 0, 7);
+      if (!o["byteLen"].isNull())    sg.byteLen    = (uint8_t)o["byteLen"].as<int>();
+      if (!o["bigEndian"].isNull())  sg.bigEndian  = o["bigEndian"].as<bool>();
+      if (!o["signedVal"].isNull())  sg.signedVal  = o["signedVal"].as<bool>();
+      if (!o["scale"].isNull())      sg.scale      = o["scale"].as<float>();
+      if (!o["offset"].isNull())     sg.offset     = o["offset"].as<float>();
+      if (!o["decimals"].isNull())   sg.decimals   = o["decimals"].as<int>();
+      i++;
+    }
+  }
+
+  return true;
 }
