@@ -382,6 +382,26 @@ int modbusPollSensor(SensorConfig& s, float& rawOut, float& valueOut, bool verbo
 
 static float modbusBoardRawDivisor(const String& type) { return type == "amidj14" ? 100.0f : 1000.0f; }
 
+// Known board presets — factory-default RS485 baud + real channel count,
+// so picking a board on /modbus can apply correct settings in one step
+// instead of hunting datasheets. Confirmed against manufacturer listings
+// (not guessed): Waveshare Modbus RTU Analog Input 8CH (B) datasheet =
+// 9600bps default; Eletechsup AMIDJ14 (485io.com product page) = 9600bps
+// default, "Baud rates: 1200 2400 4800 9600 (default) 19200 38400 57600
+// 115200". Both happen to share 9600 today, but this table (not a
+// hardcoded single value) is what makes adding a future board with a
+// genuinely different factory default (e.g. a clone shipping at 4800) a
+// one-line change here rather than a new code path.
+struct ModbusBoardPreset { const char* type; const char* label; long baud; int numChannels; bool hasDigitalIO; };
+static const ModbusBoardPreset MODBUS_BOARD_PRESETS[] = {
+  { "waveshare", "Waveshare 8AI (B)",       9600, 8, false },
+  { "amidj14",   "Eletechsup AMIDJ14 (6AI)", 9600, 6, true  },
+};
+static const ModbusBoardPreset* modbusFindPreset(const String& type) {
+  for (auto& p : MODBUS_BOARD_PRESETS) if (type == p.type) return &p;
+  return nullptr;
+}
+
 // FC02 — Read Discrete Inputs. Returns true on success, fills bits[count]
 // with 0/1 (one bool per input). Same wire format as the analog-board
 // (waveshare-s3/) variant's modbusReadDiscreteInputs() — reimplemented

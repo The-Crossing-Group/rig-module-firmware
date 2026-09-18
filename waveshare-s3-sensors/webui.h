@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.17.0 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.18.0 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -401,7 +401,16 @@ static String modbusPage(ModuleConfig& cfg) {
   String h=FPSTR(NAV); h += "<div class='page'><h2>&#9881; Modbus 4-20mA</h2>";
   h += "<p class='small'>Eletechsup/Waveshare analog input board. This board is always slave ID <b>1</b>; direct RS485 sensors use IDs 2-247.</p>";
   h += "<form method='POST' action='/api/modbus/save'><div class='card'><label><input type='checkbox' name='enabled'" + String(cfg.modbusBoard.enabled?" checked":"") + "> Enable Modbus board at slave ID 1</label>";
-  h += "<label>Board type</label><select name='boardType'><option value='auto'"+String(cfg.modbusBoard.boardType=="auto"?" selected":"")+">Auto-detect</option><option value='waveshare'"+String(cfg.modbusBoard.boardType=="waveshare"?" selected":"")+">Waveshare 8AI</option><option value='amidj14'"+String(cfg.modbusBoard.boardType=="amidj14"?" selected":"")+">Eletechsup AMIDJ14 (6AI)</option></select>";
+  h += "<label>Board type</label><select id='mbBoardType' name='boardType'>";
+  h += "<option value='auto'"+String(cfg.modbusBoard.boardType=="auto"?" selected":"")+">Auto-detect</option>";
+  for (auto& p : MODBUS_BOARD_PRESETS) {
+    h += "<option value='"+String(p.type)+"'"+String(cfg.modbusBoard.boardType==p.type?" selected":"")+">"+String(p.label)+" — "+String(p.baud)+" baud, "+String(p.numChannels)+"ch</option>";
+  }
+  h += "</select>";
+  h += "<button type='button' id='mbApplyPresetBtn' onclick='mbApplyPreset()' style='margin-top:6px'>&#9889; Apply Board Preset</button>";
+  h += "<div class='small' id='mbApplyPresetStatus' style='margin:6px 0 4px'>Sets the RS485 baud rate + channel count to that board's factory "
+       "defaults and saves immediately (reboots if the baud actually changes). <b>Baud is shared with any direct RS485 sensors on /sensors — "
+       "changing it here changes it for the whole bus.</b> Has no effect while \"Auto-detect\" is selected.</div>";
   h += "<div class='small'>Raw scaling: Waveshare uses microamps; AMIDJ14 uses hundredths of a milliamp. The board is read using the shared RS485 baud setting on Config.</div></div>";
   h += "<h3>Analog Inputs</h3>";
   for(int i=0;i<MAX_MODBUS_CHANNELS;i++){ auto& c=cfg.modbusBoard.channels[i]; h += "<div class='card'><b>AI"+String(i+1)+"</b><span class='small' id='mbLive"+String(i)+"'> loading...</span>";
@@ -446,6 +455,16 @@ static String modbusPage(ModuleConfig& cfg) {
        "});}"
        "setInterval(mbLive,2000);mbLive();"
        "function mbWriteDO(ch,val){fetch('/api/modbus/digital/write?ch='+ch+'&value='+(val?1:0),{method:'POST'}).then(()=>mbLive());}"
+       "function mbApplyPreset(){"
+       "var bt=document.getElementById('mbBoardType').value;var st=document.getElementById('mbApplyPresetStatus');var btn=document.getElementById('mbApplyPresetBtn');"
+       "if(bt==='auto'){st.textContent='Pick a specific board (not Auto-detect) first.';return;}"
+       "if(!confirm('This sets the RS485 baud rate for the WHOLE bus (including any direct RS485 sensors on /sensors) to this board\\'s factory default, and disables analog channels beyond its real count. Continue?'))return;"
+       "btn.disabled=true;st.textContent='Applying...';"
+       "fetch('/api/modbus/preset?boardType='+bt,{method:'POST'}).then(r=>r.json()).then(d=>{"
+       "if(d.rebooting){st.textContent='Applied: '+d.baud+' baud, '+d.numChannels+' channels. Rebooting to apply the new baud rate...';setTimeout(()=>location.reload(),2000);}"
+       "else{st.textContent='Applied: '+d.baud+' baud, '+d.numChannels+' channels (baud unchanged, no reboot needed). Reloading...';setTimeout(()=>location.reload(),800);}"
+       "}).catch(e=>{btn.disabled=false;st.textContent='Request failed: '+e;});"
+       "}"
        "</script></div>";
   return h;
 }
@@ -1255,6 +1274,45 @@ static void handleModbusSave() {
   saveConfig(*_prefs,*_cfg);_srv->sendHeader("Location","/modbus");_srv->send(302,"text/plain","");
 }
 
+// Applies a known board's factory-default settings in one step (2026-09-18,
+// Sarah: "put out the proper settings for each board and set the correct
+// baud rate"). Sets: boardType (explicit, not "auto"), the shared RS485
+// baud (cfg.modbusBaud — same field /config's baud selector writes, since
+// this variant's whole bus, board + direct sensors, shares one Serial2),
+// and disables analog channels beyond the board's real channel count
+// (doesn't touch names/kind/unit/engMin/engMax on channels that stay
+// enabled, or DI/DO — those are left as the user configured them).
+// Reboots only if the baud actually changed, same "only reboot when it's
+// genuinely needed" rule as handleConfig()'s baudChanged branch — Serial2
+// only re-inits from setup(), so a baud change can't take effect any other
+// way, but changing just boardType/channel-enables doesn't need one since
+// pollTask() reads cfg.modbusBoard fresh every cycle.
+static void handleModbusPreset() {
+  String bt = _srv->hasArg("boardType") ? _srv->arg("boardType") : "";
+  const ModbusBoardPreset* preset = modbusFindPreset(bt);
+  if (!preset) {
+    _srv->send(400, "application/json", "{\"ok\":false,\"error\":\"unknown board type\"}");
+    return;
+  }
+  _cfg->modbusBoard.boardType = bt;
+  for (int i = 0; i < MAX_MODBUS_CHANNELS; i++) {
+    if (i >= preset->numChannels) _cfg->modbusBoard.channels[i].enabled = false;
+  }
+  bool baudChanged = (_cfg->modbusBaud != preset->baud);
+  _cfg->modbusBaud = preset->baud;
+  _cfg->baudManuallySet = true; // explicit board choice counts as "user decided", same as /config's baud form
+  saveConfig(*_prefs, *_cfg);
+
+  DynamicJsonDocument doc(256);
+  doc["ok"] = true;
+  doc["baud"] = preset->baud;
+  doc["numChannels"] = preset->numChannels;
+  doc["rebooting"] = baudChanged;
+  String out; serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
+  if (baudChanged) { delay(300); ESP.restart(); }
+}
+
 // Writes a single digital output on the adapter board (FC05) — an
 // immediate, non-persisted bus write, same "instant action button"
 // pattern as the analog-board variant's /api/digital/write. Only valid
@@ -1511,6 +1569,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/config",         HTTP_POST, handleConfig);
   srv.on("/api/sensors/save",   HTTP_POST, handleSensorsSave);
   srv.on("/api/modbus/save", HTTP_POST, handleModbusSave);
+  srv.on("/api/modbus/preset", HTTP_POST, handleModbusPreset);
   srv.on("/api/can/save",       HTTP_POST, handleCanSave);
   srv.on("/api/wifi/forget",    HTTP_POST, handleWifiForget);
   srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);

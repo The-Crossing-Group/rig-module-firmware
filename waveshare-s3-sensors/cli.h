@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.17.0 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.18.0 (see FW_VERSION in config.h)
 // =============================================================================
 // cli.h — Serial command-line interface, mirrors the web UI config pages.
 //
