@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.0 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.1 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -73,6 +73,28 @@
 #define RS485_DE    21
 #define CAN_TXD     15
 #define CAN_RXD     16
+
+// =============================================================================
+// LOOP TASK STACK SIZE OVERRIDE (2026-09-18)
+// Root-caused a report of "saving an RS485 sensor reboots the board and
+// doesn't save the settings": handleSensorsSave() + saveConfig() (the
+// WebServer request-handler call chain that "Save All Sensors" runs
+// through) had ~6.8KB combined of local stack usage from large fixed-
+// size arrays (confirmed via a real GCC -fstack-usage compile, not a
+// guess) — against the ESP32 Arduino core's DEFAULT 8192-byte loop task
+// stack, with WebServer's own frames and the NVS/flash driver internals
+// underneath eating the rest. That overflowed the stack mid-save,
+// corrupting memory and crashing (watchdog reset = the "reboot") before
+// the flash write was safely committed. The actual fix is making those
+// large arrays `static` instead of stack locals (see config.h/webui.h —
+// grep "STACK OVERFLOW" for the full writeup); this override is a
+// second, independent safety margin on top of that fix, not a
+// substitute for it — bumping the stack doesn't un-corrupt anything if
+// some OTHER code path in the future adds another few KB of locals to
+// this same call chain. getArduinoLoopTaskStackSize() is a weak symbol
+// in the esp32 core specifically meant to be overridden by the sketch
+// like this.
+size_t getArduinoLoopTaskStackSize(void) { return 16384; }
 
 // =============================================================================
 // GLOBALS

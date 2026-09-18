@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.0
+// FIRMWARE VERSION: rig-module-sensors-1.19.1
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.19.0"
+#define FW_VERSION "rig-module-sensors-1.19.1"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -521,7 +521,15 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   // the new blob format going forward; the old keys are then orphaned
   // and harmlessly ignored, same pattern as the old "canEn" key before.
   {
-    SensorConfigPacked packed[MAX_SENSORS];
+    // STACK OVERFLOW FIX (2026-09-18): this array is ~2.7KB
+    // (SensorConfigPacked=168 bytes x MAX_SENSORS=16). loadConfig() runs
+    // once in setup() so this specific call site was never the crash
+    // Sarah hit, but it's the same struct/pattern as the ones in
+    // saveConfig() and handleSensorsSave() that WERE — see the long
+    // comment on saveConfig()'s copy for the full story. Made static for
+    // consistency/safety even though this one's caller (setup(), a very
+    // shallow stack at that point) wasn't actually at risk.
+    static SensorConfigPacked packed[MAX_SENSORS];
     size_t got = p.getBytes("sensorsBlob", packed, sizeof(packed));
     if (got == sizeof(packed)) {
       for (int i = 0; i < MAX_SENSORS; i++) unpackSensor(packed[i], c.sensors[i]);
@@ -566,9 +574,9 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
     }
   }
 
-  { ModbusBoardPacked packed; size_t got=p.getBytes("modbusBlob",&packed,sizeof(packed)); if(got==sizeof(packed)) unpackModbus(packed,c.modbusBoard); }
+  { static ModbusBoardPacked packed; size_t got=p.getBytes("modbusBlob",&packed,sizeof(packed)); if(got==sizeof(packed)) unpackModbus(packed,c.modbusBoard); }
   {
-    CanSignalConfigPacked packed[MAX_CAN_SIGNALS];
+    static CanSignalConfigPacked packed[MAX_CAN_SIGNALS];
     size_t got = p.getBytes("canBlob", packed, sizeof(packed));
     if (got == sizeof(packed)) {
       for (int i = 0; i < MAX_CAN_SIGNALS; i++) unpackCanSignal(packed[i], c.canSignals[i]);
@@ -687,8 +695,47 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   // one flash commit — same for CAN signals. Massively less NVS pressure,
   // and each save is now effectively atomic instead of ~500 independent
   // writes any one of which could silently fail on a tight partition.
+  //
+  // STACK OVERFLOW BUG FIXED (2026-09-18, Sarah's report: "saving an
+  // RS485 sensor reboots and doesn't save"). `SensorConfigPacked
+  // packed[MAX_SENSORS]` below is 168 bytes x 16 = 2688 bytes — as a
+  // plain local variable that's 2688 bytes carved out of the CURRENT
+  // STACK FRAME every time saveConfig() runs. Confirmed with a real
+  // compile using GCC's -fstack-usage (arduino-cli IS available in this
+  // sandbox after all — see AGENTS.md/session notes, this was worth
+  // re-checking): saveConfig() itself uses 3904 bytes of stack,
+  // handleSensorsSave() (which also had its OWN 2688-byte packed[] for
+  // the post-save readback check, see below) uses 2912 bytes on top of
+  // that. Call chain for "Save All Sensors": loop() -> WebServer::
+  // handleClient() -> _handleRequest() -> handleSensorsSave() (2912) ->
+  // saveConfig() (3904) = 6816+ bytes in just those two frames, against
+  // the Arduino-ESP32 core's DEFAULT 8192-byte loop task stack (this
+  // sketch never overrides getArduinoLoopTaskStackSize() — confirmed).
+  // That leaves under ~1.4KB for the WebServer framework frames above
+  // it AND everything Preferences::putBytes()/the underlying NVS/flash
+  // driver needs below it — not enough headroom, and the loop task's
+  // stack overflows mid-save, corrupting memory and crashing (which the
+  // watchdog then turns into the reboot Sarah was seeing) before the
+  // flash write/commit is safely done. Exactly matches the symptom:
+  // reboots, settings don't stick. (Sensor saves specifically tripped
+  // this because handleSensorsSave() had its own large local array on
+  // top of saveConfig()'s; handleCanSave() has no such array and was
+  // presumably fine, matching Sarah's "haven't tested other types yet.")
+  //
+  // FIX: `static` on every one of these packed local arrays (here, in
+  // loadConfig() above, and in handleSensorsSave()'s readback check in
+  // webui.h) moves them out of the stack frame into the .bss segment
+  // (module-lifetime storage, same idea as a global) — same one-blob-
+  // per-key access pattern, same NVS behavior, just not living on a
+  // stack that's this tight. Safe here specifically because saveConfig/
+  // loadConfig are only ever called serially from a single task
+  // (setup()'s main flow or one WebServer request handler at a time —
+  // confirmed no concurrent/recursive callers exist in this codebase),
+  // so there's no risk of two calls stomping the same static buffer at
+  // once. getArduinoLoopTaskStackSize() override also added in the .ino
+  // as a second, independent safety margin — see setup() for that.
   {
-    SensorConfigPacked packed[MAX_SENSORS];
+    static SensorConfigPacked packed[MAX_SENSORS];
     for (int i = 0; i < MAX_SENSORS; i++) packSensor(c.sensors[i], packed[i]);
     size_t wrote = p.putBytes("sensorsBlob", packed, sizeof(packed));
     if (wrote != sizeof(packed)) {
@@ -696,9 +743,9 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
         "— partition may be full/corrupt.\n", (unsigned)wrote, (unsigned)sizeof(packed));
     }
   }
-  { ModbusBoardPacked packed; packModbus(c.modbusBoard,packed); p.putBytes("modbusBlob",&packed,sizeof(packed)); }
+  { static ModbusBoardPacked packed; packModbus(c.modbusBoard,packed); p.putBytes("modbusBlob",&packed,sizeof(packed)); }
   {
-    CanSignalConfigPacked packed[MAX_CAN_SIGNALS];
+    static CanSignalConfigPacked packed[MAX_CAN_SIGNALS];
     for (int i = 0; i < MAX_CAN_SIGNALS; i++) packCanSignal(c.canSignals[i], packed[i]);
     size_t wrote = p.putBytes("canBlob", packed, sizeof(packed));
     if (wrote != sizeof(packed)) {

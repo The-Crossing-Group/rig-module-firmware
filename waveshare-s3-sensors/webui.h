@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.0 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.1 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -1413,8 +1413,23 @@ static void handleSensorsSave() {
   // UPDATED 2026-09-16: reads back the packed "sensorsBlob" (see
   // SensorConfigPacked in config.h) instead of individual per-key
   // "sX_fc" values — those old keys are no longer written.
+  //
+  // STACK OVERFLOW BUG FIXED (2026-09-18): `packed` here is 2688 bytes
+  // (168 x MAX_SENSORS) — as a plain local, stacked directly on top of
+  // saveConfig()'s OWN 2688-byte local of the same shape (just called,
+  // above) in the same request-handler call chain. Confirmed via a real
+  // -fstack-usage compile: this function alone uses 2912 bytes of stack,
+  // saveConfig() another 3904 — 6816+ bytes combined against the
+  // default 8192-byte loop task stack, with WebServer's own frames and
+  // everything the flash/NVS driver needs UNDER this eating the rest.
+  // That's what was actually crashing/rebooting the board on "Save All
+  // Sensors" and losing the settings — see the long comment on
+  // saveConfig()'s copy of this exact pattern in config.h for the full
+  // writeup. `static` moves this out of the stack frame into .bss;
+  // safe because this handler only ever runs synchronously, one request
+  // at a time, on a single task.
   {
-    SensorConfigPacked packed[MAX_SENSORS];
+    static SensorConfigPacked packed[MAX_SENSORS];
     _prefs->begin("rigmod", true); // read-only
     size_t got = _prefs->getBytes("sensorsBlob", packed, sizeof(packed));
     _prefs->end();
