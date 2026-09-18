@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.46 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.16.0 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -32,6 +32,8 @@ extern unsigned long lastPostMs;
 extern bool lastPostOk;
 extern SensorReading    sensorReadings[MAX_SENSORS];
 extern CanSignalReading canReadings[MAX_CAN_SIGNALS];
+extern ModbusChannelReading modbusReadings[MAX_MODBUS_CHANNELS];
+extern String modbusDetectedType;
 extern SemaphoreHandle_t stateMutex;
 extern SemaphoreHandle_t modbusBusMutex;
 // modbusAutoDetectBaud(), modbusReadRegs(), modbusRegCount(),
@@ -113,6 +115,7 @@ static const char NAV[] PROGMEM = R"(
 <div class='nav'>
   <a href='/'>&#9881; Config</a>
   <a href='/sensors'>&#128225; RS485</a>
+  <a href='/modbus'>&#9881; Modbus</a>
   <a href='/can'>&#128225; CAN</a>
   <a href='/live'>&#128202; Live</a>
   <a href='/system'>&#128295; System</a>
@@ -389,6 +392,21 @@ window.addEventListener('DOMContentLoaded', function(){ fillSsidOptions([]); });
   return h;
 }
 
+// ─── /modbus 4-20mA ADAPTER BOARD (RESERVED SLAVE 1) ─────────────────────
+static String modbusPage(ModuleConfig& cfg) {
+  String h=FPSTR(NAV); h += "<div class='page'><h2>&#9881; Modbus 4-20mA</h2>";
+  h += "<p class='small'>Eletechsup/Waveshare analog input board. This board is always slave ID <b>1</b>; direct RS485 sensors use IDs 2-247.</p>";
+  h += "<form method='POST' action='/api/modbus/save'><div class='card'><label><input type='checkbox' name='enabled'" + String(cfg.modbusBoard.enabled?" checked":"") + "> Enable Modbus board at slave ID 1</label>";
+  h += "<label>Board type</label><select name='boardType'><option value='auto'"+String(cfg.modbusBoard.boardType=="auto"?" selected":"")+">Auto-detect</option><option value='waveshare'"+String(cfg.modbusBoard.boardType=="waveshare"?" selected":"")+">Waveshare 8AI</option><option value='amidj14'"+String(cfg.modbusBoard.boardType=="amidj14"?" selected":"")+">Eletechsup AMIDJ14 (6AI)</option></select>";
+  h += "<div class='small'>Raw scaling: Waveshare uses microamps; AMIDJ14 uses hundredths of a milliamp. The board is read using the shared RS485 baud setting on Config.</div></div>";
+  for(int i=0;i<MAX_MODBUS_CHANNELS;i++){ auto& c=cfg.modbusBoard.channels[i]; h += "<div class='card'><b>AI"+String(i+1)+"</b><span class='small' id='mbLive"+String(i)+"'> loading...</span>";
+    h += "<label><input type='checkbox' name='mb"+String(i)+"en'"+String(c.enabled?" checked":"")+"> Enabled</label><div class='row'><div><label>Name</label><input name='mb"+String(i)+"nm' value='"+_esc(c.name)+"' placeholder='e.g. Mud Pressure'></div><div><label>Kind</label><input name='mb"+String(i)+"kd' value='"+_esc(c.kind)+"' placeholder='pressure'></div><div><label>Unit</label><input name='mb"+String(i)+"ut' value='"+_esc(c.unit)+"' placeholder='psi'></div></div>";
+    h += "<div class='row'><div><label>Engineering Min @ 4mA</label><input name='mb"+String(i)+"lo' type='number' step='any' value='"+String(c.engMin,3)+"'></div><div><label>Engineering Max @ 20mA</label><input name='mb"+String(i)+"hi' type='number' step='any' value='"+String(c.engMax,3)+"'></div></div></div>";
+  }
+  h += "<button type='submit'>&#128190; Save Modbus Settings</button></form><script>function mbLive(){fetch('/api/modbus/live').then(r=>r.json()).then(d=>(d.channels||[]).forEach(c=>{let e=document.getElementById('mbLive'+c.ch);if(e)e.textContent=c.value==null?' -- ('+c.status+')':' '+c.value+' '+(c.unit||'')+' / '+c.ma+'mA ('+c.status+')';}));}setInterval(mbLive,2000);mbLive();</script></div>";
+  return h;
+}
+
 // ─── /sensors  RS485 SENSOR LIST ────────────────────────────────────────────
 static String sensorsPage(ModuleConfig& cfg) {
   String h = FPSTR(NAV);
@@ -396,7 +414,7 @@ static String sensorsPage(ModuleConfig& cfg) {
   h += "<p class='small'>Any Modbus RTU sensor on the RS485 bus. Don't know its slave ID/register? Use "
        "\"Probe Now\" below to check, or \"Auto-Detect &amp; Enable\" to find new sensors.</p>";
   h += "<div class='card' style='border-color:#27ae60'><b>&#9889; Auto-Detect &amp; Enable</b><br>"
-       "<span class='small'>Scans addresses 1-16, auto-enables new sensors with starter defaults (fc=03). "
+       "<span class='small'>Scans addresses 2-16, auto-enables new sensors with starter defaults (fc=03). "
        "Manual only — press the button below.</span><br><br>"
        "<button type='button' class='btn-green' onclick='autoDetectEnable()' id='adeBtn'>&#9889; Auto-Detect &amp; Enable Now</button>"
        "<div id='adeResult' class='small' style='margin-top:8px'></div></div>";
@@ -414,7 +432,7 @@ static String sensorsPage(ModuleConfig& cfg) {
     h += "<div><label>Kind</label><input name='s" + String(i) + "kd' value='" + _esc(s.kind) + "' placeholder='e.g. pressure'></div>";
     h += "<div><label>Unit</label><input name='s" + String(i) + "ut' value='" + _esc(s.unit) + "' placeholder='e.g. psi'></div></div>";
     h += "<div class='grid4'>";
-    h += "<div><label>Slave ID (1-247)</label><input name='s" + String(i) + "sid' type='number' min='1' max='247' value='" + String(s.slaveId) + "'></div>";
+    h += "<div><label>Slave ID (2-247)</label><input name='s" + String(i) + "sid' type='number' min='2' max='247' value='" + String(s.slaveId) + "'></div>";
     h += "<div><label>Function Code</label><select name='s" + String(i) + "fc'>";
     h += "<option value='3'" + String(s.funcCode == 3 ? " selected" : "") + ">03 - Read Holding Regs</option>";
     h += "<option value='4'" + String(s.funcCode == 4 ? " selected" : "") + ">04 - Read Input Regs</option>";
@@ -547,7 +565,7 @@ function autoBaud(i){
 function autoDetectEnable(){
   let btn=document.getElementById('adeBtn'); let box=document.getElementById('adeResult');
   btn.disabled=true; btn.textContent='Scanning...';
-  box.textContent='Scanning addresses 1-16...';
+  box.textContent='Scanning addresses 2-16...';
   fetch('/api/modbus/autodetect-enable?max=16',{method:'POST'}).then(r=>r.json()).then(d=>{
     btn.disabled=false; btn.innerHTML='&#9889; Auto-Detect &amp; Enable Now';
     if(d.newCount>0){ box.innerHTML = '<span class="ok">Found and enabled '+d.newCount+' new sensor(s).</span> Reloading...'; setTimeout(()=>location.reload(),1200); }
@@ -970,7 +988,7 @@ static void handleModbusProbe() {
 // included before this file — no forward decl needed here.
 static void handleAutoDetectEnable() {
   int maxAddr = _p("max").isEmpty() ? 16 : _p("max").toInt();
-  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr < SENSOR_MIN_SLAVE_ID) maxAddr = SENSOR_MIN_SLAVE_ID;
   if (maxAddr > 247) maxAddr = 247;
 
   int newCount = 0;
@@ -1177,6 +1195,17 @@ static void handleConfig() {
 }
 
 // Saves the whole RS485 sensor list from /sensors' single shared form.
+static void handleModbusLive() {
+  DynamicJsonDocument doc(2048); JsonArray a=doc.createNestedArray("channels");
+  for(int i=0;i<MAX_MODBUS_CHANNELS;i++){if(!_cfg->modbusBoard.channels[i].enabled)continue;JsonObject o=a.createNestedObject();o["ch"]=i;o["name"]=_cfg->modbusBoard.channels[i].name;o["kind"]=_cfg->modbusBoard.channels[i].kind;o["unit"]=_cfg->modbusBoard.channels[i].unit;o["ma"]=modbusReadings[i].hasValue?modbusReadings[i].mA:(float)0;o["value"]=modbusReadings[i].hasValue?modbusReadings[i].value:(float)0;if(!modbusReadings[i].hasValue){o["ma"]=nullptr;o["value"]=nullptr;}o["status"]=modbusReadings[i].status;}
+  String out;serializeJson(doc,out);_srv->send(200,"application/json",out);
+}
+static void handleModbusSave() {
+  _cfg->modbusBoard.enabled=_srv->hasArg("enabled"); if(_srv->hasArg("boardType"))_cfg->modbusBoard.boardType=_srv->arg("boardType");
+  for(int i=0;i<MAX_MODBUS_CHANNELS;i++){String p="mb"+String(i);auto& c=_cfg->modbusBoard.channels[i];c.enabled=_srv->hasArg((p+"en").c_str());if(_srv->hasArg((p+"nm").c_str()))c.name=_srv->arg((p+"nm").c_str());if(_srv->hasArg((p+"kd").c_str()))c.kind=_srv->arg((p+"kd").c_str());if(_srv->hasArg((p+"ut").c_str()))c.unit=_srv->arg((p+"ut").c_str());if(_srv->hasArg((p+"lo").c_str()))c.engMin=_srv->arg((p+"lo").c_str()).toFloat();if(_srv->hasArg((p+"hi").c_str()))c.engMax=_srv->arg((p+"hi").c_str()).toFloat();}
+  saveConfig(*_prefs,*_cfg);_srv->sendHeader("Location","/modbus");_srv->send(302,"text/plain","");
+}
+
 static void handleSensorsSave() {
   for (int i = 0; i < MAX_SENSORS; i++) {
     String pre = "s" + String(i);
@@ -1185,7 +1214,7 @@ static void handleSensorsSave() {
     if (_srv->hasArg((pre + "nm").c_str()))  s.name = _srv->arg((pre + "nm").c_str());
     if (_srv->hasArg((pre + "kd").c_str()))  s.kind = _srv->arg((pre + "kd").c_str());
     if (_srv->hasArg((pre + "ut").c_str()))  s.unit = _srv->arg((pre + "ut").c_str());
-    if (_srv->hasArg((pre + "sid").c_str())) s.slaveId = (uint8_t)constrain(_srv->arg((pre + "sid").c_str()).toInt(), 1, 247);
+    if (_srv->hasArg((pre + "sid").c_str())) s.slaveId = (uint8_t)constrain(_srv->arg((pre + "sid").c_str()).toInt(), SENSOR_MIN_SLAVE_ID, 247);
     if (_srv->hasArg((pre + "fc").c_str()))  s.funcCode = (uint8_t)_srv->arg((pre + "fc").c_str()).toInt();
     if (_srv->hasArg((pre + "reg").c_str())) s.regAddr = (uint16_t)strtol(_srv->arg((pre + "reg").c_str()).c_str(), nullptr, 0);
     if (_srv->hasArg((pre + "dt").c_str()))  s.dataType = (uint8_t)_srv->arg((pre + "dt").c_str()).toInt();
@@ -1321,7 +1350,7 @@ static void handleWifiForget() {
 // one specific slave ID (passed as a query param, doesn't need the full
 // saved sensor config) and reboots on success so Serial2 picks it up clean.
 static void handleModbusAutoDetect() {
-  uint8_t slaveId = _p("slaveId").isEmpty() ? 1 : _p("slaveId").toInt();
+  uint8_t slaveId = _p("slaveId").isEmpty() ? SENSOR_MIN_SLAVE_ID : constrain(_p("slaveId").toInt(), SENSOR_MIN_SLAVE_ID, 247);
   if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
     _srv->send(503, "application/json", "{\"ok\":false,\"error\":\"bus busy, try again\"}");
     return;
@@ -1385,6 +1414,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   };
   srv.on("/",         HTTP_GET, [noCacheHtml](){ noCacheHtml(200, cfgPage(*_cfg)); });
   srv.on("/sensors",  HTTP_GET, [noCacheHtml](){ noCacheHtml(200, sensorsPage(*_cfg)); });
+  srv.on("/modbus", HTTP_GET, [noCacheHtml](){ noCacheHtml(200, modbusPage(*_cfg)); });
   srv.on("/can",      HTTP_GET, [noCacheHtml](){ noCacheHtml(200, canPage(*_cfg)); });
   srv.on("/live",     HTTP_GET, [noCacheHtml](){ noCacheHtml(200, livePage()); });
   srv.on("/system",   HTTP_GET, [noCacheHtml](){ noCacheHtml(200, sysPage(*_cfg)); });
@@ -1392,6 +1422,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   // GET APIs
   srv.on("/api/status",       HTTP_GET, handleApiStatus);
   srv.on("/api/sensors/live", HTTP_GET, handleSensorsLive);
+  srv.on("/api/modbus/live", HTTP_GET, handleModbusLive);
   srv.on("/api/can/live",     HTTP_GET, handleCanLive);
   srv.on("/api/modbus/probe", HTTP_GET, handleModbusProbe);
   srv.on("/api/wifi/scan",    HTTP_GET, handleWifiScan);
@@ -1400,6 +1431,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   // POST APIs
   srv.on("/api/config",         HTTP_POST, handleConfig);
   srv.on("/api/sensors/save",   HTTP_POST, handleSensorsSave);
+  srv.on("/api/modbus/save", HTTP_POST, handleModbusSave);
   srv.on("/api/can/save",       HTTP_POST, handleCanSave);
   srv.on("/api/wifi/forget",    HTTP_POST, handleWifiForget);
   srv.on("/api/modbus/autodetect", HTTP_POST, handleModbusAutoDetect);

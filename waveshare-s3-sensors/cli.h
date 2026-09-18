@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.46 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.16.0 (see FW_VERSION in config.h)
 // =============================================================================
 // cli.h — Serial command-line interface, mirrors the web UI config pages.
 //
@@ -89,10 +89,10 @@ static void _cliBsHelp() {
   Serial.println(F(
     "\n"
     "=== bs — RS485 bus scan (live, doesn't touch saved config) ===\n"
-    "  bs [maxAddr]   scan addresses 1..maxAddr (default 16, max 247)\n"
+    "  bs [maxAddr]   scan addresses 2..maxAddr (default 16, max 247)\n"
     "                 at the CURRENT configured baud, print every hit\n"
-    "  e.g. bs         scan 1-16\n"
-    "       bs 50      scan 1-50\n"
+    "  e.g. bs         scan 2-16\n"
+    "       bs 50      scan 2-50\n"
   ));
 }
 
@@ -352,7 +352,7 @@ static void _cliCsSet(int i, const String& field, const String& val) {
   if (field == "name") s.name = val;
   else if (field == "kind") s.kind = val;
   else if (field == "unit") s.unit = val;
-  else if (field == "slave") s.slaveId = (uint8_t)constrain(val.toInt(), 1, 247);
+  else if (field == "slave") s.slaveId = (uint8_t)constrain(val.toInt(), SENSOR_MIN_SLAVE_ID, 247);
   else if (field == "fc") s.funcCode = (uint8_t)val.toInt();
   // BUG FIXED 2026-09-17 (Sarah's "spot sneaky bugs" pass): this used
   // .toInt(), which is decimal-only and truncates at the first non-digit
@@ -512,10 +512,10 @@ static void _cliBs(String* tok, int n) {
   if (n >= 2 && (tok[1] == "h" || tok[1] == "help")) { _cliBsHelp(); return; }
   int maxAddr = 16;
   if (n >= 2) maxAddr = tok[1].toInt();
-  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr < SENSOR_MIN_SLAVE_ID) maxAddr = SENSOR_MIN_SLAVE_ID;
   if (maxAddr > 247) maxAddr = 247;
 
-  Serial.printf("[cli] Scanning addresses 1-%d at %ld baud (current config, live bus)...\n",
+  Serial.printf("[cli] Scanning addresses 2-%d at %ld baud (current config, live bus)...\n",
     maxAddr, cfg.modbusBaud);
   if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
     _cliErr("bus busy, try again");

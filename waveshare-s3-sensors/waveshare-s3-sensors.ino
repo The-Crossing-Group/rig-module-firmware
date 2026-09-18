@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.46 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.16.0 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -87,6 +87,8 @@ SemaphoreHandle_t modbusBusMutex; // guards Serial2 (poll task vs. web diagnosti
 ModuleConfig cfg;
 SensorReading    sensorReadings[MAX_SENSORS];
 CanSignalReading canReadings[MAX_CAN_SIGNALS];
+ModbusChannelReading modbusReadings[MAX_MODBUS_CHANNELS];
+String modbusDetectedType = "unknown";
 
 WebServer webServer(80);
 
@@ -832,6 +834,12 @@ void pollTask(void* param) {
     cycleCount++;
     int okCount = 0, failCount = 0;
 
+    if (cfg.modbusBoard.enabled && xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      int boardRc = modbusPollBoard(cfg.modbusBoard, modbusReadings, modbusDetectedType);
+      xSemaphoreGive(modbusBusMutex);
+      if (boardRc != MB_OK) { for (int i=0;i<MAX_MODBUS_CHANNELS;i++) { if (cfg.modbusBoard.channels[i].enabled) modbusReadings[i].status="timeout"; modbusReadings[i].valid=false; } }
+    }
+
     for (int i = 0; i < MAX_SENSORS; i++) {
       SensorConfig& s = cfg.sensors[i];
       if (!s.enabled) continue;
@@ -1047,6 +1055,21 @@ String buildPayload(bool bufferedFlag) {
         // (rig-modules.js's fill-% widget, module-traces.js's axis-max
         // default both still just read `capacity` off this same payload).
         c["capacity"] = vol.capacity;
+      }
+    }
+
+    if (cfg.modbusBoard.enabled) {
+      doc["modbusBoardSlaveId"] = MODBUS_BOARD_SLAVE_ID;
+      doc["modbusBoardType"] = modbusDetectedType;
+      JsonArray mbArr = doc.createNestedArray("modbusChannels");
+      for (int i=0;i<MAX_MODBUS_CHANNELS;i++) {
+        if (!cfg.modbusBoard.channels[i].enabled) continue;
+        JsonObject c=mbArr.createNestedObject(); c["ch"]=i; c["source"]="modbus";
+        c["name"]=cfg.modbusBoard.channels[i].name; c["kind"]=cfg.modbusBoard.channels[i].kind; c["unit"]=cfg.modbusBoard.channels[i].unit;
+        c["ma"]=modbusReadings[i].hasValue ? modbusReadings[i].mA : (float)0;
+        c["value"]=modbusReadings[i].hasValue ? modbusReadings[i].value : (float)0;
+        if (!modbusReadings[i].hasValue) { c["ma"]=nullptr; c["value"]=nullptr; }
+        c["status"]=modbusReadings[i].status; c["slaveId"]=MODBUS_BOARD_SLAVE_ID; c["boardType"]=modbusDetectedType;
       }
     }
 

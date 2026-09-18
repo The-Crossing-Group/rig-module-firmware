@@ -68,11 +68,14 @@ each.
 
 ## Pages
 
+- **/modbus** — Eletechsup/Waveshare 4-20mA board at reserved slave ID 1
 - **/** — Module info, RS485 baud (shared bus-wide), CAN bitrate (always on), WiFi
 - **/sensors** — Add/edit/remove RS485 Modbus sensors (16 slots)
 - **/can** — Add/edit/remove CAN signals (16 slots)
 - **/live** — Live values table (sensors + CAN signals + system status)
 - **/system** — Firmware info, OTA, buffer, reboot/factory-reset
+
+The dedicated 4-20mA board is always configured at slave ID 1 on **/modbus**. Direct RS485 sensors on **/sensors** must use slave IDs 2-247; the sensor auto-detect and bus scan deliberately skip address 1.
 
 ## Workflow for a new sensor
 

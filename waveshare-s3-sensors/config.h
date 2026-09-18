@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.15.46
+// FIRMWARE VERSION: rig-module-sensors-1.16.0
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.15.46"
+#define FW_VERSION "rig-module-sensors-1.16.0"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -61,6 +61,9 @@
 // frames. Same reasoning as MAX_SENSORS — plenty of headroom, still small
 // enough to keep NVS usage and the config page sane.
 #define MAX_CAN_SIGNALS 16
+#define MAX_MODBUS_CHANNELS 8
+#define MODBUS_BOARD_SLAVE_ID 1
+#define SENSOR_MIN_SLAVE_ID 2
 
 // Modbus data types a register (or register pair) can be interpreted as.
 // Covers the overwhelming majority of real sensors: plain 16-bit values
@@ -90,7 +93,7 @@ struct SensorConfig {
   String name        = "";      // e.g. "Standpipe Pressure"
   String kind        = "";      // free text: pressure, temp, flow, level...
   String unit        = "";      // e.g. psi, degC, gpm
-  uint8_t slaveId    = 1;       // Modbus slave address, 1-247
+  uint8_t slaveId    = SENSOR_MIN_SLAVE_ID; // Direct sensors use 2-247; board address 1 is reserved
   uint8_t funcCode   = 3;       // 3 = Read Holding Registers, 4 = Read Input Registers
                                  // Default is 3, not 4: most real-world sensors we've hit
                                  // (SM7779 radar included) only answer FC03 and stay
@@ -170,6 +173,11 @@ struct SensorReading {
   unsigned long errorCount   = 0;
 };
 
+// Fixed 4-20mA channel configuration for the adapter board at slave 1.
+struct ModbusChannelConfig { bool enabled=true; String name=""; String kind=""; String unit=""; float engMin=0.0f; float engMax=1.0f; };
+struct ModbusBoardConfig { bool enabled=true; String boardType="auto"; ModbusChannelConfig channels[MAX_MODBUS_CHANNELS]; };
+struct ModbusChannelReading { bool valid=false; bool hasValue=false; float mA=0.0f; float value=0.0f; String status="stale"; };
+
 // One independently-configured CAN signal — a byte range extracted from
 // frames matching a given CAN ID, interpreted as a value. Same idea as a
 // Modbus sensor but pulling from the CAN bus instead of RS485. Left empty/
@@ -241,6 +249,12 @@ struct SensorConfigPacked {
   float    tankHeightM;
   char     capacityUnit[SENSOR_STR_LEN];
 };
+
+#define MODBUS_STR_LEN 32
+struct ModbusChannelPacked { bool enabled; char name[MODBUS_STR_LEN]; char kind[MODBUS_STR_LEN]; char unit[MODBUS_STR_LEN]; float engMin; float engMax; };
+struct ModbusBoardPacked { bool enabled; char boardType[MODBUS_STR_LEN]; ModbusChannelPacked channels[MAX_MODBUS_CHANNELS]; };
+static void packModbus(const ModbusBoardConfig& b, ModbusBoardPacked& p) { p.enabled=b.enabled; strncpy(p.boardType,b.boardType.c_str(),MODBUS_STR_LEN-1); p.boardType[MODBUS_STR_LEN-1]=0; for(int i=0;i<MAX_MODBUS_CHANNELS;i++){const auto& c=b.channels[i];auto& q=p.channels[i];q.enabled=c.enabled;strncpy(q.name,c.name.c_str(),MODBUS_STR_LEN-1);q.name[MODBUS_STR_LEN-1]=0;strncpy(q.kind,c.kind.c_str(),MODBUS_STR_LEN-1);q.kind[MODBUS_STR_LEN-1]=0;strncpy(q.unit,c.unit.c_str(),MODBUS_STR_LEN-1);q.unit[MODBUS_STR_LEN-1]=0;q.engMin=c.engMin;q.engMax=c.engMax;}}
+static void unpackModbus(const ModbusBoardPacked& p, ModbusBoardConfig& b) { b.enabled=p.enabled;b.boardType=String(p.boardType);if(b.boardType.isEmpty())b.boardType="auto";for(int i=0;i<MAX_MODBUS_CHANNELS;i++){const auto& q=p.channels[i];auto& c=b.channels[i];c.enabled=q.enabled;c.name=String(q.name);c.kind=String(q.kind);c.unit=String(q.unit);c.engMin=q.engMin;c.engMax=q.engMax;}}
 
 struct CanSignalConfigPacked {
   bool     enabled;
@@ -411,6 +425,7 @@ struct ModuleConfig {
   uint32_t nvsEraseSelfHealCount = 0;
 
   SensorConfig    sensors[MAX_SENSORS];
+  ModbusBoardConfig modbusBoard;
   CanSignalConfig canSignals[MAX_CAN_SIGNALS];
 };
 
@@ -484,7 +499,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
         c.sensors[i].name        = p.getString((pre + "nm").c_str(), "");
         c.sensors[i].kind        = p.getString((pre + "kd").c_str(), "");
         c.sensors[i].unit        = p.getString((pre + "ut").c_str(), "");
-        c.sensors[i].slaveId     = (uint8_t)p.getInt((pre + "sid").c_str(), 1);
+        c.sensors[i].slaveId     = (uint8_t)p.getInt((pre + "sid").c_str(), SENSOR_MIN_SLAVE_ID);
         c.sensors[i].funcCode    = (uint8_t)p.getInt((pre + "fc").c_str(), 3);
         c.sensors[i].regAddr     = (uint16_t)p.getInt((pre + "reg").c_str(), 0);
         c.sensors[i].dataType    = (uint8_t)p.getInt((pre + "dt").c_str(), MB_UINT16);
@@ -516,6 +531,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
     }
   }
 
+  { ModbusBoardPacked packed; size_t got=p.getBytes("modbusBlob",&packed,sizeof(packed)); if(got==sizeof(packed)) unpackModbus(packed,c.modbusBoard); }
   {
     CanSignalConfigPacked packed[MAX_CAN_SIGNALS];
     size_t got = p.getBytes("canBlob", packed, sizeof(packed));
@@ -645,6 +661,7 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
         "— partition may be full/corrupt.\n", (unsigned)wrote, (unsigned)sizeof(packed));
     }
   }
+  { ModbusBoardPacked packed; packModbus(c.modbusBoard,packed); p.putBytes("modbusBlob",&packed,sizeof(packed)); }
   {
     CanSignalConfigPacked packed[MAX_CAN_SIGNALS];
     for (int i = 0; i < MAX_CAN_SIGNALS; i++) packCanSignal(c.canSignals[i], packed[i]);

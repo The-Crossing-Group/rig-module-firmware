@@ -379,6 +379,15 @@ int modbusPollSensor(SensorConfig& s, float& rawOut, float& valueOut, bool verbo
   return MB_OK;
 }
 
+
+static float modbusBoardRawDivisor(const String& type) { return type == "amidj14" ? 100.0f : 1000.0f; }
+static int modbusPollBoard(ModbusBoardConfig& b, ModbusChannelReading* out, String& detectedType) {
+  if (!b.enabled) return MB_TIMEOUT; uint16_t product[1]={0};
+  if (b.boardType == "auto") { if(modbusReadRegs(MODBUS_BOARD_SLAVE_ID,3,0x00F7,1,product)==MB_OK) detectedType=(product[0]==2814)?"amidj14":"waveshare"; else detectedType="waveshare"; } else detectedType=b.boardType;
+  int count=detectedType=="amidj14"?6:8; uint16_t raw[MAX_MODBUS_CHANNELS]={0}; int rc=modbusReadRegs(MODBUS_BOARD_SLAVE_ID,4,0,count,raw); if(rc!=MB_OK)return rc; float div=modbusBoardRawDivisor(detectedType);
+  for(int i=0;i<MAX_MODBUS_CHANNELS;i++){if(i>=count||!b.channels[i].enabled)continue;auto&r=out[i];r.valid=true;r.hasValue=true;r.mA=raw[i]/div;r.value=b.channels[i].engMin+(r.mA-4.0f)*(b.channels[i].engMax-b.channels[i].engMin)/16.0f;r.status="ok";} return MB_OK;
+}
+
 // =============================================================================
 // BAUD RATE AUTO-DETECTION / BUS SCAN (diagnostics)
 //
@@ -429,7 +438,7 @@ long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud) {
   return -1;
 }
 
-// Scans slave addresses 1..maxAddr for anything that responds to a basic
+// Scans slave addresses 2..maxAddr for anything that responds to a basic
 // FC04 (then FC03) probe of register 0. Calls onFound(addr, funcCode) for
 // each hit, funcCode being whichever (4 or 3) actually got a valid reply.
 // This is a synchronous, blocking scan (a few hundred ms per address at
@@ -457,7 +466,7 @@ long modbusAutoDetectBaud(uint8_t slaveId, uint32_t originalBaud) {
 template<typename FoundFn>
 void modbusScanSlaves(int maxAddr, FoundFn onFound, int timeoutMs = 700, bool verbose = true) {
   uint16_t regs[1];
-  for (int addr = 1; addr <= maxAddr; addr++) {
+  for (int addr = SENSOR_MIN_SLAVE_ID; addr <= maxAddr; addr++) {
     if (verbose) Serial.printf("[Scan] Probing addr %d...\n", addr);
     bool found = false;
     int foundFc = 4;
@@ -488,7 +497,7 @@ void modbusScanSlaves(int maxAddr, FoundFn onFound, int timeoutMs = 700, bool ve
 // why that condition matters (shared-bus baud constraint).
 // =============================================================================
 
-// Fast path: scan addresses 1..maxAddr at whatever baud is CURRENTLY
+// Fast path: scan addresses 2..maxAddr at whatever baud is CURRENTLY
 // active and fill in/enable slots for new hits. Does not touch any slot
 // that's already enabled (so on-purpose disabled sensors that still
 // happen to be wired up and answering aren't silently re-enabled/reset).
@@ -564,7 +573,7 @@ static int _mbScanAndFillAtCurrentBaud(ModuleConfig& cfg, int maxAddr) {
 // time sane — every extra baud tried multiplies the cost by ~maxAddr*2
 // timeouts if the bus is genuinely empty).
 int modbusAutoDetectAndEnable(ModuleConfig& cfg, int maxAddr = 16) {
-  if (maxAddr < 1) maxAddr = 1;
+  if (maxAddr < SENSOR_MIN_SLAVE_ID) maxAddr = SENSOR_MIN_SLAVE_ID;
   if (maxAddr > 247) maxAddr = 247;
 
   int newCount = _mbScanAndFillAtCurrentBaud(cfg, maxAddr);
