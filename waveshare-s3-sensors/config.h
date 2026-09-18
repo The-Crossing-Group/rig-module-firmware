@@ -174,13 +174,18 @@ struct SensorReading {
 };
 
 // Fixed 4-20mA channel configuration for the adapter board at slave 1.
-struct ModbusChannelConfig { bool enabled=true; String name=""; String kind=""; String unit=""; float engMin=0.0f; float engMax=1.0f; };
+// enabled=false by default (2026-09-18, Sarah: match the RS485/CAN
+// convention) — slots start empty/unchecked, same as SensorConfig and
+// CanSignalConfig above, rather than assuming all 8 are wired up.
+struct ModbusChannelConfig { bool enabled=false; String name=""; String kind=""; String unit=""; float engMin=0.0f; float engMax=1.0f; };
 // Digital I/O config for the adapter board — only real on the AMIDJ14
 // variant (4 DI + 4 DO). The Waveshare 8AI variant has no DI/DO hardware
 // at all; gated at poll/render time on the auto-detected board type
 // (modbusDetectedType == "amidj14"), same "don't report phantom hardware"
 // convention as boardProfile.hasDigitalIO in the analog-board variant.
-struct ModbusDigitalConfig { bool enabled=true; String name=""; };
+// enabled=false by default, same reasoning/convention as ModbusChannelConfig
+// above — check whichever DI/DO are actually wired up.
+struct ModbusDigitalConfig { bool enabled=false; String name=""; };
 struct ModbusBoardConfig {
   bool enabled=true;
   String boardType="auto";
