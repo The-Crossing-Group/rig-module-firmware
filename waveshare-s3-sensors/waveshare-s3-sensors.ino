@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.3 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.4 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -49,6 +49,7 @@
 #include <NTPClient.h>
 #include <time.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <nvs_flash.h>
 #include <nvs.h>
 
@@ -57,6 +58,12 @@
 #include "modbus.h"
 #include "can.h"
 #include "scaling.h"
+
+// Forward declaration — full implementation is below (near the other boot-
+// time static helpers), but webui.h (included next) also needs to call this
+// from its Factory Reset handler, and Arduino's auto-prototype generation
+// only scans the .ino, not headers it includes.
+static bool formatLittleFSWithWatchdog();
 
 #include "webui.h"
 #include "cli.h"
@@ -204,6 +211,55 @@ static void restoreVerboseRadioLogs() {
 }
 
 // =============================================================================
+// LITTLEFS FORMAT WATCHDOG (2026-09-22)
+// Root-caused in the field: on at least one board (different flash chip
+// than usual — 8MB instead of 16MB, so likely a different vendor/batch
+// even though it's the same ESP32-S3 part), LittleFS.format() called
+// during the "mount failed twice, format as last resort" boot path (see
+// setup() below) hung FOREVER — no crash, no reset, no serial output ever
+// again, board completely dead until a manual power cycle. Every power
+// cycle just re-hit the exact same hang, because the filesystem it's
+// trying to format never finishes, so next boot mount fails again too.
+// Workaround at flash time: pre-format the partition on the PC with
+// mklittlefs + esptool (see delivery/format-littlefs.sh) so the on-device
+// format() is never actually reached in the first place.
+// This is the belt-and-suspenders fix for if it IS reached anyway (e.g. a
+// board that genuinely corrupts its filesystem later, in the field, with
+// no PC nearby to pre-format anything) — a one-shot hardware timer that
+// forces a clean reboot if format() hasn't returned within a generous
+// window, instead of the board sitting dead needing a manual power cycle.
+// A reboot after a failed/timed-out format just re-enters this same logic
+// next boot (mount fails -> retry -> format again) — not a full fix on
+// its own, but turns "dead forever" into "keeps retrying every ~20s",
+// which is recoverable without physical access to the board.
+static bool formatLittleFSWithWatchdog() {
+  const uint32_t FORMAT_TIMEOUT_MS = 20000;  // generous; real formats of
+                                              // our partition sizes take
+                                              // low single-digit seconds
+
+  esp_timer_handle_t rebootTimer = nullptr;
+  esp_timer_create_args_t timerArgs = {};
+  timerArgs.callback = [](void*) {
+    Serial.println("[BOOT] !!! LittleFS.format() did not return within "
+                   "20s — forcing reboot (format-hang watchdog, not a "
+                   "new failure — see comment above formatLittleFSWithWatchdog).");
+    esp_restart();
+  };
+  timerArgs.name = "fmtWdt";
+  if (esp_timer_create(&timerArgs, &rebootTimer) == ESP_OK) {
+    esp_timer_start_once(rebootTimer, (uint64_t)FORMAT_TIMEOUT_MS * 1000ULL);
+  }
+
+  bool ok = LittleFS.format();
+
+  if (rebootTimer) {
+    esp_timer_stop(rebootTimer);   // no-op if it already fired
+    esp_timer_delete(rebootTimer);
+  }
+  return ok;
+}
+
+// =============================================================================
 // SETUP
 // =============================================================================
 void setup() {
@@ -277,7 +333,7 @@ void setup() {
     delay(200);
     if (!LittleFS.begin(false)) {
       Serial.println("[BOOT] LittleFS still failing — FORMATTING (buffered data lost)");
-      LittleFS.format();
+      formatLittleFSWithWatchdog();
       if (!LittleFS.begin(true)) {
         Serial.println("[BOOT] !!! LittleFS unusable even after format — "
                        "buffering and OTA disabled, rest of firmware continues");

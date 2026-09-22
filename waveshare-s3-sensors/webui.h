@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.3 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.4 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -1715,7 +1715,10 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
       mbBaudStillPresent ? "TRUE (BUG)" : "false",
       anyKeyStillPresent ? "TRUE (BUG — clear() did not actually clear)" : "false");
 
-    bool fsOk = LittleFS.format();
+    // formatLittleFSWithWatchdog() (waveshare-s3-sensors.ino) forces a
+    // reboot if format() hangs instead of leaving the board dead — see
+    // that function's header comment for the field incident this fixes.
+    bool fsOk = formatLittleFSWithWatchdog();
     Serial.printf("[FactoryReset] LittleFS.format()=%s\n", fsOk ? "true" : "FALSE");
 
     DynamicJsonDocument doc(256);

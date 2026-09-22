@@ -216,6 +216,39 @@ content was right; its delivery was catastrophic:
 Verified compiling clean with `arduino-cli` against these settings — 40%
 program storage, 17% dynamic memory, zero warnings.
 
+### LittleFS.format() hang (2026-09-22) — why there's a format watchdog
+
+On at least one board — same firmware, but an **8MB flash chip** instead
+of the usual 16MB (still shows up as the same ESP32-S3 QFN56 part in
+`esptool`'s chip ID, so this is a different flash vendor/batch, not a
+different board model) — the on-device `LittleFS.format()` call in
+`setup()`'s "mount failed twice, format as last resort" path hung
+**forever**. No crash, no reset, no serial output ever again — board
+completely dead until a manual power cycle. Every subsequent boot hit
+the exact same hang again, because the filesystem never actually
+finished formatting, so mount kept failing.
+
+**Fix at flash time (use this first):** pre-format the LittleFS
+partition on your PC with `mklittlefs` + `esptool`, so the on-device
+`format()` call is never actually reached:
+
+```
+delivery/format-littlefs.sh          # auto-detects port + partition offset
+```
+
+Run this **after** a normal Arduino IDE Upload (it reads the real
+partition table off the device, so the table has to already be written).
+Then reset the board — it mounts clean on first boot, no format needed.
+
+**Fix in firmware (belt-and-suspenders):** `formatLittleFSWithWatchdog()`
+(v1.19.4+) wraps every `LittleFS.format()` call with a one-shot 20-second
+hardware timer. If format hasn't returned by then, it forces `esp_restart()`
+instead of leaving the board dead. This doesn't fully fix a board whose
+filesystem genuinely can't format (it'll just keep retrying every ~20s on
+each boot), but it turns "dead forever, needs someone to notice and
+power-cycle it" into "self-recovers into a retry loop" — much better for
+anything not sitting next to you on a desk.
+
 ## Entering Download Mode (if flashing hangs)
 
 Hold **BOOT**, tap **RESET**, release **RESET**, then release **BOOT**.
