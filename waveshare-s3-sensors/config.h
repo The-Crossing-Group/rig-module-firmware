@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.2
+// FIRMWARE VERSION: rig-module-sensors-1.19.3
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.19.2"
+#define FW_VERSION "rig-module-sensors-1.19.3"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -743,7 +743,15 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
         "— partition may be full/corrupt.\n", (unsigned)wrote, (unsigned)sizeof(packed));
     }
   }
-  { static ModbusBoardPacked packed; packModbus(c.modbusBoard,packed); p.putBytes("modbusBlob",&packed,sizeof(packed)); }
+  {
+    static ModbusBoardPacked packed;
+    packModbus(c.modbusBoard, packed);
+    size_t wrote = p.putBytes("modbusBlob", &packed, sizeof(packed));
+    if (wrote != sizeof(packed)) {
+      Serial.printf("[Config] WARNING: NVS write FAILED for modbusBlob (wrote=%u, expected=%u) "
+        "— partition may be full/corrupt.\n", (unsigned)wrote, (unsigned)sizeof(packed));
+    }
+  }
   {
     static CanSignalConfigPacked packed[MAX_CAN_SIGNALS];
     for (int i = 0; i < MAX_CAN_SIGNALS; i++) packCanSignal(c.canSignals[i], packed[i]);
