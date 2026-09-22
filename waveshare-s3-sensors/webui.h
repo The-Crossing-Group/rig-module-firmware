@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.4 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.5 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -400,7 +400,9 @@ window.addEventListener('DOMContentLoaded', function(){ fillSsidOptions([]); });
 static String modbusPage(ModuleConfig& cfg) {
   String h=FPSTR(NAV); h += "<div class='page'><h2>&#9881; Modbus 4-20mA</h2>";
   h += "<p class='small'>Eletechsup/Waveshare analog input board. This board is always slave ID <b>1</b>; direct RS485 sensors use IDs 2-247.</p>";
-  h += "<form method='POST' action='/api/modbus/save'><div class='card'><label><input type='checkbox' name='enabled'" + String(cfg.modbusBoard.enabled?" checked":"") + "> Enable Modbus board at slave ID 1</label>";
+  h += "<form method='POST' action='/api/modbus/save'>";
+  h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save Modbus Settings</button>";
+  h += "<div class='card'><label><input type='checkbox' name='enabled'" + String(cfg.modbusBoard.enabled?" checked":"") + "> Enable Modbus board at slave ID 1</label>";
   h += "<label>Board type</label><select id='mbBoardType' name='boardType'>";
   h += "<option value='auto'"+String(cfg.modbusBoard.boardType=="auto"?" selected":"")+">Auto-detect</option>";
   for (auto& p : MODBUS_BOARD_PRESETS) {
