@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.5 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.6 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -736,6 +736,16 @@ function fetchLive(){
       s += '<td class="'+cls+'">'+ds+'</td></tr>';
     });
     s += '</table>';
+    if (d.modbusChannels && d.modbusChannels.length) {
+      s += '<h3>Modbus 4-20mA Board</h3><table><tr><th>Name</th><th>Kind</th><th>Channel</th><th>Value</th><th>mA</th><th>Status</th></tr>';
+      d.modbusChannels.forEach(c=>{
+        let cls = c.status==='ok'?'ok':(c.status==='stale'?'stale':'timeout');
+        s += '<tr><td>'+(c.name||'')+'</td><td>'+(c.kind||'')+'</td><td>AI'+(c.ch+1)+'</td>';
+        s += '<td>'+(c.value!=null?c.value+' '+(c.unit||''):'--')+'</td>';
+        s += '<td>'+(c.ma!=null?c.ma+'mA':'--')+'</td><td class="'+cls+'">'+c.status+'</td></tr>';
+      });
+      s += '</table>';
+    }
     if (d.canEnabled) {
       s += '<h3>CAN Signals</h3><table><tr><th>Name</th><th>Kind</th><th>CAN ID</th><th>Value</th><th>Status</th></tr>';
       (d.canSignals||[]).forEach(c=>{
