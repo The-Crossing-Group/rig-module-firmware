@@ -249,6 +249,43 @@ each boot), but it turns "dead forever, needs someone to notice and
 power-cycle it" into "self-recovers into a retry loop" — much better for
 anything not sitting next to you on a desk.
 
+### Arduino IDE 1.8.19 ctags build corruption (2026-09-23) — why the forward declaration lives in config.h
+
+`formatLittleFSWithWatchdog()` needs a forward declaration in the `.ino`
+so `webui.h`'s Factory Reset handler (included earlier) can call it — the
+real implementation is defined further down, near the other boot-time
+static helpers. In v1.19.4-1.19.6 that forward declaration was placed as
+a bare `static bool formatLittleFSWithWatchdog();` line floating between
+two `#include` blocks in the `.ino`, right before `#include "webui.h"`.
+
+On Arduino IDE 1.8.19 (legacy Java IDE + `arduino-builder`, not `arduino-cli`
+or IDE 2.x), this caused compile failures that made **no sense** at first
+glance: syntax errors deep inside stock, unmodified ESP32 core system
+headers (`esp_interface.h`, reached via `WiFi.h`), like
+`error: expected unqualified-id before 'extern'`. Ruled out a corrupted
+core install by reproducing identically on a completely clean install of
+BOTH core 3.2.0 and 3.3.12 — same error either way. The one hard data
+point: the previous firmware version (before this forward declaration was
+added) compiled and uploaded fine on the same machine, same IDE, same
+core. So it was the code, not the toolchain.
+
+Root cause: IDE 1.8.19's `arduino-builder` auto-generates function
+prototypes via a `ctags` scan of the sketch and splices them into the
+`.ino` at a computed insertion point before the real compile. An unusual
+bare forward declaration sitting mid-file — between `#include` lines,
+not near the top or bottom — is enough to throw off that insertion-point
+calculation on this toolchain, corrupting the resulting build in ways
+that surface as nonsense syntax errors in completely unrelated headers
+rather than anything pointing at the actual line.
+
+**Fix (v1.19.7):** moved the forward declaration into `config.h` (appended
+at the very end, well clear of everything else) instead of leaving it
+loose in the `.ino`. `config.h` is included before `webui.h`, so the
+declaration is still visible where it's needed — same single translation
+unit, same effect, just not sitting somewhere that confuses ctags.
+**Lesson: don't add bare forward declarations directly in the `.ino`
+between `#include` blocks — put them in a header instead.**
+
 ## Entering Download Mode (if flashing hangs)
 
 Hold **BOOT**, tap **RESET**, release **RESET**, then release **BOOT**.

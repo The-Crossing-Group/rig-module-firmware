@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.6 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.7 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -59,11 +59,8 @@
 #include "can.h"
 #include "scaling.h"
 
-// Forward declaration — full implementation is below (near the other boot-
-// time static helpers), but webui.h (included next) also needs to call this
-// from its Factory Reset handler, and Arduino's auto-prototype generation
-// only scans the .ino, not headers it includes.
-static bool formatLittleFSWithWatchdog();
+// formatLittleFSWithWatchdog() is forward-declared in config.h (included
+// above) — see that comment for why it's not floating loose here anymore.
 
 #include "webui.h"
 #include "cli.h"

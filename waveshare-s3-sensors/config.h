@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.6
+// FIRMWARE VERSION: rig-module-sensors-1.19.7
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.19.6"
+#define FW_VERSION "rig-module-sensors-1.19.7"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -1016,3 +1016,16 @@ bool configFromJson(JsonDocument& doc, ModuleConfig& c) {
 
   return true;
 }
+
+// Forward declaration — full implementation lives in the .ino (near the
+// other boot-time static helpers), but webui.h also needs to call this
+// from its Factory Reset handler. Declared here (not floating loose
+// between #include blocks in the .ino) because a bare forward declaration
+// sitting mid-file in the .ino confuses Arduino IDE 1.8.19's ctags-based
+// auto-prototype-generation on some toolchains — it can miscalculate its
+// insertion point and corrupt the build in ways that surface as bogus
+// syntax errors deep inside unrelated system headers (2026-09-23 — traced
+// after ruling out a corrupted ESP32 core install; reproduced identically
+// on a completely fresh core 3.2.0 AND 3.3.12 install, so it wasn't the
+// toolchain — moving this declaration into a header fixed it).
+static bool formatLittleFSWithWatchdog();
