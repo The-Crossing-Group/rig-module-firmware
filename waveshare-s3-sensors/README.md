@@ -1,6 +1,6 @@
 # Rig Module Firmware — Waveshare ESP32-S3-RS485-CAN (Direct Sensors)
 
-**Version:** rig-module-sensors-1.0.0
+**Version:** rig-module-sensors-1.15.46
 **Board:** Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, screw terminal)
 **Target:** Any Modbus RTU sensor wired directly to RS485 — pressure, temp,
 flow, level, whatever. Also brings up CAN (unused on the sibling
@@ -140,7 +140,9 @@ needed**:
 - Each enabled sensor appears under `channels[]` (keyed by its slot index,
   not a fixed hardware channel number) with `name`/`kind`/`unit`/`value`/
   `status`, plus an optional nested `volume` object if tank-volume is
-  enabled on that sensor.
+  enabled on that sensor (see "Tank Volume" below for the current
+  length/width/height model — this replaced an earlier
+  capacity-number/two-point-calibration design, v1.15.44/46).
 - CAN signals appear under a separate `canSignals[]` array, plus top-level
   `canEnabled`/`canFrameRate`/`canFrameTotal`.
 - **CANopen Bridge mode only:** raw captured frames also appear under a
@@ -149,6 +151,37 @@ needed**:
   A receiving Pi app that doesn't know this key can just ignore it (see
   ditchwitch-logger's `local_server.py` for the one app that currently
   reads it).
+
+## Tank Volume (v1.15.46+)
+
+Per-sensor checkbox on `/sensors`: **"Compute Tank Volume from this
+sensor"**. Model assumes a top-mounted distance sensor (e.g. radar)
+reading straight down — a closer reading means more water. Three plain
+tape-measure physical dimensions, no calibration step:
+
+- **Tank Length (m)** and **Tank Width (m)** — the tank's rectangular
+  footprint.
+- **Tank Height (m)** — the sensor's mounting height above the tank
+  bottom (i.e. the reading when the tank is completely empty).
+- **Output Unit** — `m³` or `gal`.
+
+```
+waterHeightM = clamp(tankHeightM - reading.value, 0, tankHeightM)
+volume       = tankLengthM * tankWidthM * waterHeightM
+```
+
+This replaced two earlier designs on the same day (2026-09-17): a single
+typed-in **Capacity** number (replaced by real Length × Width geometry),
+then a **Value @ Empty / Value @ Full** two-point calibration (removed
+entirely — Sarah didn't need/understand it; Tank Height alone is enough
+once the sensor genuinely reads a physical air-gap distance). Old `cap`/
+`vz`/`vm` NVS keys are intentionally not read back on upgrade — they
+don't mean anything under this model, re-enter the three fields instead.
+
+The wire payload's `capacity` field (consumed by rig-pi-logger's fill-%
+widget) is now derived once from geometry (Length × Width × full Height)
+rather than stored directly, but keeps the same shape/meaning for
+existing Pi-side consumers.
 
 ## Hardware
 
