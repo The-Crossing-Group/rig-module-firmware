@@ -1,297 +1,227 @@
 # Rig Module Firmware
 
-**Version:** rig-module-1.7.0
-**Board:** LilyGo T-CAN485 / XY-32 CAN+RS485 (ESP32)
-**Target:** Waveshare Modbus RTU Analog Input 8CH **(B version)** or Eletechsup AMIDJ14 (6AI-4DO-4DI) — auto-detected, see below.
+Field instrumentation firmware for roaming/portable rig modules — tank
+levels, pump pressures, temperatures, flow, RPM, CAN signals, or anything
+else that can be read over RS485 (Modbus RTU) or CAN. Every module POSTs
+JSON telemetry to the Rig Pi Logger so it shows up on the rig UI with no
+per-sensor-kind code on either end.
+
+**This repo currently holds six sketches.** They are independently
+versioned and maintained — pick the one that matches your hardware and
+job, there is no single "the" firmware here.
 
 ---
 
-## Pi Host Auto-Discovery from Rig SSID (v1.7.0+)
+## ⚠️ Start Here — Which Folder Do I Want?
 
-Standard rig sites follow a fixed naming convention: WiFi SSID `rigNNN`
-(e.g. `rig132`) with the Pi/host PC always living at `192.168.NNN.10` on
-that rig's own subnet. With **Pi Host** left blank on `/config`, the
-module now derives that IP directly from whatever `rigNNN` SSID it's
-connected to — no typing, no mDNS round-trip needed, and it re-derives
-automatically if the same unit is later moved to a different rig.
-
-If the connected SSID doesn't match the `rigNNN` pattern (a non-standard
-network), this step is skipped entirely and Pi discovery falls through to
-the existing mDNS (`_rig-logger._tcp.local`) then `rig-logger.local`
-lookups, same as before. Setting Pi Host manually on `/config` always
-takes priority over all auto-discovery, standard or not.
-
----
-
-## Multi-Board Support (v1.5.0+)
-
-This firmware now auto-detects which analog-to-Modbus board is wired up —
-**no dropdown, jumper, or manual config needed.** At boot, it reads the
-board's "Product ID" special-function register (0x00F7) over Modbus and
-picks the matching channel count + raw-value scale:
-
-| Board | Product ID | Channels | Raw units |
+| Folder | Board | What it talks to | Status |
 |---|---|---|---|
-| Waveshare Modbus RTU Analog Input 8CH (B) | 2308 | 8 | µA (÷1000 = mA) |
-| Eletechsup AMIDJ14 (6AI-4DO-4DI) | 2814 | 6 | 0.01mA (÷100 = mA) |
+| **`waveshare-s3/`** | Waveshare ESP32-S3-RS485-CAN | One fixed analog-to-Modbus adapter board (Waveshare 8AI (B) or Eletechsup AMIDJ14), auto-detected | **Production** — current target for new fixed-adapter-board modules |
+| **`lilygo-t-can485/`** | LilyGo T-CAN485 (plain ESP32) | Same as `waveshare-s3/` | **Production**, bench-testing hardware port of `waveshare-s3/`. Same feature set/version, different pins. |
+| **`waveshare-s3-sensors/`** | Waveshare ESP32-S3-RS485-CAN | Up to 16 independent RS485 Modbus sensors directly (no fixed adapter board) + CAN (always on, listen-only or CANopen Bridge) | **Production**, most actively developed variant |
+| **`waveshare-s3-mudtank/`** | Waveshare ESP32-S3-RS485-CAN | Merges both approaches: fixed adapter board(s) **and** independent RS485 sensors **and** CAN, all at once | **Production** — use when one module genuinely needs both a fixed board and standalone sensors on the same bus |
+| **`lilygo-t-can485-mudtank/`** | LilyGo T-CAN485 (plain ESP32) | Same as `waveshare-s3-mudtank/` | **Production**, bench-testing hardware port of `waveshare-s3-mudtank/` |
+| **`sensor-debug/`** / **`sensor-debug-lilygo/`** | Waveshare ESP32-S3-RS485-CAN / LilyGo T-CAN485 | Nothing fixed — standalone RS485/Modbus debugging tool (bus scan, raw read/write, sniffer, bitscope) | **Debug tool**, not a telemetry firmware. Flash temporarily to dig into a misbehaving sensor, then flash the real firmware back. |
+| **`rig-module-firmware.ino`** (repo root) | LilyGo T-CAN485 | One fixed Waveshare 8AI board only | **Deprecated.** Stuck at v1.7.1, predates board auto-detect, AMIDJ14 digital I/O, RPM pulse counting, and every variant above. Superseded by `lilygo-t-can485/`. Kept only for reference against units already in the field running this exact image — do not build new modules on it. |
 
-If the Product ID read fails or returns an ID we don't recognize, the
-firmware falls back to the Waveshare profile (the original default before
-this detection existed), so nothing regresses for existing deployments.
+**New module build? Start with `waveshare-s3/`** (fixed adapter board
+only) or **`waveshare-s3-sensors/`** (direct Modbus sensors + CAN), or
+**`waveshare-s3-mudtank/`** if a job needs both at once. Use the matching
+`lilygo-t-can485*` port only for bench testing when the Waveshare board
+isn't on hand — they share the same `config.h`/`modbus.h`/`scaling.h`/
+`webui.h` byte-for-byte with their Waveshare sibling; only pins and the
+onboard WS2812 LED differ.
 
-Swap boards, reboot, done — same firmware image, same config UI, correct
-scaling either way. The detected board name + channel count is shown on
-the `/channels` and `/system` pages. Channels beyond a board's real count
-(e.g. ch 7-8 on the 6-channel AMIDJ14) are greyed out on `/channels` and
-omitted from the JSON payload sent to the Pi.
-
-Adding another board: add its Product ID / channel count / raw divisor to
-the `BoardProfile` table in `modbus.h` (`modbusDetectBoard()`) — that's the
-only place board-specific behavior lives.
-
----
-
-## Multi-Tank Support (v1.6.0+)
-
-Any number of channels on the same module can independently have "Compute
-Tank Volume" checked on `/channels` — e.g. two separate tanks wired to two
-channels of the same Waveshare/Modbus board. Each one gets its own linear
-level-to-volume map (`computeChannelVolume()` in `scaling.h`).
-
-Every channel with volume enabled carries its own `volume` (`{value, unit,
-status}`) + `capacity` field right on its entry in the JSON payload's
-`channels[]` array, and the `/live` page shows a **Volume column on the
-Channels table** (instead of a single tank card) so all configured tanks
-are visible at once, not just the first one found.
-
-The old top-level `derived.volume` + `capacity` fields are still sent
-(mirroring whichever channel is the first one with volume enabled) for any
-existing consumer that only expects a single tank per module — but with
-multiple tanks configured, the per-channel `volume` field is the complete,
-authoritative source.
+Each folder has its own `README.md` with full detail (features, pin
+maps, Arduino IDE board settings, API/payload shape). This top-level
+README only covers what's shared across all of them and the current
+state of the repo as a whole.
 
 ---
 
-## X-Rig-Token Self-Heal (v1.6.1)
+## Shared Design Principles
 
-`X-Rig-Token` (the header the Pi logger checks for auth) defaults to the
-shared rig password (`7804991970`) out of the box, but a unit that had it
-saved as an empty string in NVS (e.g. from a very early config save, or an
-accidental clear on `/config`) would load that blank value forever and
-silently fail to auth against the Pi — no error on the module side, the Pi
-would just reject/ignore its posts.
-
-Fixed at both ends: `loadConfig()` now re-applies the shared default if the
-saved value is empty (self-heals any unit already stuck with a blank
-token, no manual re-entry needed), and `/config`'s save handler refuses to
-persist an empty token going forward. Still fully editable to any other
-value on `/config` for a rig that needs a non-default token.
-
----
-
-## What This Is
-
-A **generic** field module for roaming/portable rig instrumentation — tank levels,
-pump pressures, temperatures, flow, RPM, or anything else on an 8-channel 4-20mA
-analog input board. Each unit shows up on the rig UI as a **generic device**
-(`RigModule` card, not a tank-specific one), identified by a unique
-`MODULE-ABC123` ID derived from its MAC address.
-
-**No tank/mud-weight logic lives on this firmware.** Each of the 8 channels is
-independently configured (name, kind, unit, mA-to-engineering scaling,
-calibration) and reported as a raw engineering value + status. Any
-higher-level interpretation — volume from level, mud weight from level +
-pressure, whatever — happens elsewhere (Pi / rig UI side), against these raw
-values. This keeps one firmware image usable for any sensor combination
-without recompiling.
-
----
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `rig-module-firmware.ino` | Main sketch — WiFi, Pi posting, buffer, OTA |
-| `config.h` | Config structs, NVS load/save |
-| `modbus.h` | Manual Modbus RTU over HardwareSerial (RS485) |
-| `scaling.h` | Raw → mA → engineering value per channel (generic, no kind-specific rounding) |
-| `webui.h` | 4-page WebServer UI + REST API (Config/Channels/Live/System — no separate WiFi page, that lives on Config) |
+- **Generic, not sensor-specific.** No tank/mud-weight/kind-specific
+  logic lives on any of these firmwares. Each channel or sensor slot is
+  independently configured (name, free-text kind, unit, scaling,
+  calibration) and reported as a raw engineering value + status.
+  Higher-level interpretation (volume from level, mud weight from level
+  + pressure, etc.) happens on the Pi/rig-UI side against these raw
+  values — this is what lets one firmware image serve any sensor
+  combination without recompiling.
+- **Plug-and-play WiFi.** On boot, if no WiFi is saved, each module first
+  auto-scans for a standard rig router (SSID `rigNNN`, e.g. `rig132`)
+  using the shared rig password. If none is found, it falls back to its
+  own setup AP (`RigModule-XXXXXX` / password `modulesetup`) for manual
+  config via `http://192.168.4.1/`.
+- **Pi auto-discovery, no typing required.** Modules find the Rig Pi
+  Logger in priority order: static `piHost` override on `/config` (if
+  set) → `rigNNN` SSID-derived IP (`192.168.NNN.10`) → mDNS
+  (`_rig-logger._tcp.local`) → `rig-logger.local` → (on the
+  `waveshare-s3-sensors` line) a bounded /24 subnet sweep as a last
+  resort. `/system` shows which method is currently active.
+- **Buffer, don't drop.** If the Pi is unreachable, samples buffer to
+  LittleFS (`/buffer.jsonl`, up to ~3 hours) and flush oldest-first on
+  reconnect.
+- **Module identity is fixed.** Every unit's `MODULE-ABC123` ID is
+  derived from its MAC address, never user-editable — so a unit stays
+  identifiable regardless of what it's measuring or where it's deployed.
+- **No GPIO for RPM.** Pulse Counter Mode (where supported) reads a
+  digital input over Modbus as fast as the bus allows — never a GPIO
+  interrupt. This was tried once and explicitly reverted; it is a hard
+  rule across every variant now.
+- **No FC06 (write single register) in production firmware.** Writing to
+  a sensor's own config registers corrupted an SM7779 radar sensor's
+  internal state during field debugging (2026-08-10/11). FC16 (write
+  multiple holding registers) is retained only for the Waveshare 8AI
+  board's documented mode-3/4-20mA channel-mode convention — never a
+  generic write path to arbitrary sensor config space. Register writes
+  for debugging/recovery belong in the `sensor-debug*` tools only, used
+  in isolation on one sensor at a time before it goes back on a shared
+  bus.
 
 ---
 
-## Required Libraries (install via Arduino Library Manager)
+## Communications Protocols
+
+### RS485 / Modbus RTU (bus side)
+
+- Manual Modbus RTU implemented directly over `HardwareSerial` with
+  DE/RE pin toggling (`modbus.h`) — no external Modbus library, avoids
+  DE-timing issues some libraries have.
+- Standard CRC16 Modbus framing, 8N1.
+- **Baud is never hardcoded.** Different adapter boards/sensors ship with
+  different factory defaults (Waveshare 8AI (B) = 9600bps, others vary).
+  On boot, if the configured baud gets no response, firmware probes every
+  standard rate (9600, 4800, 19200, 2400, 38400, 1200, 57600, 115200) and
+  adopts whichever answers. Re-runnable on demand from `/config`.
+- Tolerant reply parsing: accepts whatever function code/register count
+  a sensor actually answers with, and treats slave addresses 0/250 as
+  broadcast — a valid reply from an unexpected address is shown as data,
+  not rejected as an error.
+- Fixed-adapter-board variants auto-detect which board is wired up by
+  reading its Product ID register (0x00F7) at boot — no jumper/dropdown
+  needed (Waveshare 8AI (B) = ID 2308, 8ch, µA raw; Eletechsup AMIDJ14 =
+  ID 2814, 6ch + 4DI/4DO, 0.01mA raw). Unrecognized/failed reads fall
+  back to the Waveshare profile.
+- Direct-sensor variants (`waveshare-s3-sensors/`, `waveshare-s3-mudtank/`
+  and their LilyGo ports) are genuine Modbus RTU masters: each configured
+  sensor slot carries its own slave ID, register address, function code
+  (FC03/FC04 read), data type (uint16/int16/uint32/int32/float32), word
+  order, and scale/offset.
+- All RS485 devices on a given module — fixed board(s) and any
+  independent sensors — share **one** Serial2 bus at **one** baud rate.
+
+### CAN (where present)
+
+- Native ESP32/ESP32-S3 TWAI controller, no third-party CAN library.
+- Defaults to **listen-only** mode — these modules never transmit on the
+  CAN bus by default, purely a passive tap, so a mis-wired/mis-timed
+  module can't disrupt drill CAN traffic.
+- Raw frame capture ring buffer for live diagnostics, plus configurable
+  signal extraction (byte range + decode rule per CAN ID), same idea as
+  an RS485 sensor slot but sourced from CAN.
+- **CANopen Bridge mode** (`waveshare-s3-sensors/` only, v1.15+): switches
+  the controller to transmit-capable (`TWAI_MODE_NORMAL`) to send a real
+  CANopen bring-up sequence (SYNC/baud-detect + NMT Start) for
+  factory-silent devices like the ditchwitch-logger project's EPC
+  carriage-position encoder. Self-heals/retries every 30s if no traffic
+  is seen. Decode of raw frames happens on the Pi, never on the module.
+- Boot order matters: CAN initializes **after** WiFi/AP and the web
+  server are already up — network access is never gated behind CAN
+  hardware coming up successfully.
+
+### Wire format — Pi ingest
+
+All production variants POST to the same endpoint and shape:
+
+```
+POST http://<pi-host>:8080/api/rig/module
+Content-Type: application/json
+```
+
+Common top-level fields: `moduleId`, `type` (defaults `"generic"`),
+`name`, `moduleName`, `ip`, `fw` (firmware version string), `uptimeS`,
+`rssi`, `buffered`, `ts`. Per-channel/sensor data lives under
+`channels[]` (`name`/`kind`/`unit`/`value`/`status`, plus an optional
+nested `volume` object when tank-volume is enabled on that channel).
+Variant-specific additions layer on top without changing this base
+shape, so the Pi's ingest and rig UI need no per-variant code:
+
+- `extraBoards[]` — additional fixed adapter boards on `/advanced`
+  (own `channels`/`digitalInputs`/`digitalOutputs`).
+- `digitalInputs[]` / `digitalOutputs[]` — AMIDJ14 digital I/O, with
+  `.rpm = {value, status}` on any DI running Pulse Counter Mode.
+- `canEnabled`, `canFrameRate`, `canFrameTotal`, `canSignals[]` — CAN
+  telemetry on variants with CAN brought up.
+- `canFrames[]` — raw captured CAN frames (`id`/`extended`/`dlc`/
+  `data_hex`/`ms`), present only in CANopen Bridge mode. A receiver that
+  doesn't know this key can ignore it.
+
+A consumer that only understands the base shape (`channels[]` +
+top-level fields) works unmodified against every variant; the extra
+arrays are purely additive.
+
+### Config Export / Import
+
+The merged variants (`waveshare-s3-mudtank/`, `lilygo-t-can485-mudtank/`)
+add a `/system` page JSON export/import of the full on-device config
+(channels, digital I/O, extra boards, independent sensors, CAN signals,
+module/Pi/WiFi settings) — for backup or cloning a config onto a
+different unit. **The exported file includes the WiFi password in plain
+text**; handle it like any other saved password. Module ID is never
+exported/imported — always derived per-device from its own MAC address.
+
+---
+
+## Current State / Recent Work (see each folder's own README for detail)
+
+- **`waveshare-s3-sensors/`** is the most actively developed line right
+  now (v1.15.46 as of this writing) — recent work: direct tank-height
+  measurement replacing capacity-based calibration, a WiFi reconnect
+  watchdog, real tank geometry (length × width) instead of a typed-in
+  capacity number, and a serial CLI (`h` for help) mirroring every web
+  UI setting for USB-only configuration/debugging.
+- **`waveshare-s3/`** and **`lilygo-t-can485/`** are at v1.11.1 — fixed a
+  bug where digital I/O kept reporting stale ON/OFF state forever after
+  an RS485/Modbus dropout instead of going invalid.
+- **`waveshare-s3-mudtank/`** and **`lilygo-t-can485-mudtank/`** are the
+  newest variants (merged fixed-board + independent-sensor + CAN
+  support in one image) with Config Export/Import.
+- **WiFi auto-join was intentionally stripped from every variant** —
+  modules never invent or hardcode an SSID; nothing connects until a
+  network is explicitly saved (or the `rigNNN` auto-scan/standard-AP
+  fallback above applies).
+- **`rig-module-firmware.ino`** at the repo root has not been touched
+  since v1.7.1 (2026-07) and is superseded by `lilygo-t-can485/` for any
+  new work — see the deprecation note in the table above.
+
+---
+
+## Repo Layout
+
+```
+rig-module-firmware.ino, config.h, modbus.h, scaling.h, webui.h   — DEPRECATED root sketch (v1.7.1), see table above
+waveshare-s3/              — fixed adapter board, Waveshare ESP32-S3-RS485-CAN   [production]
+lilygo-t-can485/           — same, LilyGo T-CAN485 bench-test port              [production]
+waveshare-s3-sensors/      — direct RS485 sensors + CAN, Waveshare ESP32-S3     [production, most active]
+waveshare-s3-mudtank/      — fixed board + direct sensors + CAN merged, Waveshare [production]
+lilygo-t-can485-mudtank/   — same, LilyGo T-CAN485 bench-test port              [production]
+sensor-debug/              — standalone RS485/Modbus debug tool, Waveshare S3   [debug tool]
+sensor-debug-lilygo/       — same, LilyGo T-CAN485 (separate, not kept in sync) [debug tool]
+```
+
+## Required Libraries (all variants)
 
 - **ArduinoJson** >= 6.x (Benoit Blanchon)
 - **NTPClient** (Fabrice Weinberg)
-- Built-in: `WiFi`, `WebServer`, `Preferences`, `LittleFS`, `ESPmDNS`, `ArduinoOTA`, `HTTPClient`, `Update`
+- Built-in to the ESP32 Arduino core: `WiFi`, `WebServer`, `Preferences`,
+  `LittleFS`, `ESPmDNS`, `ArduinoOTA`, `HTTPClient`, `Update`, and
+  `driver/twai.h` for CAN (no separate CAN library needed).
+- No ESPAsyncWebServer / AsyncTCP anywhere — every variant uses the
+  built-in `WebServer`.
 
-No ESPAsyncWebServer / AsyncTCP needed — uses the built-in `WebServer`.
-
-Board: **ESP32 Arduino core** (espressif32) — install via Boards Manager.
-
----
-
-## Pin Configuration (LilyGo T-CAN485, verified against official example)
-
-```cpp
-#define PIN_5V_EN   16   // 5V booster enable — must be HIGH or RS485 has no power
-#define RS485_TXD   22   // Serial2 TX
-#define RS485_RXD   21   // Serial2 RX
-#define RS485_DE    17   // RS485 DE/RE (driver enable, active HIGH = transmit)
-#define RS485_SE    19   // RS485 /SHDN (shutdown pin — must be HIGH to enable chip)
-```
-
-**Check your specific board schematic** — these vary between LilyGo revisions.
-
----
-
-## First Setup
-
-1. Flash the firmware.
-2. On boot, if no WiFi is saved, the unit first auto-scans for a standard rig
-   router (SSID `rigNNN`, e.g. `rig132`) using the shared rig password. If
-   none is found/connectable, it creates a setup AP:
-   **RigModule-XXXXXX** / password: `modulesetup`
-3. Connect to it, browse to **http://192.168.4.1/** and set your network in
-   the WiFi section of the Config page (only needed for non-standard
-   networks). Tap **🔍 Scan for Networks** to list nearby SSIDs with signal
-   strength — tap one to fill it in, then just type the password.
-4. That's it for connectivity — the module is already talking to the Pi.
-   X-Rig-Token defaults to the standard shared rig token (`7804991970`,
-   same as every rig's `config.json`), and Pi host defaults to mDNS
-   auto-discovery (`_rig-logger._tcp.local`). Nothing to type. Go to
-   **⚙ Config** only if you want a friendly Module Name, or need to
-   override the token/host for a non-standard rig.
-5. Go to **📐 Channels** to configure each of the 8 analog channels you're
-   using (all 8 report out of the box — only needed to rename/label them
-   or hide ones that aren't wired up).
-
-The Module ID (`MODULE-ABC123`) is fixed — derived from the MAC address, not
-editable — so every unit is uniquely and permanently identifiable regardless
-of what it's measuring.
-
----
-
-## Tank Volume (optional derived value)
-
-Turn a level channel into a computed volume — matches `spec-tank-modules.md`
-§4b's linear level→volume map, computed on the module itself and sent up as
-`derived.volume` (plus top-level `capacity`) in the payload:
-
-```
-frac   = (level - valueAtEmpty) / (valueAtFull - valueAtEmpty)   # clamped 0..1
-volume = capacity * frac
-```
-
-Lives **on the channel itself** — go to **📐 Channels**, find whichever
-channel is your level sensor, and check **"Compute Tank Volume from this
-channel"**. Its fields appear right there:
-- **Capacity** — the tank's full volume. Leave at `0` to leave the feature
-  off entirely (no `derived.volume` in the payload at all).
-- **Capacity Unit** — `m³` or `gal`.
-- **Value @ Empty / Value @ Full** — this channel's already-scaled
-  engineering reading (set its Eng Min/Max or zero/max cal above first) at
-  0% and 100% full. Doesn't have to be literally 0/capacity — lets a sensor
-  mounted partway up the tank, or one that doesn't reach true empty, still
-  map correctly.
-
-Only one channel should have this checked at a time (it's per-module, not
-per-channel — the first one found wins if more than one somehow is).
-
-If the level channel is faulted (`open`/`over`) or hasn't reported yet,
-`derived.volume.status` reflects that instead of showing a fabricated number.
-Volume is clamped to `[0, capacity]` — a level reading below "Empty" or above
-"Full" reports 0% / 100% rather than a negative or over-capacity number.
-
-The rig UI (`rig-modules.html`) already expects this exact shape
-(`derived.volume` + top-level `capacity`) for the tank fill-bar card — no
-Pi/UI changes needed, this firmware update alone lights it up.
-
----
-
-## RS485 Baud Rate — Auto-Detect
-
-No need to know or set the connected board's factory-default baud rate:
-
-- **On boot**, if the configured baud gets no response at all, the firmware
-  automatically probes every standard rate (9600, 4800, 19200, 2400, 38400,
-  1200, 57600, 115200) and adopts whichever one actually gets an answer.
-- **Anytime**, hit **🔍 Auto-Detect Baud Rate** on the **⚙ Config** page to
-  re-run the same probe on demand (useful after physically swapping to a
-  different board without power-cycling).
-
-Detection works by sending a real Modbus read at each rate and checking for
-a CRC-valid response — not a guess. If nothing answers at any rate, check
-wiring/DE pin/board power before assuming the baud is the problem.
-
----
-
-## Waveshare 8AI (B) — Important
-
-The (B) version **defaults to voltage mode**. The firmware writes **mode 3
-(4–20mA)** to all 8 channel config registers (0x1000–0x1007) on every boot
-before reading.
-
-**You must also set the internal jumpers** inside the board case:
-- Jumper **connected** = current mode ✓
-- Jumper **disconnected** = voltage mode
-
-The (B) board ships with jumpers **disconnected** (voltage mode). Connect
-them for 4–20mA operation.
-
----
-
-## Channel Configuration
-
-Go to **📐 Channels**. For each channel you're using:
-
-1. Check **Enabled**
-2. Set **Name** (e.g. "Suction Pressure") — shown on the rig UI card
-3. Set **Kind** — fully free text, no fixed list. Use whatever makes sense:
-   `level`, `pressure`, `temp`, `flow`, `rpm`, anything.
-4. Set **Unit** (e.g. `psi`, `m`, `degC`, `rpm`) — free text, shown next to the value
-5. Set the mA→engineering mapping: either
-   - **mA Min/Max + Eng Min/Max** (simple linear map), or
-   - **Set Zero / Set Max** with the sensor at known real-world states — this
-     captures the actual raw ADC counts and takes priority over the mA map
-     when both zeroRaw and maxRaw are set.
-
-The firmware reports the raw mA reading, the scaled engineering value, and a
-per-channel status (`ok` / `open` / `over`) for every enabled channel — no
-extra processing.
-
----
-
-## API Reference
-
-| Method | Path | Description |
-|--------|------|--------------|
-| GET | `/api/status` | Full JSON status (same as Pi payload + system info) |
-| GET | `/api/channel-raw` | Raw Modbus values + mA for all 8 channels |
-| GET | `/api/wifi/scan` | Scan nearby WiFi networks (SSID, RSSI, secure) for the Config page's WiFi section |
-| POST | `/api/config` | Save config fields (form or JSON) |
-| POST | `/api/cal/zero?ch=N` | Capture zero cal for channel N |
-| POST | `/api/cal/max?ch=N` | Capture max cal for channel N |
-| POST | `/api/buffer/flush` | Flush backlog immediately |
-| POST | `/api/buffer/clear` | Delete all buffered data |
-| POST | `/api/reboot` | Reboot |
-| POST | `/api/factory-reset` | Clear NVS + LittleFS, reboot |
-| GET | `/api/ota?url=...` | HTTP OTA from URL |
-
----
-
-## Pi Integration
-
-The firmware POSTs to `http://<pi>:8080/api/rig/module` every poll interval,
-with `type: "generic"` and `moduleId: "MODULE-ABC123"`. The Pi's field-module
-ingest (`upsert_module`) is fully self-describing/generic — new module kinds
-need no Pi-side code change, and the rig UI's `renderGeneric()` card shows
-whatever channels/derived values are reported.
-
-Pi discovery order:
-1. mDNS: `_rig-logger._tcp.local` (Pi advertises this)
-2. Hostname: `rig-logger.local:8080`
-3. Static IP override on Config page
-
-On Pi unreachable: samples buffer to `/buffer.jsonl` (LittleFS), max 3 hours.
-Flushed oldest-first on reconnect.
+Each folder's own README has the exact Arduino IDE board settings (board
+type, flash size, partition scheme, PSRAM) for its hardware — these
+differ between the plain-ESP32 LilyGo boards and the ESP32-S3 Waveshare
+boards, so check the right one before flashing.
