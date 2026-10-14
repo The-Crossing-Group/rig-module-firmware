@@ -1618,7 +1618,8 @@ static void handleOTA() {
 // a power cut mid-flash then needs a USB reflash, same as any update.
 static bool _fwUploadOk = false;
 static void handleUpdateUpload() {
-  HTTPUpload& upload = _srv->upload;
+  // Core 3.3.x: WebServer::upload is a method, not a public member (2.x).
+  HTTPUpload& upload = _srv->upload();
   if (upload.status == UPLOAD_FILE_START) {
     Serial.printf("[FwUpdate] Start: %s\n", upload.filename.c_str());
     _fwUploadOk = Update.begin(UPDATE_SIZE_UNKNOWN);
