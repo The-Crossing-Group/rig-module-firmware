@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.9 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.10 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -861,6 +861,19 @@ static String sysPage(ModuleConfig& cfg) {
     h += "</div>";
   }
   h += "<h3>Firmware Update</h3><div class='card'>";
+  {
+    // v1.19.10: show partition state on the page — the serial boot lines are
+    // unreadable on boards whose USB-CDC port re-enumerates on reboot.
+    const esp_partition_t* run = esp_ota_get_running_partition();
+    const esp_partition_t* next = esp_ota_get_next_update_partition(NULL);
+    char addr[12];
+    h += "<div class='small'>Running slot: ";
+    if (run) { snprintf(addr, sizeof(addr), "0x%x", (unsigned)run->address); h += run->label; h += " @"; h += addr; }
+    h += " &middot; Update slot: ";
+    if (next) { snprintf(addr, sizeof(addr), "0x%x", (unsigned)next->address); h += "<span class='ok'>"; h += next->label; h += " @"; h += addr; h += "</span>"; }
+    else h += "<span class='warn'>NONE — page update impossible on this partition table; USB flash required</span>";
+    h += "</div>";
+  }
   h += "<label>Upload firmware file (.bin):</label><div class='row'>";
   h += "<input type='file' id='fwFile' accept='.bin,application/octet-stream'>";
   h += "<button type='button' onclick='doFwUpload()'>Upload &amp; Update</button></div>";
@@ -1611,30 +1624,31 @@ static void handleOTA() {
 }
 
 // POST /update — multipart file upload of a compiled .bin firmware image.
-// Flash-write progress goes to serial; the browser gets one final
-// pass/fail line (XHR progress covers the upload half). Update.begin()
-// automatically targets the inactive OTA slot when the partition scheme
-// has one; on single-app schemes it rewrites the running app in place —
-// a power cut mid-flash then needs a USB reflash, same as any update.
+// Update.begin() targets the INACTIVE OTA slot; on a single-app partition
+// table it FAILS outright (UPDATE_ERROR_NO_PARTITION) — it does not and
+// cannot rewrite the running app in place. v1.19.9+ sketches ship a
+// dual-slot partitions.csv so this path always has a target slot.
+// v1.19.10: real error string is captured and returned to the browser —
+// serial is not always readable (USB-CDC port flaps on reboot).
 static bool _fwUploadOk = false;
+static String _fwUpdateErr = "";
 static void handleUpdateUpload() {
   // Core 3.3.x: WebServer::upload is a method, not a public member (2.x).
   HTTPUpload& upload = _srv->upload();
   if (upload.status == UPLOAD_FILE_START) {
     Serial.printf("[FwUpdate] Start: %s\n", upload.filename.c_str());
+    _fwUpdateErr = "";
     _fwUploadOk = Update.begin(UPDATE_SIZE_UNKNOWN);
-    if (!_fwUploadOk) Update.printError(Serial);
+    if (!_fwUploadOk) { _fwUpdateErr = Update.errorString(); Update.printError(Serial); }
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (_fwUploadOk && Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-      _fwUploadOk = false;
-      Update.printError(Serial);
+      _fwUploadOk = false; _fwUpdateErr = Update.errorString(); Update.printError(Serial);
     }
   } else if (upload.status == UPLOAD_FILE_END) {
     if (_fwUploadOk && Update.end(true)) {
       Serial.printf("[FwUpdate] OK: %u bytes written\n", upload.totalSize);
     } else {
-      _fwUploadOk = false;
-      Update.printError(Serial);
+      _fwUploadOk = false; _fwUpdateErr = Update.errorString(); Update.printError(Serial);
     }
   }
 }
@@ -1644,7 +1658,7 @@ static void handleUpdateDone() {
     delay(1000);
     ESP.restart();
   } else {
-    _srv->send(500, "text/plain", "Update FAILED — old firmware still running. Check serial log.");
+    _srv->send(500, "text/plain", "Update FAILED: " + _fwUpdateErr + " — old firmware still running.");
   }
 }
 
