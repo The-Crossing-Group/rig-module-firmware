@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.9 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.11 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -918,7 +918,11 @@ function doFwUpload(){
   x.upload.onprogress=function(e){if(e.lengthComputable)box.textContent='Uploading '+Math.round(e.loaded*100/e.total)+'%';};
   x.onload=function(){box.textContent=x.responseText;};
   x.onerror=function(){box.textContent='Upload failed — check the file is a .bin firmware image.';};
-  x.send(f);
+  // MUST be multipart/form-data — ESP32 WebServer only fires the upload
+  // handler for multipart bodies; a raw x.send(f) never reaches it and the
+  // route answers "Update FAILED" without the handler ever running.
+  let fd=new FormData(); fd.append('bin', f);
+  x.send(fd);
 }
 function doImport(){
   let f = document.getElementById('importFile').files[0];
