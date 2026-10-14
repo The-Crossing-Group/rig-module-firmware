@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.6 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.8 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -860,9 +860,14 @@ static String sysPage(ModuleConfig& cfg) {
     }
     h += "</div>";
   }
-  h += "<h3>OTA Update</h3><div class='card'>";
-  h += "<label>OTA from URL:</label><div class='row'><input id='otaUrl' placeholder='http://...'>&nbsp;";
-  h += "<button onclick='doOTA()'>Update</button></div></div>";
+  h += "<h3>Firmware Update</h3><div class='card'>";
+  h += "<label>Upload firmware file (.bin):</label><div class='row'>";
+  h += "<input type='file' id='fwFile' accept='.bin,application/octet-stream'>";
+  h += "<button type='button' onclick='doFwUpload()'>Upload &amp; Update</button></div>";
+  h += "<div id='fwStatus' class='small' style='margin-top:6px'></div>";
+  h += "<details style='margin-top:8px'><summary class='small'>Update from URL</summary>";
+  h += "<div class='row' style='margin-top:6px'><input id='otaUrl' placeholder='http://...'>&nbsp;";
+  h += "<button onclick='doOTA()'>Update</button></div></details></div>";
   h += "<h3>Buffer</h3><div class='card'><div id='bufInfo'>...</div>";
   h += "<div class='small'>File line count vs. tracked count are cross-checked live below — if they "
        "ever disagree, the tracked number (used everywhere else, including this page) is wrong, not "
@@ -901,6 +906,19 @@ function doOTA(){
   let url=document.getElementById('otaUrl').value;
   if(!url)return alert('Enter URL');
   fetch('/api/ota?url='+encodeURIComponent(url)).then(r=>r.text()).then(t=>alert(t));
+}
+function doFwUpload(){
+  let f=document.getElementById('fwFile').files[0];
+  let box=document.getElementById('fwStatus');
+  if(!f){box.textContent='Choose a .bin file first.';return;}
+  if(!confirm('Flash '+f.name+'? Board reboots when done.'))return;
+  box.textContent='Uploading...';
+  let x=new XMLHttpRequest();
+  x.open('POST','/update');
+  x.upload.onprogress=function(e){if(e.lengthComputable)box.textContent='Uploading '+Math.round(e.loaded*100/e.total)+'%';};
+  x.onload=function(){box.textContent=x.responseText;};
+  x.onerror=function(){box.textContent='Upload failed — check the file is a .bin firmware image.';};
+  x.send(f);
 }
 function doImport(){
   let f = document.getElementById('importFile').files[0];
@@ -1592,6 +1610,43 @@ static void handleOTA() {
   http.end();
 }
 
+// POST /update — multipart file upload of a compiled .bin firmware image.
+// Flash-write progress goes to serial; the browser gets one final
+// pass/fail line (XHR progress covers the upload half). Update.begin()
+// automatically targets the inactive OTA slot when the partition scheme
+// has one; on single-app schemes it rewrites the running app in place —
+// a power cut mid-flash then needs a USB reflash, same as any update.
+static bool _fwUploadOk = false;
+static void handleUpdateUpload() {
+  HTTPUpload& upload = _srv->upload;
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("[FwUpdate] Start: %s\n", upload.filename.c_str());
+    _fwUploadOk = Update.begin(UPDATE_SIZE_UNKNOWN);
+    if (!_fwUploadOk) Update.printError(Serial);
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (_fwUploadOk && Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      _fwUploadOk = false;
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (_fwUploadOk && Update.end(true)) {
+      Serial.printf("[FwUpdate] OK: %u bytes written\n", upload.totalSize);
+    } else {
+      _fwUploadOk = false;
+      Update.printError(Serial);
+    }
+  }
+}
+static void handleUpdateDone() {
+  if (_fwUploadOk) {
+    _srv->send(200, "text/plain", "Update OK — rebooting, reload this page in ~20s.");
+    delay(1000);
+    ESP.restart();
+  } else {
+    _srv->send(500, "text/plain", "Update FAILED — old firmware still running. Check serial log.");
+  }
+}
+
 // =============================================================================
 // CONFIG EXPORT / IMPORT HANDLERS (2026-09-18, Sarah's request)
 // =============================================================================
@@ -1670,6 +1725,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/modbus/probe", HTTP_GET, handleModbusProbe);
   srv.on("/api/wifi/scan",    HTTP_GET, handleWifiScan);
   srv.on("/api/ota",          HTTP_GET, handleOTA);
+  srv.on("/update",           HTTP_POST, handleUpdateDone, handleUpdateUpload);
 
   // POST APIs
   srv.on("/api/config",         HTTP_POST, handleConfig);
