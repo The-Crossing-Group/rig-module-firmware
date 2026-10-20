@@ -78,6 +78,13 @@ sniff <seconds>                passive listen, no TX (catches auto-report sensor
 autosniff <on|off>             toggle continuous background traffic capture
 bitscope [ms]                 raw electrical capture, bypasses UART framing entirely
                                (default 500ms, use during a known burst)
+recover                       SM7779 recovery sweep: writes 0x0068/0x0069 reset
+                               values across all parity/stop combos at 9600,
+                               checking for a real ack; auto-sniffs 10s if nothing acks
+sweep <slaveId> <fc> <reg> [count]
+                               baud sweep: tries the read at every standard baud,
+                               stops on the first clean reply
+qdw90a [slaveId]               labeled read of all 7 QDW90A/QDY30A registers (default slave 1)
 ```
 
 ## What's on the web page
@@ -104,7 +111,27 @@ bitscope [ms]                 raw electrical capture, bypasses UART framing enti
 - **Raw hex send** — bypasses Modbus framing entirely. Type in exact
   bytes, they go out exactly as typed with DE toggled around the
   transmission, whatever comes back is shown as hex.
-- **Traffic log** — last 80 TX/RX pairs, newest first.
+- **Traffic log** — last 80 TX/RX pairs, newest first. Lives at `/log`
+  and now live-updates on its own page (no more manual browser refresh).
+- **Baud Sweep** — tries a register read at 8N1 across every standard
+  baud (1200–115200) against one slave address, stops and leaves the
+  port on the first baud that gets a clean reply. Use when you're not
+  sure what baud a sensor is actually configured for.
+- **SM7779 Recovery Sweep** — one-click framing recovery for a sensor
+  stuck outputting garbage after writes to its 0x0068/0x0069 registers.
+  Cycles all 6 parity/stop-bit combos at 9600 baud, sending **unicast**
+  FC06 resets (`1 -> 0x0068`, `1 -> 0x0069`) to slave 1 at each combo and
+  checking for a real ack/exception (not a broadcast "ok", which can't
+  distinguish a landed reset from wrong framing the sensor never saw).
+  Stops at the first combo that acks; if nothing acks anywhere, falls
+  back to a best-effort broadcast pass, then automatically runs a 10s
+  passive sniff so you can see if the sensor's auto-burst pattern
+  changed at all.
+- **QDW90A / QDY30A Pressure Sensor Probe** — labeled one-click read of
+  all 7 registers (address, baud, unit, decimals, value, zero point,
+  full-scale) for this sensor family, same register map as the
+  production firmware's Multi-Register Read preset. Needs genuine 24V
+  power — won't respond at 12V.
 - **Bitscope** — raw electrical capture that completely bypasses the
   UART peripheral's framing assumptions. Every dial/setting above still
   relies on the ESP32's hardware UART to decode bytes for you, which

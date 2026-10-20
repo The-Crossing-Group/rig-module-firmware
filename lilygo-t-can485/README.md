@@ -42,7 +42,7 @@ any new LilyGo work.
 - Slow dim-amber pulse: sitting in setup AP mode, waiting for config
 - Brief green flash: a Modbus poll just succeeded
 
-## Feature set (same as waveshare-s3 v1.11.0)
+## Feature set (same as waveshare-s3 v1.11.1)
 
 - **Board auto-detection** — Waveshare 8AI (B) or Eletechsup AMIDJ14,
   via Product ID register 0x00F7, no jumper/dropdown needed. Manual
@@ -64,6 +64,10 @@ any new LilyGo work.
   setup AP (`RigModule-XXXXXX` / `modulesetup`) otherwise.
 - Self-heals from a corrupted WiFi NVS blob (the classic
   WL_STOPPED/scan=-2 wedge) via a one-time NVS erase + config restore.
+- **Bug fix (v1.11.1):** digital I/O no longer reports a stale ON/OFF
+  state forever after an RS485/Modbus dropout — `.valid` now clears
+  alongside `.status` on a failed poll, for both the primary board and
+  any Advanced/hidden extra boards.
 
 See `waveshare-s3/README.md` for full detail on every feature above —
 the logic is identical, this file only covers what's LilyGo-specific

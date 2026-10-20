@@ -1,5 +1,8 @@
 # lilygo-t-can485-mudtank
 
+**Version:** rig-module-mudtank-1.0.0
+**Board:** LilyGo T-CAN485 / XY-32 CAN+RS485 (plain ESP32, WROOM-32) — bench-testing hardware
+
 Hardware port of `waveshare-s3-mudtank/` onto the LilyGo T-CAN485 / XY-32
 CAN+RS485 board (plain ESP32/WROOM-32, bench-testing hardware).
 

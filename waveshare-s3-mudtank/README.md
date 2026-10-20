@@ -1,5 +1,8 @@
 # waveshare-s3-mudtank
 
+**Version:** rig-module-mudtank-1.0.0
+**Board:** Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, screw terminal)
+
 Combined Rig Module firmware for the Waveshare ESP32-S3-RS485-CAN board.
 Merges the two previous approaches into one image:
 
@@ -12,7 +15,8 @@ Merges the two previous approaches into one image:
    sensors (pressure, level, temp, radar...), each fully generic: slave
    ID, register, function code, data type, scale/offset — configure by
    hand or use the bus-wide Auto-Detect & Enable.
-3. **CAN bus** (listen-only) with configurable signal extraction.
+3. **CAN bus** (listen-only, off by default — enable + set bitrate on
+   `/`) with configurable signal extraction.
 
 All RS485 devices — the fixed board(s) and every independent sensor —
 share ONE Serial2 bus at ONE baud rate. CAN is a separate physical bus.
