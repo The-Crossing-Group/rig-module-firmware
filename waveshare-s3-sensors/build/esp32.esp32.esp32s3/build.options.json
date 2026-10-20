@@ -1,9 +1,0 @@
-{
-  "additionalFiles": "../../..,../..,../..,../..,../..,../..,../..,../..,../..",
-  "compiler.optimization_flags": "-Os",
-  "customBuildProperties": "",
-  "fqbn": "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi",
-  "hardwareFolders": "/mnt/HC_Volume_105189484/openclaw/sarah/.arduino15/packages/esp32/hardware/esp32/3.3.12,/mnt/HC_Volume_105189484/openclaw/sarah/.arduino15/packages/esp32/hardware/esp32/3.3.12",
-  "otherLibrariesFolders": "/mnt/HC_Volume_105189484/openclaw/sarah/Arduino/libraries",
-  "sketchLocation": "/opt/openclaw/sarah/.openclaw/workspace/rig-module-firmware/waveshare-s3-sensors"
-}
