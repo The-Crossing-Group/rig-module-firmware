@@ -177,11 +177,17 @@ exported/imported — always derived per-device from its own MAC address.
 ## Current State / Recent Work (see each folder's own README for detail)
 
 - **`waveshare-s3-sensors/`** is the most actively developed line right
-  now (v1.15.46 as of this writing) — recent work: direct tank-height
-  measurement replacing capacity-based calibration, a WiFi reconnect
-  watchdog, real tank geometry (length × width) instead of a typed-in
-  capacity number, and a serial CLI (`h` for help) mirroring every web
-  UI setting for USB-only configuration/debugging.
+  now (v1.19.11 as of this writing) — recent work: browser firmware
+  updater on /system (file upload + URL, v1.19.8–11) backed by a
+  dual-OTA `partitions.csv` (v1.19.9 — see that folder's README for why
+  this one is safe despite the 2026-09-11 partition incident), a
+  dedicated **/modbus** page for the Eletechsup/Waveshare 4-20mA board
+  with slave ID 1 reserved for it (direct RS485 sensors use 2–247), a
+  LittleFS.format() hang watchdog + PC-side pre-format script
+  (`delivery/format-littlefs.sh`), direct tank-height measurement
+  replacing capacity-based calibration, a WiFi reconnect watchdog, real
+  tank geometry (length × width), and a serial CLI (`h` for help)
+  mirroring every web UI setting for USB-only configuration/debugging.
 - **`waveshare-s3/`** and **`lilygo-t-can485/`** are at v1.11.1 — fixed a
   bug where digital I/O kept reporting stale ON/OFF state forever after
   an RS485/Modbus dropout instead of going invalid.

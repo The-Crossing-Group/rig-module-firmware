@@ -73,9 +73,27 @@ each.
 - **/sensors** — Add/edit/remove RS485 Modbus sensors (16 slots)
 - **/can** — Add/edit/remove CAN signals (16 slots)
 - **/live** — Live values table (sensors + CAN signals + system status)
-- **/system** — Firmware info, OTA, buffer, reboot/factory-reset
+- **/system** — Firmware info, firmware update (file upload + URL), running/update slot, buffer, NVS usage, reboot/factory-reset
 
 The dedicated 4-20mA board is always configured at slave ID 1 on **/modbus**. Direct RS485 sensors on **/sensors** must use slave IDs 2-247; the sensor auto-detect and bus scan deliberately skip address 1.
+
+## Updating firmware from the browser (v1.19.8+)
+
+/system has a file-upload updater: build the sketch in Arduino IDE, take
+the compiled `waveshare-s3-sensors.ino.bin` from the IDE's build folder,
+upload it on /system (XHR with progress bar). The Update library writes
+the **inactive** OTA slot (that's what the dual-OTA `partitions.csv` is
+for), flips otadata, and reboots. A URL updater (fetch a .bin over HTTP)
+is kept under a details element for scripted/remote updates.
+
+Requirements/caveats:
+- The board must already run v1.19.9+ (dual-OTA table) — older
+  single-app boards can only be updated by USB flash.
+- Uploads are multipart `POST /update` (v1.19.11 — earlier builds sent
+  the raw file, which the WebServer upload handler never sees, so every
+  update "FAILED").
+- No auto-rollback: if a bad .bin bricks the app, recover over USB
+  (`esptool erase_flash` + reflash).
 
 ## Workflow for a new sensor
 
@@ -200,17 +218,34 @@ Same pins as `waveshare-s3/`:
 
 ## Arduino IDE Board Settings
 
-Same as `waveshare-s3/`. **Do NOT add a sketch-folder `partitions.csv`
-to this project** — one shipped in v1.15.8–v1.15.10 and bricked boards
-in the field on 2026-09-11 (see "Partition table incident" below).
-
 - **Board:** "ESP32S3 Dev Module" (esp32:esp32:esp32s3)
 - **USB CDC On Boot:** Enabled
-- **Flash Size:** 16MB (128Mb)
-- **Partition Scheme:** "16M Flash (3MB APP/9.9MB FATFS)" (`app3M_fat9M_16MB`)
+- **Flash Size:** match the chip on YOUR board — most units are 16MB
+  (128Mb); at least one 2026-09 batch shipped with an 8MB chip (same
+  QFN56 part number, `esptool flash_id` is the only way to tell).
+- **Partition Scheme:** **Custom** — the sketch folder has shipped a
+  `partitions.csv` since v1.19.9 (dual-OTA layout, required by the
+  /system page updater). Arduino IDE 2.x adds a "Custom" entry to the
+  Partition Scheme menu when it sees the file and uses it automatically;
+  confirm it reads "Custom" before uploading.
 - **PSRAM:** OPI PSRAM
 
-### Partition table incident (2026-09-11) — why there is no partitions.csv
+### Partition table: dual-OTA `partitions.csv` (v1.19.9+)
+
+The page updater (see "Updating firmware from the browser" below) needs
+two app slots, so the sketch now ships a `partitions.csv`:
+
+```
+nvs 0x9000/20K · otadata 0xe000/8K · app0 0x10000/2.75M ·
+app1 0x2D0000/2.75M · spiffs 0x590000/2.375M · coredump 0x7F0000/64K
+```
+
+Sized for the **8MB** boards. On a 16MB board it boots and works fine
+but leaves the top ~8MB of flash unused — if a 16MB unit needs the full
+space, build a 16MB dual-OTA table, but **keep nvs/otadata/app0 at the
+stock offsets** (see why below).
+
+### Partition table incident (2026-09-11) — why offsets must stay stock
 
 v1.15.8 added a custom `partitions.csv` (NVS 20K→64K) to fix a real
 problem: the rigmod namespace can hold ~511 keys and the stock 20K NVS
@@ -218,7 +253,7 @@ fills up, making NEW keys silently fail to save (confirmed in the field:
 `mbBaudSet` wouldn't write while existing `mbBaud` did). The fix's
 content was right; its delivery was catastrophic:
 
-1. The custom table moves app0 from 0x10000 to 0x20000. On some
+1. That table moved **app0 from 0x10000 to 0x20000**. On some
    IDE/core combos the board-menu scheme is used for the UPLOAD offsets
    while the sketch-folder table is written at 0x8000 (known
    arduino-esp32 bug #11579/#8502) — table and app land at disagreeing
@@ -231,23 +266,29 @@ content was right; its delivery was catastrophic:
    reflash — the board was unrecoverable through the IDE. Recovery
    required `esptool erase_flash` + writing a merged image (v1.15.11).
 
+**Why the v1.19.9 table does not repeat this:** it keeps nvs (0x9000),
+otadata (0xe000) and app0 (0x10000) at the exact stock offsets and only
+reshapes the space after them. Even if the IDE bug fires and upload
+offsets come from the board menu, the app still lands at 0x10000 where
+the table says it is. The bricking failure mode required *moving app0*.
+
 **Rules going forward:**
-- Never reintroduce a sketch-folder `partitions.csv` for IDE flashing.
-  If a custom table is ever needed again, it must be flashed via
+- A sketch-folder `partitions.csv` is allowed ONLY while app0 stays at
+  0x10000. Any future table that moves app0 must be flashed via
   `esptool` (table + app written in one pass at consistent offsets),
   never through the Arduino IDE upload path.
+- "Erase All Flash Before Sketch Upload" stays permanently OFF — it
+  survived stale tables during the 2026-09-11 recovery and bricked
+  boards again on 2026-09-22.
 - If a board ever boots into the "invalid magic byte / no bootable app
   partitions" loop again: it's this same class of problem — full
   `esptool erase_flash` then reflash, don't try to fix it with more IDE
   uploads.
-- The stock-20K NVS-full limitation still exists (new keys can silently
-  fail past ~500 entries). Mitigations that are IDE-safe: keep total
-  key count under ~480, or reuse/rename keys instead of adding new
-  ones. The /system page's NVS Storage card reads the real partition
-  size at runtime — check it after any flash.
-
-Verified compiling clean with `arduino-cli` against these settings — 40%
-program storage, 17% dynamic memory, zero warnings.
+- The stock-20K NVS-full limitation still exists (the current table
+  keeps NVS at 20K; new keys can silently fail past ~500 entries).
+  Mitigations: keep total key count under ~480, or reuse/rename keys
+  instead of adding new ones. The /system page's NVS Storage card reads
+  the real partition size at runtime — check it after any flash.
 
 ### LittleFS.format() hang (2026-09-22) — why there's a format watchdog
 
