@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.18 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.19 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -1209,6 +1209,10 @@ String buildPayload(bool bufferedFlag) {
       }
     }
 
+        // J1939 engine channels — decoded onboard from the CAN bus, appended to
+    // the SAME channels array so the Pi ingests/trends them exactly like
+    // RS485/4-20mA module channels (added 2026-10-27, Sarah's request).
+    j1939FillChannels(chArr);
     xSemaphoreGive(stateMutex);
   }
 

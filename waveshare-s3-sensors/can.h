@@ -222,6 +222,8 @@ static void checkCanSignalStaleness(ModuleConfig& cfg, CanSignalReading* canRead
 // task) — drains any pending RX frames, logs them to the ring buffer, and
 // runs them through every enabled CanSignalConfig for extraction.
 // nonBlockingTimeoutMs=0 means "don't block if nothing's waiting".
+static void j1939DecodeFrame(uint32_t id, const uint8_t* d, uint8_t dlc);  // fwd — impl below
+
 void canPoll(ModuleConfig& cfg, CanSignalReading* canReadings, SemaphoreHandle_t mtx) {
   if (!_canStarted) return;
 
@@ -245,6 +247,9 @@ void canPoll(ModuleConfig& cfg, CanSignalReading* canReadings, SemaphoreHandle_t
     slot.ms = millis();
     _canLogHead = (_canLogHead + 1) % CAN_LOG_SIZE;
     if (_canLogCount < CAN_LOG_SIZE) _canLogCount++;
+
+    // J1939 engine decode — cheap table walk, runs on every RX'd frame.
+    j1939DecodeFrame(msg.identifier, msg.data, msg.data_length_code);
 
     // Signal extraction — check every enabled signal for a matching ID
     if (xSemaphoreTake(mtx, pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -366,6 +371,85 @@ bool canopenBringupIfDue(uint8_t targetNodeId, bool targetSpecificNode) {
 // the whole ring into a stack buffer first — fine at CAN_LOG_SIZE=60
 // (~1.4KB), unsafe at 512 (~12KB on loop()'s ~8KB stack). Now walks the
 // ring in place instead; no copy at all.
+
+// =============================================================================
+// J1939 engine decode — field-verified table (same one the /can page card and
+// waveshare-s3-j1939-logger use). Decodes every RX'd frame here in canPoll()
+// and exposes the latest values so buildPayload() can ship them as ordinary
+// module channels — the Pi then ingests/trends/displays engine data exactly
+// like an RS485 or 4-20mA channel, zero per-signal setup.
+//
+// Scales bake in the imperial conversion (degF / psi / gal) like the webui
+// card does. NOTE this ECU's EEC1 is NOT textbook: RPM is bytes 3-4.
+// =============================================================================
+struct J1939Sig { uint32_t pgn; const char* name; const char* unit; uint8_t off, len; float scale, ofs; };
+static const J1939Sig _j1939Table[] = {
+  {0xF004, "Engine RPM",        "rpm",   3, 2, 0.125f,     0     },
+  {0xF004, "Engine torque",     "%",     2, 1, 1.0f,     -125    },
+  {0xF004, "Demand torque",     "%",     1, 1, 1.0f,     -125    },
+  {0xF003, "Accelerator pedal", "%",     1, 1, 0.4f,       0     },
+  {0xF003, "Engine load",       "%",     2, 1, 1.0f,       0     },
+  {0xFEEE, "Coolant temp",      "F",     0, 1, 1.8f,     -40     },
+  {0xFEEE, "Fuel temp",         "F",     1, 1, 1.8f,     -40     },
+  {0xFEEE, "Oil temp",          "F",     2, 2, 0.05625f, -459.4f },
+  {0xFEEE, "Intercooler temp",  "F",     6, 1, 1.8f,     -40     },
+  {0xFEEF, "Fuel pressure",     "psi",   0, 1, 0.5801508f, 0     },
+  {0xFEEF, "Oil pressure",      "psi",   3, 1, 0.5801508f, 0     },
+  {0xFEEF, "Coolant pressure",  "psi",   6, 1, 0.2900754f, 0     },
+  {0xFEEF, "Oil level",         "%",     2, 1, 0.4f,       0     },
+  {0xFEEF, "Coolant level",     "%",     7, 1, 0.4f,       0     },
+  {0xFEF2, "Fuel rate",         "gal/h", 0, 2, 0.0132086f, 0     },
+  {0xFEF2, "Throttle",          "%",     6, 1, 0.4f,       0     },
+  {0xFEE5, "Engine hours",      "h",     0, 4, 0.05f,      0     },
+  {0xFEE9, "Fuel used",         "gal",   4, 4, 0.132086f,  0     },
+  {0xFEF6, "Boost pressure",    "psi",   1, 1, 0.2900754f, 0     },
+  {0xFEF6, "Intake temp",       "F",     2, 1, 1.8f,     -40     },
+  {0xFEF6, "Exhaust temp",      "F",     5, 2, 0.05625f, -459.4f },
+  {0xFEF7, "Alternator voltage","V",     2, 2, 0.05f,      0     },
+  {0xFEF7, "Battery voltage",   "V",     4, 2, 0.05f,      0     },
+  {0xFEFC, "Fuel level",        "%",     1, 1, 0.4f,       0     },
+  {0xFEF5, "Barometric press.", "psi",   0, 1, 0.07251885f,0     },
+  {0xFEF5, "Ambient temp",      "F",     3, 2, 0.05625f, -459.4f },
+};
+#define N_J1939 (sizeof(_j1939Table)/sizeof(_j1939Table[0]))
+struct J1939Val { float v; uint32_t ms; bool valid; };
+static J1939Val _j1939Vals[N_J1939];
+
+static void j1939DecodeFrame(uint32_t id, const uint8_t* d, uint8_t dlc) {
+  uint32_t pgn = (id >> 8) & 0x3FFFF;   // (dp<<16)|(pf<<8)|ps — low byte IS part of PGN here
+  uint32_t now = millis();
+  for (unsigned i = 0; i < N_J1939; i++) {
+    const J1939Sig& sg = _j1939Table[i];
+    if (sg.pgn != pgn) continue;
+    if ((int)sg.off + (int)sg.len > (int)dlc) continue;
+    uint32_t v = 0;
+    for (uint8_t b = 0; b < sg.len; b++) v |= (uint32_t)d[sg.off + b] << (8 * b);  // little-endian
+    uint32_t lim = sg.len == 4 ? 0xFB000000u : (sg.len == 2 ? 0xFB00u : 0xFBu);
+    if (v >= lim) continue;            // J1939 error / not-available
+    _j1939Vals[i].v = (float)v * sg.scale + sg.ofs;
+    _j1939Vals[i].ms = now;
+    _j1939Vals[i].valid = true;
+  }
+}
+
+// Append every J1939 signal ever seen as a channel object (kind "j1939",
+// ch 100+ so it can never collide with analog sensor slots 0-15). Signals
+// never yet seen are omitted entirely — no phantom channels, same convention
+// as the modbus digital-IO block.
+void j1939FillChannels(JsonArray& arr) {
+  uint32_t now = millis();
+  for (unsigned i = 0; i < N_J1939; i++) {
+    if (!_j1939Vals[i].valid) continue;
+    JsonObject c = arr.createNestedObject();
+    c["ch"]    = 100 + (int)i;
+    c["kind"]  = "j1939";
+    c["name"]  = _j1939Table[i].name;
+    c["unit"]  = _j1939Table[i].unit;
+    c["value"] = _j1939Vals[i].v;
+    c["status"] = (now - _j1939Vals[i].ms <= 5000) ? "ok" : "stale";
+  }
+}
+
 unsigned long canSerializeRecentFrames(JsonArray& arr, unsigned long sinceMs, int maxCount) {
   // Walk newest-first through the ring, counting frames newer than
   // sinceMs, stopping at the first one at/before it (ring is in insertion
