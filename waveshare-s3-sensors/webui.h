@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.13 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.14 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -6,7 +6,7 @@
 //   /sensors     Add/edit/remove RS485 Modbus sensors (list, not fixed 8),
 //                includes per-sensor "Probe Now" + "Auto-Detect Baud" and
 //                bus-wide "Auto-Detect & Enable"
-//   /can         Add/edit/remove CAN signals
+//   /can         Live raw CAN feed (v1.19.14: replaced the signal-setup form)
 //   /live        Live values table (sensors + CAN signals)
 //   /system      Firmware info, OTA, buffer, reboot/factory-reset
 // (Debug page removed 2026-08-18 — root-caused sensor issue was FC03 vs
@@ -684,71 +684,63 @@ function autoDetectEnable(){
   return h;
 }
 
-// ─── /can  CAN SIGNAL LIST ───────────────────────────────────────────────────
+// ─── /can  LIVE CAN FEED ─────────────────────────────────────────────────────
+// v1.19.14 (Sarah: "replace the can sensor setup with a live can feed — we
+// aren't gonna be hooking up sensors to the can bus, it reads the pump").
+// The per-signal byte-offset decode form is GONE from the UI: the module's
+// CAN job is to relay the pump's own traffic (raw stream POST + this feed),
+// and decoding lives on the Host PC's rig profile. The canSignals[] backend
+// (config.h NVS fields, /api/can/save, payload block) stays for board
+// compatibility — old boards with signals configured keep POSTing them —
+// but there is nothing to configure here anymore.
 static String canPage(ModuleConfig& cfg) {
   String h = FPSTR(NAV);
-  h += "<div class='page'><h2>&#128225; CAN Signals</h2>";
+  h += "<div class='page'><h2>&#128225; Live CAN Feed</h2>";
   h += "<div class='card'>CAN running at " + String(cfg.canBitrate) + " bit/s, " +
-       (cfg.canopenBridge ? "Carriage Position Sensor bridge (transmitting bring-up, relaying raw frames to Host PC)"
+       (cfg.canopenBridge ? "Carriage Position Sensor bridge (transmitting bring-up)"
                            : "listen-only") + ". "
-       "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps.</div>";
-  h += "<p class='small'>Decodes a byte range from a specific CAN ID into a value.</p>";
-  h += "<form method='POST' action='/api/can/save'>";
-  h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save All Signals</button>";
-
-  for (int i = 0; i < MAX_CAN_SIGNALS; i++) {
-    CanSignalConfig& sg = cfg.canSignals[i];
-    h += "<div class='card'><div class='row' style='justify-content:space-between'>";
-    h += "<b>Signal " + String(i + 1) + "</b><span class='small mono' id='canlive" + String(i) + "'></span></div>";
-    h += "<label><input type='checkbox' name='c" + String(i) + "en'";
-    if (sg.enabled) h += " checked";
-    h += "> Enabled</label>";
-    h += "<div class='row'><div><label>Name</label><input name='c" + String(i) + "nm' value='" + _esc(sg.name) + "' placeholder='e.g. Engine RPM'></div>";
-    h += "<div><label>Kind</label><input name='c" + String(i) + "kd' value='" + _esc(sg.kind) + "' placeholder='e.g. rpm'></div>";
-    h += "<div><label>Unit</label><input name='c" + String(i) + "ut' value='" + _esc(sg.unit) + "' placeholder='e.g. rpm'></div></div>";
-    h += "<div class='grid4'>";
-    h += "<div><label>CAN ID (hex, e.g. 18FEF200)</label><input name='c" + String(i) + "id' value='" + String(sg.canId, HEX) + "'></div>";
-    h += "<div><label>ID Type</label><select name='c" + String(i) + "ext'>";
-    h += "<option value='0'" + String(!sg.extended ? " selected" : "") + ">Standard (11-bit)</option>";
-    h += "<option value='1'" + String(sg.extended ? " selected" : "") + ">Extended (29-bit)</option></select></div>";
-    h += "<div><label>Byte Offset (0-7)</label><input name='c" + String(i) + "bo' type='number' min='0' max='7' value='" + String(sg.byteOffset) + "'></div>";
-    h += "<div><label>Byte Length</label><select name='c" + String(i) + "bl'>";
-    h += "<option value='1'" + String(sg.byteLen == 1 ? " selected" : "") + ">1 byte</option>";
-    h += "<option value='2'" + String(sg.byteLen == 2 ? " selected" : "") + ">2 bytes</option>";
-    h += "<option value='4'" + String(sg.byteLen == 4 ? " selected" : "") + ">4 bytes</option></select></div>";
-    h += "</div>";
-    h += "<div class='row'>";
-    h += "<div><label>Byte Order</label><select name='c" + String(i) + "be'>";
-    h += "<option value='1'" + String(sg.bigEndian ? " selected" : "") + ">Big-endian (most CAN/J1939)</option>";
-    h += "<option value='0'" + String(!sg.bigEndian ? " selected" : "") + ">Little-endian</option></select></div>";
-    h += "<div><label>Signed</label><select name='c" + String(i) + "sv'>";
-    h += "<option value='0'" + String(!sg.signedVal ? " selected" : "") + ">Unsigned</option>";
-    h += "<option value='1'" + String(sg.signedVal ? " selected" : "") + ">Signed</option></select></div>";
-    h += "<div><label>Scale</label><input name='c" + String(i) + "sc' type='number' step='any' value='" + _f(sg.scale) + "'></div>";
-    h += "<div><label>Offset</label><input name='c" + String(i) + "of' type='number' step='any' value='" + _f(sg.offset) + "'></div>";
-    h += "</div>";
-    h += "</div>";
-  }
-
-  h += "<button type='submit' style='margin-top:6px'>&#128190; Save All Signals</button>";
-  h += "</form>";
-  h += R"(
+       "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps."
+       "<br><span class='small'>Raw frames below — values are decoded on the Host PC's rig profile, not here.</span></div>";
+  h += "<div class='row' style='margin-bottom:8px'><label style='margin:0'><input type='checkbox' id='pauseFeed'> Pause</label>"
+       "<span class='small' style='margin-left:auto' id='feedCount'></span></div>";
+  h += "<div class='card' style='padding:0;overflow-x:auto'><table style='width:100%;margin:0'>"
+       "<tr><th style='text-align:left'>Age</th><th style='text-align:left'>ID</th><th>DLC</th><th style='text-align:left'>Data (hex)</th></tr>"
+       "<tbody id='feedBody'><tr><td colspan='4' class='small' style='padding:10px'>Waiting for frames...</td></tr></tbody>"
+       "</table></div>";
+  h += R"JS(
 <script>
-function fetchCanLive(){
-  fetch('/api/can/live').then(r=>r.json()).then(d=>{
-    document.getElementById('canTotal') && (document.getElementById('canTotal').textContent = d.frameTotal);
-    document.getElementById('canRate') && (document.getElementById('canRate').textContent = d.frameRate);
-    d.signals.forEach(s=>{
-      let el=document.getElementById('canlive'+s.idx);
-      if(!el) return;
-      if (s.hasValue) el.textContent = s.value.toFixed(2)+' ('+s.status+')';
-      else el.textContent = '-- ('+s.status+')';
-      el.className = 'small mono ' + s.status;
-    });
-  });
+var lastMs = 0, total = 0;
+function esc2(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function fetchFeed(){
+  if (document.getElementById('pauseFeed').checked) return;
+  fetch('/api/can/live?since=' + lastMs).then(r=>r.json()).then(d=>{
+    document.getElementById('canTotal').textContent = d.frameTotal;
+    document.getElementById('canRate').textContent  = d.frameRate;
+    var fr = d.frames || [];
+    if (d.newestMs) lastMs = d.newestMs;
+    if (!fr.length) return;
+    var body = document.getElementById('feedBody');
+    if (body.querySelector('td[colspan]')) body.innerHTML = '';
+    var newest = d.newestMs || 0;
+    var rows = '';
+    // frames arrive oldest->newest; prepend newest first so the feed reads
+    // top-down like a tail -f
+    for (var i = fr.length - 1; i >= 0; i--) {
+      var f = fr[i];
+      var age = newest && f.ms ? ((newest - f.ms)/1000).toFixed(1) + 's' : 'now';
+      var idHex = (f.id >>> 0).toString(16).toUpperCase();
+      while (idHex.length < 8) idHex = '0' + idHex;
+      rows += '<tr><td class="small">' + age + '</td><td class="mono">' + idHex +
+              (f.extended ? 'x' : '') + '</td><td>' + f.dlc + '</td><td class="mono">' + esc2(f.data_hex) + '</td></tr>';
+    }
+    total += fr.length;
+    document.getElementById('feedCount').textContent = total + ' frames shown';
+    body.insertAdjacentHTML('afterbegin', rows);
+    while (body.children.length > 300) body.removeChild(body.lastChild);
+  }).catch(function(){});
 }
-setInterval(fetchCanLive,1500); fetchCanLive();
-</script>)";
+setInterval(fetchFeed, 1000); fetchFeed();
+</script>)JS";
   h += "</div>";
   return h;
 }
@@ -1071,9 +1063,17 @@ static void handleSensorsLive() {
 }
 
 static void handleCanLive() {
-  DynamicJsonDocument doc(4096);
+  DynamicJsonDocument doc(12288);
   doc["frameTotal"] = canGetFrameTotal();
   doc["frameRate"]  = canGetRecentFrameRate();
+  // v1.19.14: raw frame ring for the /can live feed. ?since=<ms> returns only
+  // frames newer than the cursor so the browser can tail -f without resending
+  // the whole ring every second. Ring is written by canPoll() in loop() and
+  // read here (also loop()) — same task, no locking needed.
+  unsigned long since = 0;
+  if (_srv->hasArg("since")) since = strtoul(_srv->arg("since").c_str(), nullptr, 10);
+  JsonArray frames = doc.createNestedArray("frames");
+  doc["newestMs"] = canSerializeRecentFrames(frames, since, 120);
   JsonArray arr = doc.createNestedArray("signals");
   if (xSemaphoreTake(_mtx, pdMS_TO_TICKS(300)) == pdTRUE) {
     for (int i = 0; i < MAX_CAN_SIGNALS; i++) {
