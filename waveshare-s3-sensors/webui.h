@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.16 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.17 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -726,8 +726,10 @@ var lastMs = 0, total = 0, capOn = false, cap = [], pump = {};
 // offset in the 8-byte data field, big-endian, J1939 convention. 0xFF/0xFFFF
 // means "not available" on a real ECU and is skipped.
 var J1939 = [
-  {pgn:0xF004, name:'Engine RPM',     off:3, len:2, scale:0.125, unit:'rpm'},
-  {pgn:0xF004, name:'Engine % torque',off:2, len:1, scale:1, ofs:-125, unit:'%'}
+  {pgn:0xF004, name:'Engine RPM',      off:2, len:1, scale:1,     unit:'rpm'},
+  {pgn:0xF004, name:'Engine % torque', off:6, len:1, scale:1, ofs:-125, unit:'%'},
+  {pgn:0xF003, name:'EEC2 % torque',   off:0, len:2, scale:0.125, ofs:-125, unit:'%'},
+  {pgn:0xFE6A, name:'Engine hours',    off:0, len:4, scale:0.05,  unit:'h'}
 ];
 function esc2(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 function decodeJ1939(f){
@@ -741,10 +743,10 @@ function decodeJ1939(f){
     for(var b=0;b<sg.len;b++){
       var idx=sg.off+b;
       if(idx>=hex.length){ok=false;break;}
-      v=(v<<8)|parseInt(hex[idx],16);
+      v|=parseInt(hex[idx],16)<<(8*b);   // J1939 multi-byte is little-endian
     }
     if(!ok) continue;
-    if(v===(sg.len===2?0xFFFF:0xFF)) continue;   // not-available sentinel
+    if(v===((1<<(8*sg.len))-1)) continue;   // not-available sentinel (all 0xFF)
     pump[sg.name]={val:v*sg.scale+(sg.ofs||0),unit:sg.unit,ms:f.ms};
   }
 }
@@ -779,9 +781,13 @@ function dlCsv(){
   a.download='can-capture-'+new Date().toISOString().replace(/[:.]/g,'-')+'.csv';
   a.click();
 }
+var feedInflight = false;
 function fetchFeed(){
   if (document.getElementById('pauseFeed').checked) return;
+  if (feedInflight) return;   // don't overlap polls: two in-flight fetches
+  feedInflight = true;        // share one cursor and both append the same batch
   fetch('/api/can/live?since=' + lastMs).then(r=>r.json()).then(d=>{
+    feedInflight = false;
     document.getElementById('canTotal').textContent = d.frameTotal;
     document.getElementById('canRate').textContent  = d.frameRate;
     var fr = d.frames || [];
@@ -811,7 +817,7 @@ function fetchFeed(){
     document.getElementById('feedCount').textContent = total + ' frames shown';
     body.insertAdjacentHTML('afterbegin', rows);
     while (body.children.length > 300) body.removeChild(body.lastChild);
-  }).catch(function(){});
+  }).catch(function(){ feedInflight = false; });
 }
 setInterval(fetchFeed, 1000); fetchFeed();
 </script>)JS";
