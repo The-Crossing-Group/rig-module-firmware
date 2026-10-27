@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.14 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.15 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -701,16 +701,84 @@ static String canPage(ModuleConfig& cfg) {
                            : "listen-only") + ". "
        "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps."
        "<br><span class='small'>Raw frames below — values are decoded on the Host PC's rig profile, not here.</span></div>";
-  h += "<div class='row' style='margin-bottom:8px'><label style='margin:0'><input type='checkbox' id='pauseFeed'> Pause</label>"
+  // v1.19.15 (Sarah, Vermeer SA400 mud pump): placeholder decode card ABOVE
+  // the raw feed. Decodes only standard J1939 EEC1 (PGN 61484) — engine speed
+  // + % torque — which virtually every diesel ECU broadcasts. Explicitly
+  // labelled unverified until we confirm against real SA400 traffic; extend
+  // the J1939 table in the script below once we have a capture.
+  h += "<div class='card'><b>&#128167; Pump data</b> "
+       "<span class='small'>placeholder J1939 (EEC1) — unverified for SA400</span>"
+       "<div id='pumpVals' class='small' style='margin-top:6px'>No J1939 engine data seen yet — is the pump running?</div></div>";
+  h += "<div class='row' style='margin-bottom:8px'>"
+       "<button type='button' id='capBtn' onclick='toggleCap()'>&#9210; Start capture</button>"
+       "<button type='button' id='dlBtn' style='display:none' onclick='dlCsv()'>&#11015; Download CSV</button>"
+       "<label style='margin:0 0 0 12px'><input type='checkbox' id='pauseFeed'> Pause</label>"
        "<span class='small' style='margin-left:auto' id='feedCount'></span></div>";
+  h += "<div class='small' id='capNote' style='margin-bottom:6px'>Capture records every frame while running (browser-side, no length limit) — stop, then download as CSV for analysis.</div>";
   h += "<div class='card' style='padding:0;overflow-x:auto'><table style='width:100%;margin:0'>"
        "<tr><th style='text-align:left'>Age</th><th style='text-align:left'>ID</th><th>DLC</th><th style='text-align:left'>Data (hex)</th></tr>"
        "<tbody id='feedBody'><tr><td colspan='4' class='small' style='padding:10px'>Waiting for frames...</td></tr></tbody>"
        "</table></div>";
   h += R"JS(
 <script>
-var lastMs = 0, total = 0;
+var lastMs = 0, total = 0, capOn = false, cap = [], pump = {};
+// Placeholder J1939 signal table (SA400 verification pending). off = byte
+// offset in the 8-byte data field, big-endian, J1939 convention. 0xFF/0xFFFF
+// means "not available" on a real ECU and is skipped.
+var J1939 = [
+  {pgn:0xF004, name:'Engine RPM',     off:3, len:2, scale:0.125, unit:'rpm'},
+  {pgn:0xF004, name:'Engine % torque',off:2, len:1, scale:1, ofs:-125, unit:'%'}
+];
 function esc2(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function decodeJ1939(f){
+  if(!f.extended) return;
+  var pgn=(f.id>>>8)&0x3FFFF, pf=(pgn>>8)&0xFF;
+  if(pf>=240) pgn&=0x3FF00;   // destination-specific PGNs: PS byte is a destination, not part of the PGN
+  var hex=f.data_hex.trim().split(' ');
+  for(var i=0;i<J1939.length;i++){
+    var sg=J1939[i]; if(sg.pgn!==pgn) continue;
+    var v=0, ok=true;
+    for(var b=0;b<sg.len;b++){
+      var idx=sg.off+b;
+      if(idx>=hex.length){ok=false;break;}
+      v=(v<<8)|parseInt(hex[idx],16);
+    }
+    if(!ok) continue;
+    if(v===(sg.len===2?0xFFFF:0xFF)) continue;   // not-available sentinel
+    pump[sg.name]={val:v*sg.scale+(sg.ofs||0),unit:sg.unit,ms:f.ms};
+  }
+}
+function renderPump(newest){
+  var el=document.getElementById('pumpVals'); if(!el) return;
+  var s='';
+  for(var k in pump){var p=pump[k];
+    var age=newest&&p.ms?(((newest-p.ms)/1000).toFixed(0)+'s ago'):'now';
+    var stale=newest&&p.ms&&(newest-p.ms>5000)?' stale':'';
+    s+='<span class="'+(stale?'stale':'ok')+'"><b>'+k+'</b>: '+p.val.toFixed(1)+' '+p.unit
+      +' <span class="small">('+age+')</span></span><br>';}
+  if(s) el.innerHTML=s;
+}
+function toggleCap(){
+  capOn=!capOn;
+  var b=document.getElementById('capBtn');
+  if(capOn){cap=[];b.innerHTML='&#9209; Stop capture ('+cap.length+')';
+    document.getElementById('dlBtn').style.display='none';}
+  else{b.innerHTML='&#9210; Start capture';
+    document.getElementById('capNote').textContent=cap.length+' frames captured.';
+    if(cap.length) document.getElementById('dlBtn').style.display='';}
+}
+function dlCsv(){
+  var s='ms,id_hex,extended,dlc,data_hex\n';
+  for(var i=0;i<cap.length;i++){var f=cap[i];
+    var idh=(f.id>>>0).toString(16).toUpperCase();
+    while(idh.length<8)idh='0'+idh;
+    s+=f.ms+','+idh+','+(f.extended?1:0)+','+f.dlc+',"'+f.data_hex.trim().replace(/\s+/g,' ')+'"\n';}
+  var blob=new Blob([s],{type:'text/csv'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='can-capture-'+new Date().toISOString().replace(/[:.]/g,'-')+'.csv';
+  a.click();
+}
 function fetchFeed(){
   if (document.getElementById('pauseFeed').checked) return;
   fetch('/api/can/live?since=' + lastMs).then(r=>r.json()).then(d=>{
@@ -722,6 +790,12 @@ function fetchFeed(){
     var body = document.getElementById('feedBody');
     if (body.querySelector('td[colspan]')) body.innerHTML = '';
     var newest = d.newestMs || 0;
+    for (var k = 0; k < fr.length; k++) {
+      decodeJ1939(fr[k]);
+      if (capOn && cap.length < 500000) cap.push(fr[k]);
+    }
+    if (capOn) document.getElementById('capBtn').innerHTML = '&#9209; Stop capture (' + cap.length + ')';
+    renderPump(newest);
     var rows = '';
     // frames arrive oldest->newest; prepend newest first so the feed reads
     // top-down like a tail -f
