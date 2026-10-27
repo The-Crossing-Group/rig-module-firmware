@@ -29,6 +29,8 @@
 //   3. mDNS browse for _rig-logger._tcp, re-run on a short retry interval
 //      while unresolved and re-verified on a long interval once resolved
 //      (expect this to often fail silently now — see v1.15.40 note above)
+//   3.5 gateway probe (v1.19.20): probe WiFi gateway :8080 — covers hotspot
+//      networks where the AP host (the rig PC) is the gateway itself.
 //   4. TCP port-sweep fallback: walk the module's own /24 looking for
 //      something listening on :8080. Runs immediately on first attempt
 //      (not after a 15-min wait — see _discSweepEverRun below), and is
@@ -93,6 +95,8 @@ static unsigned long _discLastSweep   = 0;
 // These two flags make the first attempt of each tier run immediately.
 static bool           _discMdnsEverRun  = false;
 static bool           _discSweepEverRun = false;
+static unsigned long _discLastGw      = 0;   // gateway probe pacing (tier 3.5)
+static bool           _discGwEverRun   = false;
 
 // Cheap liveness probe: does anything speak our logger API at this IP?
 // GET /api/status answers 200 on rig-pi-logger's local server.
@@ -215,6 +219,29 @@ String discoverLogger(const String& staticHost, const String& wifiSSID) {
     // mDNS silent. If we already hold an address, keep it — one missed browse
     // isn't evidence the logger went away, and dropping it would cost data.
     if (!_discResolvedIp.isEmpty()) return _discResolvedIp;
+  }
+
+  // 3.5 Gateway probe (v1.19.20). On a hotspot/ad-hoc network the machine
+  // hosting the AP IS the gateway — and that's where the logger runs (e.g. a
+  // rig PC sharing its cellular connection, 10.42.0.1). One targeted probe
+  // costs ~0.5s, so it runs at the fast 20s retry pace instead of the
+  // sweep's 15-min pacing, and it also covers non-/24 hotspot subnets where
+  // the sweep refuses to walk. Same probeLogger() confirmation as the sweep,
+  // so a captive-portal router answering on :8080 can't hijack us.
+  if (_discResolvedIp.isEmpty()) {
+    IPAddress gw = WiFi.gatewayIP();
+    if (gw && gw != IPAddress(0, 0, 0, 0) &&
+        (!_discGwEverRun || (now - _discLastGw >= DISCOVER_RETRY_MS))) {
+      _discGwEverRun = true;
+      _discLastGw = now;
+      if (tcpPortOpen(gw, LOGGER_PORT, SWEEP_PORT_TIMEOUT) &&
+          probeLogger(gw.toString())) {
+        _discResolvedIp = gw.toString();
+        _discMethod = "gateway";
+        Serial.printf("[Disc] Logger found at gateway %s\n", _discResolvedIp.c_str());
+        return _discResolvedIp;
+      }
+    }
   }
 
   // 4. TCP port sweep fallback (only while still unresolved).
