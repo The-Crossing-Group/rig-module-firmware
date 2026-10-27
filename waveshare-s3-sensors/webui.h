@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.12 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.13 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -117,6 +117,11 @@ static const char NAV[] PROGMEM = R"(<!DOCTYPE html>
      confirmed, in every Chromium and Firefox release currently in use.)
   */
   .masked-text{-webkit-text-security:disc}
+  .netlist{max-height:260px;overflow-y:auto;border:1px solid #334;border-radius:6px;margin-bottom:8px}
+  .netrow{padding:11px 12px;border-bottom:1px solid #334;cursor:pointer;-webkit-tap-highlight-color:rgba(102,126,234,.25)}
+  .netrow:last-child{border-bottom:none}
+  .netrow.sel{background:#0f3460;box-shadow:inset 3px 0 0 #667eea}
+  .manualrow{color:#667eea}
   /* ── Mobile (v1.19.12, Sarah: "current interface does not scale well on
      phones"). One breakpoint at 640px: bigger touch targets (44px — the
      rig-config.html kiosk standard), 16px inputs (stops iOS auto-zooming
@@ -339,26 +344,26 @@ static String cfgPage(ModuleConfig& cfg) {
   } else {
     h += "<div class='card'>Connected to: <b>" + _esc(cfg.wifiSSID) + "</b><br>IP: " + WiFi.localIP().toString() + "  RSSI: " + String(WiFi.RSSI()) + " dBm</div>";
   }
+  // v1.19.13 (Sarah: "make it use the same interface like in rig logger"):
+  // scan results are now TAP-TO-SELECT rows (rig-config.html's WiFi panel
+  // pattern) instead of an info-only list + separate <select> dropdown you
+  // had to re-pick the network in. The chosen SSID lives in a HIDDEN input
+  // (name=wifiSSID) that JS fills — hidden inputs are not password-manager
+  // autofill targets, so this keeps v1.15.13's autofill-overwrite fix intact
+  // while dropping the dropdown entirely. "/api/config" save contract
+  // unchanged: wifiSSID = picked name or "__manual__" + wifiSSIDManual.
   h += "<div class='row' style='margin-bottom:10px'><button type='button' onclick='doScan()' id='scanBtn'>&#128269; Scan for Networks</button></div>";
-  h += "<div id='scanResults'></div>";
-  // v1.15.13: SSID is now a <select> populated from the scan, NOT a free-text
-  // input. Root cause of the 2026-09-11 "scan pick doesn't stick" field report:
-  // the browser's password manager silently restored the saved SSID+password
-  // pair over the JS-written value on the manual-typed input (v1.15.12's
-  // autocomplete=off + submit-time re-apply did NOT defeat it). A select has
-  // no autofill target — the only way to change it is choosing from the list
-  // (or the explicit "Type manually..." option).
-  h += "<label>SSID</label><select name='wifiSSID' id='wifiSSID' onchange='onSsidPick()'>";
-  h += "<option value='__manual__'>Type manually...</option></select>";
-  h += "<input name='wifiSSIDManual' id='wifiSSIDManual' autocomplete='off' style='display:none' placeholder='site wifi network name'>";
-  h += "<div class='small' id='ssidHint'>Scan, then pick from the list.</div>";
+  h += "<div id='scanResults' class='small'>Tap Scan, then tap your network.</div>";
+  h += "<input type='hidden' name='wifiSSID' id='wifiSSID' value='" + _esc(cfg.wifiSSID) + "'>";
+  h += "<div id='selRow' class='card' style='display:none'></div>";
+  h += "<div id='manualWrap' style='display:none'><label>Network name</label><input name='wifiSSIDManual' id='wifiSSIDManual' autocomplete='off' placeholder='site wifi network name'></div>";
   // v1.15.34: type='text' + masked-text, same reasoning as X-Rig-Token
   // above — this was the field actually causing the save-password
   // prompt Sarah reported, since it's the one that most looks like a
   // real login password field to the browser's heuristics.
-  h += "<label>Password</label><input name='wifiPass' id='wifiPass' autocomplete='off' type='text' class='masked-text' placeholder='enter password for the selected network'>";
+  h += "<label>Password</label><input name='wifiPass' id='wifiPass' autocomplete='off' type='text' class='masked-text' placeholder='tap a network above, then type its password'>";
   h += "<div class='small'>Changing SSID/password reboots the unit. Password is never pre-filled — type it fresh after picking a network.</div>";
-  h += "<br><button type='submit'>Save</button>";
+  h += "<br><button type='submit'>Save &amp; Connect</button>";
   h += "</form>";
   h += "<div class='card' style='margin-top:12px'><b>Forget WiFi</b><br><span class='small'>Clears saved network, reboots into setup-AP mode.</span><br><br>";
   h += "<button class='btn-red' onclick=\"if(confirm('Forget saved WiFi and reboot into setup mode?'))fetch('/api/wifi/forget',{method:'POST'}).then(()=>alert('Forgotten. Rebooting...'))\">Forget WiFi</button></div>";
@@ -366,31 +371,28 @@ static String cfgPage(ModuleConfig& cfg) {
 <script>
 var CUR_SSID = "__CURSSID__";
 function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function fillSsidOptions(nets){
-  // nets: array of SSID strings (deduped). Rebuilds the select, preserving
-  // current selection when possible. Always keeps the manual entry option.
-  var sel=document.getElementById('wifiSSID');
-  var prev=sel.value;
-  sel.innerHTML='<option value="__manual__">Type manually...</option>';
-  var seen={};
-  for(var i=0;i<nets.length;i++){
-    var n=nets[i];
-    if(seen[n]) continue; seen[n]=1;
-    var o=document.createElement('option');
-    o.value=n; o.textContent=n + (n===CUR_SSID ? '  (current)' : '');
-    sel.appendChild(o);
-  }
-  // restore selection: previous pick if still present, else current config SSID
-  var want = prev && seen[prev] ? prev : (seen[CUR_SSID] ? CUR_SSID : '__manual__');
-  sel.value=want;
-  onSsidPick();
+function setSsid(name){ document.getElementById('wifiSSID').value = name; }
+function pickNet(ssid, row){
+  // tap-to-select: highlight row, hide manual box, stash SSID in hidden input
+  var rows=document.querySelectorAll('#scanResults .netrow');
+  for(var i=0;i<rows.length;i++) rows[i].classList.remove('sel');
+  if(row) row.classList.add('sel');
+  setSsid(ssid);
+  document.getElementById('manualWrap').style.display='none';
+  document.getElementById('wifiSSIDManual').value='';
+  var sel=document.getElementById('selRow');
+  sel.style.display=''; sel.innerHTML='Selected: <b>'+esc(ssid)+'</b>';
+  document.getElementById('wifiPass').focus();
 }
-function onSsidPick(){
-  var sel=document.getElementById('wifiSSID');
-  var m=document.getElementById('wifiSSIDManual');
-  var hint=document.getElementById('ssidHint');
-  if(sel.value==='__manual__'){ m.style.display=''; m.focus(); hint.textContent='Type the exact network name.'; }
-  else { m.style.display='none'; m.value=''; hint.textContent='Selected: '+sel.value; }
+function pickManual(row){
+  var rows=document.querySelectorAll('#scanResults .netrow');
+  for(var i=0;i<rows.length;i++) rows[i].classList.remove('sel');
+  if(row) row.classList.add('sel');
+  setSsid('__manual__');
+  var sel=document.getElementById('selRow');
+  sel.style.display=''; sel.innerHTML='Typing network name manually:';
+  var m=document.getElementById('manualWrap');
+  m.style.display=''; document.getElementById('wifiSSIDManual').focus();
 }
 function doScan(){
   let btn=document.getElementById('scanBtn'); let box=document.getElementById('scanResults');
@@ -400,18 +402,28 @@ function doScan(){
     btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks';
     let nets = d.networks || [];
     if(nets.length===0){ box.innerHTML='<p class="small">No networks found. Try again.</p>'; return; }
-    let s = '<div class="card">';
+    let s = '<div class="netlist">';
     nets.forEach(function(n){
       let bars = n.rssi>-60?'####':n.rssi>-70?'###.':n.rssi>-80?'##..':'#...';
       let lock = n.secure ? '&#128274;' : '';
-      s += '<div style="padding:4px 0;border-bottom:1px solid #334"><span>'+lock+' '+esc(n.ssid)+'</span> <span class="small">'+bars+' '+n.rssi+'dBm</span></div>';
+      let cur = (n.ssid===CUR_SSID) ? ' <span class="small">(current)</span>' : '';
+      s += '<div class="netrow" data-ssid="'+esc(n.ssid)+'">'+lock+' '+esc(n.ssid)+cur
+         + ' <span class="small" style="float:right">'+bars+' '+n.rssi+'dBm</span></div>';
     });
-    s += '</div>';
+    s += '<div class="netrow manualrow">+ Type network name manually...</div>';
+    s += '</div><div class="small" style="margin-top:6px">Tap your network, type the password, then Save &amp; Connect.</div>';
     box.innerHTML = s;
-    fillSsidOptions(nets.map(function(n){ return n.ssid; }));
+    let rows=box.querySelectorAll('.netrow');
+    rows.forEach(function(r){
+      if(r.classList.contains('manualrow')){ r.onclick=function(){ pickManual(r); }; }
+      else { r.onclick=function(){ pickNet(r.getAttribute('data-ssid'), r); }; }
+    });
+    // pre-highlight the currently-saved network so the state is obvious
+    rows.forEach(function(r){
+      if(!r.classList.contains('manualrow') && r.getAttribute('data-ssid')===CUR_SSID) r.classList.add('sel');
+    });
   }).catch(function(){ btn.disabled=false; btn.innerHTML='&#128269; Scan for Networks'; box.innerHTML='<p class="small">Scan failed.</p>'; });
 }
-window.addEventListener('DOMContentLoaded', function(){ fillSsidOptions([]); });
 </script>)JS";
   // Inject the current SSID into the JS constant AFTER the raw-string block
   // (raw string literals can't interpolate). _esc first, then escape
