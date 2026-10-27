@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.15 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.16 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -706,9 +706,9 @@ static String canPage(ModuleConfig& cfg) {
   // + % torque — which virtually every diesel ECU broadcasts. Explicitly
   // labelled unverified until we confirm against real SA400 traffic; extend
   // the J1939 table in the script below once we have a capture.
-  h += "<div class='card'><b>&#128167; Pump data</b> "
-       "<span class='small'>placeholder J1939 (EEC1) — unverified for SA400</span>"
-       "<div id='pumpVals' class='small' style='margin-top:6px'>No J1939 engine data seen yet — is the pump running?</div></div>";
+  h += "<div class='card'><b>&#128167; J1939 data</b> "
+       "<span class='small'>placeholder decode (EEC1) — unverified</span>"
+       "<div id='pumpVals' class='small' style='margin-top:6px'>No J1939 data seen yet — is the ECU running?</div></div>";
   h += "<div class='row' style='margin-bottom:8px'>"
        "<button type='button' id='capBtn' onclick='toggleCap()'>&#9210; Start capture</button>"
        "<button type='button' id='dlBtn' style='display:none' onclick='dlCsv()'>&#11015; Download CSV</button>"
