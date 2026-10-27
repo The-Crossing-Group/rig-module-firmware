@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.11
+// FIRMWARE VERSION: rig-module-sensors-1.19.12
 // =============================================================================
 // config.h — Rig Module (Direct Sensors) configuration structures + NVS
 //
@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.19.11"
+#define FW_VERSION "rig-module-sensors-1.19.12"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -442,6 +442,17 @@ struct ModuleConfig {
   // anyone who ever wires this board onto a bus they're not supposed to
   // transmit on -- CAN itself always runs (no way to fully disable it).
   bool   canopenBridge         = true;
+  // --- Raw CAN stream (2026-10-27, Sarah: "we just need it to stream all
+  // the CAN data it receives to the host pc") ----------------------------
+  // When true (default — plug-and-play like everything else on this board),
+  // the module POSTs every received CAN frame to the logger's
+  // /api/rig/module-can endpoint ~1x/sec, independent of the per-signal
+  // canSignals[] config below and of the 7s sensor poll. Decode lives on
+  // the PC (rig-pi-logger profiles) — this board never guesses byte
+  // layouts. Independent of canopenBridge: works on a passive listen-only
+  // tap too. Frames are NOT disk-buffered during WiFi outages (raw bus
+  // traffic is ephemeral; the sensor payload buffer is unaffected).
+  bool   canRawStream          = true;
   uint8_t canopenNodeId        = 0x7F;  // EPC CANopen encoder factory default (confirmed)
   bool   canopenTargetSpecific = false; // false = NMT Start targets "all nodes" (confirmed
                                           // working on bench, the safe default)
@@ -501,6 +512,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   // removed entirely -- CAN itself is unconditional, no toggle exists.)
   c.canBitrate    = p.getLong("canBit", 250000);
   c.canopenBridge = p.getBool("copBr", true);
+  c.canRawStream  = p.getBool("canRs", true); // fallback matches struct default (see 2026-09-09 copBr lesson)
   c.canopenNodeId = (uint8_t)p.getInt("copNode", 0x7F);
   c.canopenTargetSpecific = p.getBool("copTgtSp", false);
   c.nvsEraseSelfHealCount = p.getULong("nvsHealCnt", 0);
@@ -684,6 +696,7 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   // it either); factory reset still clears it like everything else.
   p.putLong("canBit", c.canBitrate);
   p.putBool("copBr", c.canopenBridge);
+  p.putBool("canRs", c.canRawStream);
   p.putInt("copNode", c.canopenNodeId);
   p.putBool("copTgtSp", c.canopenTargetSpecific);
   p.putULong("nvsHealCnt", c.nvsEraseSelfHealCount);
@@ -815,6 +828,7 @@ void configToJson(ModuleConfig& c, JsonDocument& doc) {
 
   doc["canBitrate"]             = c.canBitrate;
   doc["canopenBridge"]          = c.canopenBridge;
+  doc["canRawStream"]           = c.canRawStream;
   doc["canopenNodeId"]          = c.canopenNodeId;
   doc["canopenTargetSpecific"]  = c.canopenTargetSpecific;
 
@@ -919,6 +933,7 @@ bool configFromJson(JsonDocument& doc, ModuleConfig& c) {
 
   if (!doc["canBitrate"].isNull())            c.canBitrate            = doc["canBitrate"].as<long>();
   if (!doc["canopenBridge"].isNull())         c.canopenBridge         = doc["canopenBridge"].as<bool>();
+  if (!doc["canRawStream"].isNull())          c.canRawStream          = doc["canRawStream"].as<bool>();
   if (!doc["canopenNodeId"].isNull())         c.canopenNodeId         = (uint8_t)doc["canopenNodeId"].as<int>();
   if (!doc["canopenTargetSpecific"].isNull()) c.canopenTargetSpecific = doc["canopenTargetSpecific"].as<bool>();
 

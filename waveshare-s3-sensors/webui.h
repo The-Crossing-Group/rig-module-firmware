@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.11 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.12 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -69,7 +69,9 @@ static CanSignalReading* _cReadings = nullptr;
 static SemaphoreHandle_t _mtx = nullptr;
 
 // ─── Shared CSS / nav ────────────────────────────────────────────────────────
-static const char NAV[] PROGMEM = R"(
+static const char NAV[] PROGMEM = R"(<!DOCTYPE html>
+<html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#1a1a2e;color:#e0e0e0;font-family:sans-serif;font-size:14px}
@@ -115,7 +117,29 @@ static const char NAV[] PROGMEM = R"(
      confirmed, in every Chromium and Firefox release currently in use.)
   */
   .masked-text{-webkit-text-security:disc}
+  /* ── Mobile (v1.19.12, Sarah: "current interface does not scale well on
+     phones"). One breakpoint at 640px: bigger touch targets (44px — the
+     rig-config.html kiosk standard), 16px inputs (stops iOS auto-zooming
+     the whole page when a field gets focus), grids collapse to 2-up/1-up,
+     wide tables scroll sideways inside the card instead of blowing out
+     the page width. Desktop rendering is unchanged. */
+  @media (max-width:640px){
+    body{font-size:15px}
+    .nav{padding:8px 10px;gap:6px}
+    .nav a{padding:9px 12px;font-size:14px}
+    .page{padding:10px}
+    input,select{font-size:16px;padding:10px;margin-bottom:12px}
+    button,.btn{font-size:15px;padding:11px 18px;min-height:44px}
+    .card{padding:10px}
+    .grid3,.grid4{grid-template-columns:1fr 1fr}
+    .row{flex-direction:column;align-items:stretch}
+    table{display:block;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+    td,th{padding:9px 8px}
+    label{margin-bottom:6px}
+    input[type=checkbox]{width:20px;height:20px;margin-right:10px;vertical-align:middle}
+  }
 </style>
+</head><body>
 <div class='nav'>
   <a href='/'>&#9881; Config</a>
   <a href='/sensors'>&#128225; RS485</a>
@@ -283,6 +307,12 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<div class='small'>Confirmed: encoder counts/rev = 16384 (EPC object 6001h factory "
        "default 0x4000). Position-per-foot calibration is unconfirmed — set on the Host PC's Sensor "
        "Configuration page once the sensor is jogged a known distance, not here.</div>";
+
+  h += "<h3>Raw CAN Stream</h3>";
+  h += "<label><input type='checkbox' name='canRawStream'";
+  if (cfg.canRawStream) h += " checked";
+  h += "> Stream ALL received CAN frames to Host PC (~1/s)</label>";
+  h += "<div class='small'>No per-signal setup needed — the logger decodes with its rig profile. Works listen-only.</div>";
 
   h += "<h3>Host PC Logger</h3>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
@@ -1169,6 +1199,10 @@ static void handleConfig() {
   if (newCanopenTargetSpecific != _cfg->canopenTargetSpecific) {
     _cfg->canopenTargetSpecific = newCanopenTargetSpecific; canChanged = true;
   }
+  // Raw stream is pure POST-side behavior — no TWAI restart needed, so it
+  // doesn't participate in canChanged.
+  bool newCanRawStream = _srv->hasArg("canRawStream");
+  if (newCanRawStream != _cfg->canRawStream) { _cfg->canRawStream = newCanRawStream; }
 
   applyParam("pollIntervalS", [](String v){ _cfg->pollIntervalS = constrain(v.toInt(), 1, 30); });
   // NOTE: String::trim() mutates in place and returns void — it can't be used

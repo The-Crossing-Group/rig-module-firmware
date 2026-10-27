@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.11 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.12 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -546,6 +546,12 @@ void loop() {
       postToPi();
     }
   }
+
+  // Raw CAN stream (2026-10-27, Sarah): forward every received frame to
+  // the logger's /api/rig/module-can ~1x/sec while the sensor payload
+  // keeps its own slower pollIntervalS cadence. Internally rate-limited
+  // + no-ops when disabled, offline, or nothing new arrived.
+  canStreamTick();
 
   delay(20); // shorter than other variants' 100ms — keeps CAN frame draining responsive
 }
@@ -1275,6 +1281,65 @@ bool httpPost(const String& ip, const String& json) {
   http.end();
   Serial.printf("[Post] %s → %d\n", url.c_str(), code);
   return (code == 200);
+}
+
+// =============================================================================
+// RAW CAN STREAM (2026-10-27, Sarah: "we just need it to stream all of the
+// can data it receives to the host pc — no per-signal setup")
+//
+// Separate ~1 Hz POST of raw frames to /api/rig/module-can, deliberately
+// decoupled from the 7s sensor payload:
+//   - per-signal canSignals[] config is NOT required — everything on the
+//     bus goes out as raw id/dlc/data_hex, decode lives on the PC
+//     (rig-pi-logger profiles), same rule as CANopen bridge mode.
+//   - works in listen-only mode (no TX at all) — unlike canopenBridge.
+//   - NOT disk-buffered during outages: raw bus traffic is ephemeral and
+//     a backlog would evict the sensor buffer; frames still in the ring
+//     when WiFi returns get sent on the next tick, older ones are gone.
+// Runs in loop() (same task as canPoll) so the ring needs no locking.
+// =============================================================================
+static unsigned long _lastCanStreamSentMs = 0;
+
+bool httpPostCanStream(const String& ip, const String& json) {
+  if (ip.isEmpty()) return false;
+  String url = "http://" + ip + ":8080/api/rig/module-can";
+  HTTPClient http;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  if (!cfg.rigToken.isEmpty()) {
+    http.addHeader("X-Rig-Token", cfg.rigToken);
+  }
+  http.setTimeout(3000); // short: this is a fire-and-forget side stream,
+                         // must never let a stuck logger stall loop()
+  int code = http.POST(json);
+  http.end();
+  return (code == 200);
+}
+
+void canStreamTick() {
+  if (!cfg.canRawStream) return;
+  static unsigned long lastTick = 0;
+  unsigned long now = millis();
+  if (now - lastTick < 1000UL) return;
+  lastTick = now;
+
+  if (resolvedPiIp.isEmpty() || WiFi.status() != WL_CONNECTED) return;
+
+  DynamicJsonDocument doc(24576);
+  doc["moduleId"] = cfg.moduleId;
+  doc["type"]     = cfg.moduleType.isEmpty() ? "generic" : cfg.moduleType;
+  JsonArray frames = doc.createNestedArray("canFrames");
+  unsigned long newest = canSerializeRecentFrames(frames, _lastCanStreamSentMs, 200);
+  if (frames.size() == 0) return; // nothing new — don't POST an empty batch
+
+  String body;
+  serializeJson(doc, body);
+  if (httpPostCanStream(resolvedPiIp, body)) {
+    _lastCanStreamSentMs = newest;
+  }
+  // On failure: do NOT advance _lastCanStreamSentMs — frames still in the
+  // ring ride out a brief blip; a long outage just drops them (by design,
+  // see header comment). discovery/postToPi handle logger-loss detection.
 }
 
 // =============================================================================

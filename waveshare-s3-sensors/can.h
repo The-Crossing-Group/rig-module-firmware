@@ -45,7 +45,7 @@ struct CanFrameLog {
   uint8_t  data[8];
   unsigned long ms; // millis() at capture
 };
-#define CAN_LOG_SIZE 60
+#define CAN_LOG_SIZE 512
 static CanFrameLog _canLog[CAN_LOG_SIZE];
 static int _canLogHead = 0;   // next write index
 static int _canLogCount = 0;  // how many valid entries (caps at CAN_LOG_SIZE)
@@ -361,37 +361,44 @@ bool canopenBringupIfDue(uint8_t targetNodeId, bool targetSpecificNode) {
 //
 // maxCount caps how many go in one POST body (bandwidth/heap), oldest-
 // first so the PC sees them in the order they actually happened.
+//
+// REWRITTEN 2026-10-27 (raw CAN stream feature): the old version copied
+// the whole ring into a stack buffer first — fine at CAN_LOG_SIZE=60
+// (~1.4KB), unsafe at 512 (~12KB on loop()'s ~8KB stack). Now walks the
+// ring in place instead; no copy at all.
 unsigned long canSerializeRecentFrames(JsonArray& arr, unsigned long sinceMs, int maxCount) {
-  CanFrameLog buf[CAN_LOG_SIZE];
-  int n = canGetRecentFrames(buf, CAN_LOG_SIZE); // newest-first
-  unsigned long newestMs = sinceMs;
-  int added = 0;
-  // Walk newest-first but only keep frames after sinceMs, then emit in
-  // reverse (oldest-first) so the array reads chronologically.
+  // Walk newest-first through the ring, counting frames newer than
+  // sinceMs, stopping at the first one at/before it (ring is in insertion
+  // order, so everything past that point is older still).
+  int newestIdx = (_canLogHead - 1 + CAN_LOG_SIZE * 2) % CAN_LOG_SIZE;
   int keep = 0;
-  for (int i = 0; i < n; i++) {
-    if ((long)(buf[i].ms - sinceMs) <= 0) break; // ring buffer is newest-first; once we hit
-                                                   // one at/before sinceMs, everything after
-                                                   // it is older still — safe to stop
+  for (int i = 0; i < _canLogCount; i++) {
+    int idx = (newestIdx - i + CAN_LOG_SIZE * 2) % CAN_LOG_SIZE;
+    if ((long)(_canLog[idx].ms - sinceMs) <= 0) break;
     keep++;
   }
   if (keep > maxCount) keep = maxCount; // if more arrived than fit, keep the NEWEST `maxCount`
+
+  unsigned long newestMs = sinceMs;
+  // Emit oldest-first: walk back from the oldest kept frame (offset keep-1
+  // from newest) up to the newest.
   for (int i = keep - 1; i >= 0; i--) {
+    int idx = (newestIdx - i + CAN_LOG_SIZE * 2) % CAN_LOG_SIZE;
+    CanFrameLog& f0 = _canLog[idx];
     JsonObject f = arr.createNestedObject();
-    f["id"] = buf[i].id;
-    f["extended"] = buf[i].extended;
-    f["dlc"] = buf[i].dlc;
+    f["id"] = f0.id;
+    f["extended"] = f0.extended;
+    f["dlc"] = f0.dlc;
     char hex[25]; // 8 bytes * 3 chars ("XX ") + null
     hex[0] = '\0';
-    for (int b = 0; b < buf[i].dlc && b < 8; b++) {
+    for (int b = 0; b < f0.dlc && b < 8; b++) {
       char byteStr[4];
-      snprintf(byteStr, sizeof(byteStr), "%02X ", buf[i].data[b]);
+      snprintf(byteStr, sizeof(byteStr), "%02X ", f0.data[b]);
       strcat(hex, byteStr);
     }
     f["data_hex"] = String(hex);
-    f["ms"] = buf[i].ms;
-    if (buf[i].ms > newestMs) newestMs = buf[i].ms;
-    added++;
+    f["ms"] = f0.ms;
+    if (f0.ms > newestMs) newestMs = f0.ms;
   }
   return newestMs;
 }
