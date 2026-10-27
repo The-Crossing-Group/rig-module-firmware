@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.17 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.18 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -707,7 +707,7 @@ static String canPage(ModuleConfig& cfg) {
   // labelled unverified until we confirm against real SA400 traffic; extend
   // the J1939 table in the script below once we have a capture.
   h += "<div class='card'><b>&#128167; J1939 data</b> "
-       "<span class='small'>placeholder decode (EEC1) — unverified</span>"
+       "<span class='small'>field-verified decode (j1939-logger table)</span>"
        "<div id='pumpVals' class='small' style='margin-top:6px'>No J1939 data seen yet — is the ECU running?</div></div>";
   h += "<div class='row' style='margin-bottom:8px'>"
        "<button type='button' id='capBtn' onclick='toggleCap()'>&#9210; Start capture</button>"
@@ -725,17 +725,47 @@ var lastMs = 0, total = 0, capOn = false, cap = [], pump = {};
 // Placeholder J1939 signal table (SA400 verification pending). off = byte
 // offset in the 8-byte data field, big-endian, J1939 convention. 0xFF/0xFFFF
 // means "not available" on a real ECU and is skipped.
+// Table ported from waveshare-s3-j1939-logger/j1939.h — field-verified against
+// a real engine (crank/idle/rev/shutdown capture 2026-10-27). NOTE: this ECU's
+// EEC1 is NOT the textbook layout — RPM is bytes 3-4 (0.125 rpm/bit), torque
+// byte 2, driver-demand byte 1 (both -125 offset). Scales below bake in the
+// imperial conversion (F/psi/gal) so display needs no extra math.
 var J1939 = [
-  {pgn:0xF004, name:'Engine RPM',      off:2, len:1, scale:1,     unit:'rpm'},
-  {pgn:0xF004, name:'Engine % torque', off:6, len:1, scale:1, ofs:-125, unit:'%'},
-  {pgn:0xF003, name:'EEC2 % torque',   off:0, len:2, scale:0.125, ofs:-125, unit:'%'},
-  {pgn:0xFE6A, name:'Engine hours',    off:0, len:4, scale:0.05,  unit:'h'}
+  {pgn:0xF004, name:'RPM',            off:3, len:2, scale:0.125,               unit:'rpm'},
+  {pgn:0xF004, name:'Torque',         off:2, len:1, scale:1, ofs:-125,         unit:'%'},
+  {pgn:0xF004, name:'Demand torque',  off:1, len:1, scale:1, ofs:-125,         unit:'%'},
+  {pgn:0xF003, name:'Pedal',          off:1, len:1, scale:0.4,                 unit:'%'},
+  {pgn:0xF003, name:'Load',           off:2, len:1, scale:1,                   unit:'%'},
+  {pgn:0xFEEE, name:'Coolant temp',   off:0, len:1, scale:1.8, ofs:-40,        unit:'\u00b0F'},
+  {pgn:0xFEEE, name:'Fuel temp',      off:1, len:1, scale:1.8, ofs:-40,        unit:'\u00b0F'},
+  {pgn:0xFEEE, name:'Oil temp',       off:2, len:2, scale:0.05625, ofs:-459.4, unit:'\u00b0F'},
+  {pgn:0xFEEE, name:'Intercooler',    off:6, len:1, scale:1.8, ofs:-40,        unit:'\u00b0F'},
+  {pgn:0xFEEF, name:'Fuel pressure',  off:0, len:1, scale:0.5801508,           unit:'psi'},
+  {pgn:0xFEEF, name:'Oil pressure',   off:3, len:1, scale:0.5801508,           unit:'psi'},
+  {pgn:0xFEEF, name:'Coolant press.', off:6, len:1, scale:0.2900754,           unit:'psi'},
+  {pgn:0xFEEF, name:'Oil level',      off:2, len:1, scale:0.4,                 unit:'%'},
+  {pgn:0xFEEF, name:'Coolant level',  off:7, len:1, scale:0.4,                 unit:'%'},
+  {pgn:0xFEF2, name:'Fuel rate',      off:0, len:2, scale:0.0132086,           unit:'gal/h'},
+  {pgn:0xFEF2, name:'Throttle',       off:6, len:1, scale:0.4,                 unit:'%'},
+  {pgn:0xFEE5, name:'Engine hours',   off:0, len:4, scale:0.05,                unit:'h'},
+  {pgn:0xFEE9, name:'Fuel used',      off:4, len:4, scale:0.132086,            unit:'gal'},
+  {pgn:0xFEF6, name:'Boost',          off:1, len:1, scale:0.2900754,           unit:'psi'},
+  {pgn:0xFEF6, name:'Intake temp',    off:2, len:1, scale:1.8, ofs:-40,        unit:'\u00b0F'},
+  {pgn:0xFEF6, name:'Exhaust temp',   off:5, len:2, scale:0.05625, ofs:-459.4, unit:'\u00b0F'},
+  {pgn:0xFEF7, name:'Alternator',     off:2, len:2, scale:0.05,                unit:'V'},
+  {pgn:0xFEF7, name:'Battery',        off:4, len:2, scale:0.05,                unit:'V'},
+  {pgn:0xFEFC, name:'Fuel level',     off:1, len:1, scale:0.4,                 unit:'%'},
+  {pgn:0xFEF5, name:'Baro',           off:0, len:1, scale:0.07251885,          unit:'psi'},
+  {pgn:0xFEF5, name:'Ambient temp',   off:3, len:2, scale:0.05625, ofs:-459.4, unit:'\u00b0F'}
 ];
 function esc2(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 function decodeJ1939(f){
   if(!f.extended) return;
-  var pgn=(f.id>>>8)&0x3FFFF, pf=(pgn>>8)&0xFF;
-  if(pf>=240) pgn&=0x3FF00;   // destination-specific PGNs: PS byte is a destination, not part of the PGN
+  // PGN incl. low byte, same formula as the field-verified j1939-logger:
+  // (dp<<16)|(pf<<8)|ps. NOTE EEC1 is 0xF004 with pf=0xF0>=240 — the low byte
+  // IS part of the PGN here, so do NOT mask ps away (earlier versions did and
+  // silently matched nothing).
+  var pgn=(f.id>>>8)&0x3FFFF;
   var hex=f.data_hex.trim().split(' ');
   for(var i=0;i<J1939.length;i++){
     var sg=J1939[i]; if(sg.pgn!==pgn) continue;
@@ -746,7 +776,7 @@ function decodeJ1939(f){
       v|=parseInt(hex[idx],16)<<(8*b);   // J1939 multi-byte is little-endian
     }
     if(!ok) continue;
-    if(v===((1<<(8*sg.len))-1)) continue;   // not-available sentinel (all 0xFF)
+    if(v>=(sg.len===4?0xFB000000:(sg.len===2?0xFB00:0xFB))) continue;  // J1939 error/not-available
     pump[sg.name]={val:v*sg.scale+(sg.ofs||0),unit:sg.unit,ms:f.ms};
   }
 }
