@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.21 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.22 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -937,7 +937,7 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<br><b>MAC:</b> " + WiFi.macAddress();
   h += "<br><b>Chip:</b> " + String(ESP.getChipModel()) + " @ " + String(ESP.getCpuFreqMHz()) + "MHz";
   h += "<br><b>CAN:</b> always on, " + String(cfg.canBitrate) + " bit/s" +
-    (cfg.canopenBridge ? " (Carriage Position Sensor bridge, node 0x" + String(cfg.canopenNodeId, HEX) + ")" : ", listen-only") +
+    (cfg.canopenBridge ? ", bridge active" : ", listen-only") +
     "</div>";
   // v1.15.32: the NVS-erase self-heal that used to bump this counter was
   // REMOVED (it was the actual root cause of a boot-loop bug — see
