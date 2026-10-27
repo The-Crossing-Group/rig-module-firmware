@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.22 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.23 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -858,12 +858,18 @@ setInterval(fetchFeed, 1000); fetchFeed();
 // ─── /live  LIVE VALUES TABLE ────────────────────────────────────────────────
 static String livePage() {
   String h = FPSTR(NAV);
-  h += "<div class='page'><h2>&#128202; Live Status</h2><div id='liveData'>Loading...</div>";
+  h += "<div class='page'><h2>&#128202; Live Status</h2>"
+       "<div class='small' id='liveNet' style='margin:-6px 0 8px'>—</div>"
+       "<div id='liveData'>Loading...</div>";
   h += R"(
 <script>
 function fetchLive(){
   fetch('/api/status').then(r=>r.json()).then(d=>{
     let s = '';
+    const net = document.getElementById('liveNet');
+    if (net) net.textContent = d.ip
+      ? ('On "' + (d.ssid||'?') + '" @ ' + d.ip + '  (setup AP: 192.168.4.1)')
+      : 'No network — setup AP only (192.168.4.1)';
     s += '<h3>RS485 Sensors</h3><table><tr><th>Name</th><th>Kind</th><th>Slave</th><th>Value</th><th>Volume</th><th>Status</th></tr>';
     (d.channels||[]).forEach(c=>{
       if (c.kind==='j1939') return;  // engine signals live in the CAN table below
@@ -935,6 +941,18 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<div class='card'><b>Firmware:</b> " + String(FW_VERSION);
   h += "<br><b>Module ID:</b> " + cfg.moduleId;
   h += "<br><b>MAC:</b> " + WiFi.macAddress();
+  // v1.19.23 (Sarah: "not seeing its new ip, still see 192.168.4.1"): the
+  // STA IP was only visible on the config page's WiFi card — nowhere else.
+  // System page now shows BOTH addresses explicitly so "which IP is it on
+  // now" is answerable at a glance.
+  if (WiFi.status() == WL_CONNECTED) {
+    h += "<br><b>WiFi:</b> " + _esc(cfg.wifiSSID) + " @ <b>" + WiFi.localIP().toString() +
+         "</b> (" + String(WiFi.RSSI()) + " dBm)";
+  } else {
+    h += "<br><b>WiFi:</b> " + (cfg.wifiSSID.isEmpty()
+         ? "not configured" : "NOT connected to " + _esc(cfg.wifiSSID));
+  }
+  h += "<br><b>Setup AP:</b> " + _esc(apSSID) + " @ " + WiFi.softAPIP().toString();
   h += "<br><b>Chip:</b> " + String(ESP.getChipModel()) + " @ " + String(ESP.getCpuFreqMHz()) + "MHz";
   h += "<br><b>CAN:</b> always on, " + String(cfg.canBitrate) + " bit/s" +
     (cfg.canopenBridge ? ", bridge active" : ", listen-only") +

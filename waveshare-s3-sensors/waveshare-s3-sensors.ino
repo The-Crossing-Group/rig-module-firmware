@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.22 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.23 (see FW_VERSION in config.h)
 // =============================================================================
 // waveshare-s3-sensors.ino — Direct-Sensor Rig Module
 // Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, ESP32-S3)
@@ -1069,6 +1069,7 @@ String buildPayload(bool bufferedFlag) {
   doc["moduleName"] = cfg.moduleName;
   if (WiFi.status() == WL_CONNECTED) {
     doc["ip"] = WiFi.localIP().toString();
+    doc["ssid"] = cfg.wifiSSID;   // v1.19.23: live page shows "on <net> @ <ip>"
   }
   doc["fw"]       = FW_VERSION;
   doc["uptimeS"]  = (unsigned long)(millis() / 1000UL);
