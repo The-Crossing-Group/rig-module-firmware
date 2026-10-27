@@ -1,6 +1,6 @@
 # Rig Module Firmware — Waveshare ESP32-S3-RS485-CAN (Direct Sensors)
 
-**Version:** rig-module-sensors-1.19.20
+**Version:** rig-module-sensors-1.19.21
 **Board:** Waveshare ESP32-S3-RS485-CAN (isolated, DIN-rail, screw terminal)
 **Target:** Any Modbus RTU sensor wired directly to RS485 — pressure, temp,
 flow, level, whatever. Also brings up CAN (unused on the sibling

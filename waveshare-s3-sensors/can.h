@@ -443,6 +443,7 @@ void j1939FillChannels(JsonArray& arr) {
     JsonObject c = arr.createNestedObject();
     c["ch"]    = 100 + (int)i;
     c["kind"]  = "j1939";
+    c["pgn"]   = _j1939Table[i].pgn;
     c["name"]  = _j1939Table[i].name;
     c["unit"]  = _j1939Table[i].unit;
     c["value"] = _j1939Vals[i].v;

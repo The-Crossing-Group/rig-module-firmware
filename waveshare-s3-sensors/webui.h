@@ -1,4 +1,4 @@
-// FIRMWARE VERSION: rig-module-sensors-1.19.20 (see FW_VERSION in config.h)
+// FIRMWARE VERSION: rig-module-sensors-1.19.21 (see FW_VERSION in config.h)
 // =============================================================================
 // webui.h — WebServer routes: config UI + REST API
 // Direct-Sensor Rig Module variant. Pages:
@@ -866,6 +866,7 @@ function fetchLive(){
     let s = '';
     s += '<h3>RS485 Sensors</h3><table><tr><th>Name</th><th>Kind</th><th>Slave</th><th>Value</th><th>Volume</th><th>Status</th></tr>';
     (d.channels||[]).forEach(c=>{
+      if (c.kind==='j1939') return;  // engine signals live in the CAN table below
       let ds = c.displayStatus || c.status;
       let cls = ds==='ok'?'ok':ds;
       s += '<tr><td>'+(c.name||'')+'</td><td>'+(c.kind||'')+'</td><td>'+c.ch+'</td>';
@@ -896,6 +897,13 @@ function fetchLive(){
         let cls = c.status==='ok'?'ok':'stale';
         s += '<tr><td>'+(c.name||'')+'</td><td>'+(c.kind||'')+'</td><td>0x'+Number(c.canId).toString(16).toUpperCase()+'</td>';
         s += '<td>'+(c.value!=null?c.value+' '+c.unit:'--')+'</td><td class="'+cls+'">'+c.status+'</td></tr>';
+      });
+      // Onboard-decoded J1939 engine channels (kind j1939 in the channels
+      // array) belong in THIS table, not the RS485 one (Sarah 2026-10-27).
+      (d.channels||[]).filter(c=>c.kind==='j1939').forEach(c=>{
+        let cls = c.status==='ok'?'ok':'stale';
+        s += '<tr><td>'+(c.name||'')+'</td><td>j1939</td><td>'+(c.pgn!=null?'PGN 0x'+Number(c.pgn).toString(16).toUpperCase():'J1939')+'</td>';
+        s += '<td>'+(c.value!=null?c.value+' '+(c.unit||''):'--')+'</td><td class="'+cls+'">'+c.status+'</td></tr>';
       });
       s += '</table>';
       s += '<p class="small">CAN frame rate: '+(d.canFrameRate||0)+' fps, total: '+(d.canFrameTotal||0)+'</p>';
