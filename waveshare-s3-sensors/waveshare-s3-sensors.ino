@@ -971,8 +971,12 @@ void pollTask(void* param) {
       vTaskDelay(1); // let a waiting web-diagnostics task grab the bus mutex
       if (boardRc != MB_OK) {
         for (int i=0;i<MAX_MODBUS_CHANNELS;i++) { if (cfg.modbusBoard.channels[i].enabled) modbusReadings[i].status="timeout"; modbusReadings[i].valid=false; }
-        for (int i=0;i<4;i++) { if (cfg.modbusBoard.din[i].enabled) modbusDinReadings[i].status="timeout"; modbusDinReadings[i].valid=false; }
-        for (int i=0;i<4;i++) { if (cfg.modbusBoard.dout[i].enabled) modbusDoutReadings[i].status="timeout"; modbusDoutReadings[i].valid=false; }
+        // v1.19.30: on an AMIDJ14, modbusPollBoard() sets DI/DO status itself
+        // (it still reads them when only the analog read failed) — don't wipe it.
+        if (modbusDetectedType != "amidj14") {
+          for (int i=0;i<4;i++) { if (cfg.modbusBoard.din[i].enabled) modbusDinReadings[i].status="timeout"; modbusDinReadings[i].valid=false; }
+          for (int i=0;i<4;i++) { if (cfg.modbusBoard.dout[i].enabled) modbusDoutReadings[i].status="timeout"; modbusDoutReadings[i].valid=false; }
+        }
       }
     }
 

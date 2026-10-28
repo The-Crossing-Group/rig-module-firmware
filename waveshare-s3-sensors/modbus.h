@@ -515,9 +515,9 @@ static bool modbusWriteBoardDO(int doIndex, bool value) {
 static int modbusPollBoard(ModbusBoardConfig& b, ModbusChannelReading* out, String& detectedType,
                             ModbusDigitalReading* dinOut = nullptr, ModbusDigitalReading* doutOut = nullptr) {
   if (!b.enabled) return MB_TIMEOUT; uint16_t product[1]={0};
-  if (b.boardType == "auto") { if(modbusReadRegs(MODBUS_BOARD_SLAVE_ID,3,0x00F7,1,product)==MB_OK) detectedType=(product[0]==2814)?"amidj14":"waveshare"; else detectedType="waveshare"; } else detectedType=b.boardType;
-  int count=detectedType=="amidj14"?6:8; uint16_t raw[MAX_MODBUS_CHANNELS]={0}; int rc=modbusReadRegs(MODBUS_BOARD_SLAVE_ID,4,0,count,raw); if(rc!=MB_OK)return rc; float div=modbusBoardRawDivisor(detectedType);
-  for(int i=0;i<MAX_MODBUS_CHANNELS;i++){if(i>=count||!b.channels[i].enabled)continue;auto&r=out[i];r.valid=true;r.hasValue=true;r.mA=raw[i]/div;r.value=b.channels[i].engMin+(r.mA-4.0f)*(b.channels[i].engMax-b.channels[i].engMin)/16.0f;r.status="ok";}
+  if (b.boardType == "auto") { if(modbusReadRegs(MODBUS_BOARD_SLAVE_ID,3,0x00F7,1,product)==MB_OK) detectedType=(product[0]==2814)?"amidj14":"waveshare"; else if (detectedType=="unknown") detectedType="waveshare"; /* v1.19.30: one failed ID read no longer flips a known AMIDJ14 to waveshare (that made DI/DO vanish) */ } else detectedType=b.boardType;
+  int count=detectedType=="amidj14"?6:8; uint16_t raw[MAX_MODBUS_CHANNELS]={0}; int rc=modbusReadRegs(MODBUS_BOARD_SLAVE_ID,4,0,count,raw); bool analogOk=(rc==MB_OK); if(!analogOk && !(detectedType=="amidj14" && dinOut && doutOut))return rc; float div=modbusBoardRawDivisor(detectedType);
+  for(int i=0;analogOk && i<MAX_MODBUS_CHANNELS;i++){if(i>=count||!b.channels[i].enabled)continue;auto&r=out[i];r.valid=true;r.hasValue=true;r.mA=raw[i]/div;r.value=b.channels[i].engMin+(r.mA-4.0f)*(b.channels[i].engMax-b.channels[i].engMin)/16.0f;r.status="ok";}
 
   // Digital I/O only exists on the AMIDJ14 — the Waveshare 8AI has no
   // DI/DO hardware at all, same convention as boardProfile.hasDigitalIO
@@ -538,7 +538,7 @@ static int modbusPollBoard(ModbusBoardConfig& b, ModbusChannelReading* out, Stri
       for (int i=0;i<4;i++) { if(!b.dout[i].enabled) continue; doutOut[i].valid=false; doutOut[i].status="timeout"; }
     }
   }
-  return MB_OK;
+  return analogOk ? MB_OK : rc;
 }
 
 // =============================================================================

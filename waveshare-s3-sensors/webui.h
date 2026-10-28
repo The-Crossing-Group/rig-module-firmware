@@ -897,6 +897,21 @@ function fetchLive(){
       });
       s += '</table>';
     }
+    // v1.19.30: digital I/O (AMIDJ14) was in the payload but never drawn here.
+    const dig = function(title, arr){
+      if (!arr || !arr.length) return '';
+      let t = '<h3>'+title+'</h3><table><tr><th>Name</th><th>Channel</th><th>State</th><th>Status</th></tr>';
+      arr.forEach(c=>{
+        let ok = c.status==='ok' && c.state!=null;
+        let st = ok ? (c.state ? 'ON' : 'OFF') : '--';
+        let cls = c.status==='ok' ? 'ok' : (c.status==='stale' ? 'stale' : 'timeout');
+        t += '<tr><td>'+(c.name||'')+'</td><td>'+(title.indexOf('Input')>=0?'DI':'DO')+(c.ch+1)+'</td>';
+        t += '<td class="'+(ok&&c.state?'ok':'')+'"><b>'+st+'</b></td><td class="'+cls+'">'+c.status+'</td></tr>';
+      });
+      return t + '</table>';
+    };
+    s += dig('Digital Inputs', d.modbusDigitalInputs);
+    s += dig('Digital Outputs', d.modbusDigitalOutputs);
     if (d.canEnabled) {
       s += '<h3>CAN Signals</h3><table><tr><th>Name</th><th>Kind</th><th>CAN ID</th><th>Value</th><th>Status</th></tr>';
       (d.canSignals||[]).forEach(c=>{
