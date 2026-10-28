@@ -959,6 +959,15 @@ void pollTask(void* param) {
   // whose last poll failed is retried at most every FAILED_SENSOR_RETRY_MS.
   unsigned long lastSummaryMs = 0;
   for (;;) {
+    // v1.19.32: bus-listen mode — no TX, just capture. See modbus.h.
+    if (modbusListenOn) {
+      if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        modbusListenTick(cfg.modbusBaud);
+        xSemaphoreGive(modbusBusMutex);
+      }
+      vTaskDelay(1);
+      continue;
+    }
     cycleCount++;
     int okCount = 0, failCount = 0;
     bool polledAny = false;

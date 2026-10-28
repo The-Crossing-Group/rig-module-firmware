@@ -155,6 +155,71 @@ static void modbusFlushRx() {
   }
 }
 
+// ─── Passive bus listen (v1.19.32) ───────────────────────────────────────────
+// Toggle from /sensors. While ON the poll task stops transmitting and just
+// frames whatever other devices put on the RS485 bus (idle-gap framing, CRC
+// checked). Not persisted (always OFF after reboot) and auto-off after
+// MB_LISTEN_MAX_MS so a forgotten toggle can't stall polling for good.
+#define MB_LISTEN_RING   48
+#define MB_LISTEN_BYTES  48
+#define MB_LISTEN_MAX_MS 600000UL
+struct ModbusListenFrame { uint32_t seq; uint32_t ms; uint16_t total; uint8_t len; bool crcOk; uint8_t data[MB_LISTEN_BYTES]; };
+static ModbusListenFrame _mbL[MB_LISTEN_RING];
+static volatile bool     modbusListenOn = false;
+static uint32_t          _mbLSeq = 0;
+static unsigned long     _mbLOffAt = 0;
+static uint8_t           _mbLBuf[MB_LISTEN_BYTES];
+static uint16_t          _mbLCount = 0;
+static unsigned long     _mbLLastUs = 0;
+
+static void modbusListenSet(bool on) {
+  if (on == modbusListenOn) return;
+  _mbLCount = 0;
+  if (on) {
+    _mbLSeq = 0;
+    if (_mbSerial) while (_mbSerial->available()) _mbSerial->read();
+    _mbLOffAt = millis() + MB_LISTEN_MAX_MS;
+  }
+  modbusListenOn = on;
+  Serial.printf("[Modbus] Listen %s\n", on ? "ON (polling paused)" : "OFF");
+}
+
+static void _mbLFinalize() {
+  if (_mbLCount == 0) return;
+  ModbusListenFrame& f = _mbL[_mbLSeq % MB_LISTEN_RING];
+  f.seq = ++_mbLSeq;
+  f.ms = millis();
+  f.total = _mbLCount;
+  f.len = (uint8_t)min((int)_mbLCount, MB_LISTEN_BYTES);
+  memcpy(f.data, _mbLBuf, f.len);
+  f.crcOk = false;
+  if (_mbLCount >= 4 && _mbLCount <= MB_LISTEN_BYTES) {
+    uint16_t c = modbusCRC(_mbLBuf, _mbLCount - 2);
+    f.crcOk = (_mbLBuf[_mbLCount-2] == (c & 0xFF)) && (_mbLBuf[_mbLCount-1] == (c >> 8));
+  }
+  _mbLCount = 0;
+}
+
+// Runs ~30ms per call, polling the UART every 200us so frame gaps are
+// measured accurately (a plain 10ms RTOS tick would merge back-to-back frames).
+static void modbusListenTick(uint32_t baud) {
+  if (!_mbSerial) return;
+  if ((long)(millis() - _mbLOffAt) >= 0) { modbusListenSet(false); return; }
+  unsigned long gapUs = (unsigned long)(11000000ULL * 4 / (baud ? baud : 9600));  // ~4 char times
+  if (gapUs < 3000) gapUs = 3000;
+  unsigned long end = millis() + 30;
+  while ((long)(millis() - end) < 0) {
+    while (_mbSerial->available()) {
+      uint8_t b = _mbSerial->read();
+      if (_mbLCount < MB_LISTEN_BYTES) _mbLBuf[_mbLCount] = b;
+      _mbLCount++;
+      _mbLLastUs = micros();
+    }
+    if (_mbLCount > 0 && (micros() - _mbLLastUs) >= gapUs) _mbLFinalize();
+    delayMicroseconds(200);
+  }
+}
+
 // Modbus broadcast addresses: standard RTU broadcast is 0, but several
 // real sensors (SM7779 confirmed) instead use 0xFA/250 as their broadcast
 // listen address. Treat both as "no real reply address is expected back."

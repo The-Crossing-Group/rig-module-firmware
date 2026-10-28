@@ -504,6 +504,35 @@ static String sensorsPage(ModuleConfig& cfg) {
        "<span class='small'>Scans addresses 2-16.</span><br><br>"
        "<button type='button' class='btn-green' onclick='autoDetectEnable()' id='adeBtn'>&#9889; Auto-Detect &amp; Enable Now</button>"
        "<div id='adeResult' class='small' style='margin-top:8px'></div></div>";
+  h += "<div class='card'><b>Bus Listen</b> <span class='small' id='lsInfo'></span><br><br>"
+       "<button type='button' id='lsBtn' onclick='lsToggle()'>Start listening</button>"
+       "<div id='lsBox' style='display:none;margin-top:8px;overflow-x:auto'><table style='width:100%'>"
+       "<tr><th>Time</th><th>Slave</th><th>FC</th><th>Len</th><th>Data</th><th>CRC</th></tr><tbody id='lsBody'></tbody></table></div></div>";
+  h += R"JS(<script>
+var lsOn=false,lsSeq=0,lsBusy=false;
+function lsApply(d){
+  lsOn=d.on; document.getElementById('lsBtn').textContent=lsOn?'Stop listening':'Start listening';
+  document.getElementById('lsInfo').textContent=lsOn?'Polling paused, auto-off in '+d.left+'s':'';
+  document.getElementById('lsBox').style.display=lsOn||lsSeq?'':'none';
+  let b=document.getElementById('lsBody'),h='';
+  (d.frames||[]).forEach(function(f){
+    let p=f.hex.split(' ');
+    h='<tr><td>'+(f.t/1000).toFixed(2)+'</td><td>'+p[0]+'</td><td>'+(p[1]||'')+'</td><td>'+f.len+'</td><td style="font-family:monospace">'+f.hex+'</td><td class="'+(f.ok?'ok':'timeout')+'">'+(f.ok?'ok':'bad')+'</td></tr>'+h;
+    lsSeq=Math.max(lsSeq,f.n);
+  });
+  if(h){b.insertAdjacentHTML('afterbegin',h);while(b.children.length>100)b.removeChild(b.lastChild);}
+}
+function lsPoll(){
+  if(!lsOn||lsBusy||document.hidden)return; lsBusy=true;
+  fetch('/api/modbus/listen?since='+lsSeq).then(r=>r.json()).then(function(d){lsBusy=false;lsApply(d);}).catch(function(){lsBusy=false;});
+}
+function lsToggle(){
+  if(!lsOn){lsSeq=0;document.getElementById('lsBody').innerHTML='';}
+  fetch('/api/modbus/listen?on='+(lsOn?0:1)+'&since='+lsSeq,{method:'POST'}).then(r=>r.json()).then(lsApply);
+}
+setInterval(lsPoll,1000);
+fetch('/api/modbus/listen?since=999999999').then(r=>r.json()).then(lsApply);
+</script>)JS";
   h += "<form method='POST' action='/api/sensors/save'>";
   h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save All Sensors</button>";
 
@@ -1488,6 +1517,39 @@ static void handleConfig() {
 }
 
 // Saves the whole RS485 sensor list from /sensors' single shared form.
+static void handleModbusListen() {
+  if (_srv->hasArg("on")) {
+    // Take the bus so we never drain the UART mid poll-transaction.
+    bool got = xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1500)) == pdTRUE;
+    modbusListenSet(_srv->arg("on") == "1");
+    if (got) xSemaphoreGive(modbusBusMutex);
+  }
+  uint32_t since = _srv->hasArg("since") ? (uint32_t)_srv->arg("since").toInt() : 0;
+  String out; out.reserve(2048);
+  out += "{\"on\":"; out += modbusListenOn ? "true" : "false";
+  long left = modbusListenOn ? (long)(_mbLOffAt - millis()) / 1000 : 0;
+  out += ",\"left\":" + String(left < 0 ? 0 : left) + ",\"frames\":[";
+  if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
+    uint32_t seq = _mbLSeq;
+    uint32_t first = seq > MB_LISTEN_RING ? seq - MB_LISTEN_RING + 1 : 1;
+    if (since + 1 > first) first = since + 1;
+    if (seq >= first && seq - first + 1 > 20) first = seq - 19;   // newest 20 per reply
+    bool comma = false;
+    for (uint32_t s = first; s <= seq; s++) {
+      ModbusListenFrame& f = _mbL[(s - 1) % MB_LISTEN_RING];
+      if (f.seq != s) continue;
+      if (comma) out += ','; comma = true;
+      out += "{\"n\":" + String(s) + ",\"t\":" + String(f.ms) + ",\"len\":" + String(f.total) + ",\"ok\":" + (f.crcOk ? "true" : "false") + ",\"hex\":\"";
+      for (int i = 0; i < f.len; i++) { char b[4]; snprintf(b, sizeof(b), "%02X", f.data[i]); out += b; if (i + 1 < f.len) out += ' '; }
+      out += "\"}";
+    }
+    out += "],\"seq\":" + String(seq) + "}";
+    xSemaphoreGive(modbusBusMutex);
+  } else {
+    out += "],\"seq\":" + String(since) + "}";
+  }
+  _srv->send(200, "application/json", out);
+}
 static void handleModbusLive() {
   DynamicJsonDocument doc(2560); JsonArray a=doc.createNestedArray("channels");
   for(int i=0;i<MAX_MODBUS_CHANNELS;i++){if(!_cfg->modbusBoard.channels[i].enabled)continue;JsonObject o=a.createNestedObject();o["ch"]=i;o["name"]=_cfg->modbusBoard.channels[i].name;o["kind"]=_cfg->modbusBoard.channels[i].kind;o["unit"]=_cfg->modbusBoard.channels[i].unit;o["ma"]=modbusReadings[i].hasValue?modbusReadings[i].mA:(float)0;o["value"]=modbusReadings[i].hasValue?modbusReadings[i].value:(float)0;if(!modbusReadings[i].hasValue){o["ma"]=nullptr;o["value"]=nullptr;}o["status"]=modbusReadings[i].status;}
@@ -1918,6 +1980,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/status",       HTTP_GET, handleApiStatus);
   srv.on("/api/sensors/live", HTTP_GET, handleSensorsLive);
   srv.on("/api/modbus/live", HTTP_GET, handleModbusLive);
+  srv.on("/api/modbus/listen", HTTP_ANY, handleModbusListen);
   srv.on("/api/can/live",     HTTP_GET, handleCanLive);
   srv.on("/api/modbus/probe", HTTP_GET, handleModbusProbe);
   srv.on("/api/wifi/scan",    HTTP_GET, handleWifiScan);
