@@ -108,6 +108,8 @@ static bool           _discGwEverRun   = false;
 // through to the old tiers, so discovery can only get faster, never worse.
 static String        _hostCacheIp = "";
 static unsigned long _hostCacheAt = 0;
+static String        _hostCacheName = "";
+static unsigned long _hostLastQueryAt = 0;
 static const unsigned long HOST_RESOLVE_MS = 60000UL;   // re-query at most 1/min
 
 // Returns the resolved IPv4 string for name(.local), or "" if unresolvable
@@ -118,6 +120,19 @@ static String resolveLocalName(const String& name) {
   String fqdn = name;
   if (!fqdn.endsWith(".local")) fqdn += ".local";
   unsigned long now = millis();
+  // v1.19.25 CRITICAL: discoverLogger() runs from loop() — the SAME task as
+  // webServer.handleClient(). mdns_query_a blocks up to its timeout, so an
+  // un-paced call here starves the web server (v1.19.24 regression: a name
+  // in piHost made the module's web UI unreachable — Sarah 2026-10-28).
+  // Hard rate limit INSIDE this function: one blocking query per
+  // HOST_RESOLVE_MS per name, period. Between queries serve the cache
+  // (fresh or <10min stale); a recent failure returns "" without re-blocking.
+  if (_hostCacheName != fqdn) { _hostCacheIp = ""; _hostCacheAt = 0; _hostLastQueryAt = 0; _hostCacheName = fqdn; }
+  if (_hostLastQueryAt && (now - _hostLastQueryAt) < HOST_RESOLVE_MS) {
+    if (!_hostCacheIp.isEmpty() && (now - _hostCacheAt) < 600000UL) return _hostCacheIp;
+    return "";
+  }
+  _hostLastQueryAt = now;
   esp_ip4_addr_t addr;
   memset(&addr, 0, sizeof(addr));
   esp_err_t err = mdns_query_a(fqdn.c_str(), 1200, &addr);
@@ -368,7 +383,8 @@ static void discoveryInvalidate(const String& badIp) {
     _discMethod = "none";
     _discLastAttempt = 0;  // retry immediately on the next pass
   }
-  _hostCacheIp = "";   // v1.19.24: the name may have moved — force a re-query
+  _hostCacheIp = "";        // v1.19.24: the name may have moved — force a re-query
+  _hostLastQueryAt = 0;     // v1.19.25: and let it happen this cycle, not in 60s
 
 }
 
