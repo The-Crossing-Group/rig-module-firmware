@@ -69,10 +69,9 @@ static CanSignalReading* _cReadings = nullptr;
 static SemaphoreHandle_t _mtx = nullptr;
 
 // ─── Shared CSS / nav ────────────────────────────────────────────────────────
-static const char NAV[] PROGMEM = R"(<!DOCTYPE html>
-<html><head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
+// Stylesheet is served once from /s.css and cached by the browser (v1.19.31) --
+// it used to be inlined (~4.5KB) into every page, uncached.
+static const char NAV_CSS[] PROGMEM = R"(
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#1a1a2e;color:#e0e0e0;font-family:sans-serif;font-size:14px}
   .nav{background:#16213e;padding:10px 16px;display:flex;flex-wrap:wrap;gap:8px;border-bottom:2px solid #667eea}
@@ -143,7 +142,11 @@ static const char NAV[] PROGMEM = R"(<!DOCTYPE html>
     label{margin-bottom:6px}
     input[type=checkbox]{width:20px;height:20px;margin-right:10px;vertical-align:middle}
   }
-</style>
+)";
+static const char NAV[] PROGMEM = R"(<!DOCTYPE html>
+<html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/s.css?v=)" FW_VERSION R"(">
 </head><body>
 <div class='nav'>
   <a href='/'>&#9881; Config</a>
@@ -243,15 +246,14 @@ static const char* dataTypeName(uint8_t dt) {
 
 // ─── /  CONFIG PAGE ──────────────────────────────────────────────────────────
 static String cfgPage(ModuleConfig& cfg) {
-  String h = FPSTR(NAV);
+  String h; h.reserve(12288); h += FPSTR(NAV);
   h += apBanner(cfg);
   h += "<div class='page'><h2>&#9881; Module Configuration</h2>";
-  h += "<div class='card'><b>Module ID:</b> " + cfg.moduleId + " <span class='small'>(fixed, derived from MAC)</span></div>";
+  h += "<div class='card'><b>Module ID:</b> " + cfg.moduleId + "</div>";
   h += "<form method='POST' action='/api/config'>";
   h += "<label>Module Name</label><input name='moduleName' value='" + _esc(cfg.moduleName) + "' placeholder='e.g. Standpipe Pressure Skid'>";
   h += "<label>Module Type</label><input name='moduleType' list='moduleTypeOpts' value='" + _esc(cfg.moduleType) + "' placeholder='e.g. pressure, drill'>";
   h += "<datalist id='moduleTypeOpts'><option value='generic'><option value='pressure'><option value='tank'><option value='pump'><option value='drill'></datalist>";
-  h += "<div class='small'>Shown on the rig dashboard.</div>";
   h += "<label>Description</label><input name='description' value='" + _esc(cfg.description) + "'>";
 
   h += "<h3>RS485 / Modbus Bus</h3>";
@@ -268,18 +270,13 @@ static String cfgPage(ModuleConfig& cfg) {
     }
   }
   h += "</select>";
-  h += "<div class='small'>All sensors on the bus must use this baud rate.</div>";
   if (cfg.baudManuallySet) {
-    h += "<div class='small ok'>&#128274; Baud is locked — auto-detect will not change this without you setting it again "
-         "or using Auto-Detect Baud on a sensor.</div>";
+    h += "<div class='small ok'>&#128274; Baud locked</div>";
   } else {
-    h += "<div class='small warn'>&#128275; Baud not yet locked — running Auto-Detect & Enable Now on /sensors may still "
-         "adjust this automatically if no sensor is enabled yet. Save this form (or run Auto-Detect Baud on a sensor) to lock it.</div>";
+    h += "<div class='small warn'>&#128275; Baud not locked &mdash; save to lock.</div>";
   }
 
   h += "<h3>CAN Bus</h3>";
-  h += "<div class='small'>Always on — plug-and-play, no enable step. Listen-only unless Carriage "
-       "Position Sensor bridge below is on.</div>";
   h += "<label>CAN Bitrate</label><select name='canBitrate'>";
   {
     struct { long val; const char* label; } bauds[] = {
@@ -295,34 +292,23 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "</select>";
 
   h += "<h3>Carriage Position Sensor (CANopen Encoder Bridge)</h3>";
-  h += "<div class='small'>This board's CAN link exists for one job right now: waking the "
-       "ditchwitch-logger carriage-position CANopen encoder and relaying its frames to the Host PC "
-       "(decode happens there — see that project's <code>web/sensors.html</code>).</div>";
   h += "<label><input type='checkbox' name='canopenBridge'";
   if (cfg.canopenBridge) h += " checked";
   h += "> Enable bridge (transmit bring-up, wake the encoder)</label>";
-  h += "<div class='small'>Only for a bus you own — sends real frames.</div>";
+  h += "<div class='small'>Sends real frames.</div>";
   h += "<label>Encoder Node ID (hex)</label><input name='canopenNodeId' value='" +
        String(cfg.canopenNodeId, HEX) + "'>";
-  h += "<div class='small'>Confirmed: EPC CANopen manual factory default = 0x7F — the only node "
-       "ever seen answering on this bus.</div>";
   h += "<label><input type='checkbox' name='canopenTargetSpecific'";
   if (cfg.canopenTargetSpecific) h += " checked";
-  h += "> Target specific node (unchecked = broadcast, confirmed working)</label>";
-  h += "<div class='small'>Confirmed: encoder counts/rev = 16384 (EPC object 6001h factory "
-       "default 0x4000). Position-per-foot calibration is unconfirmed — set on the Host PC's Sensor "
-       "Configuration page once the sensor is jogged a known distance, not here.</div>";
-
+  h += "> Target specific node (off = broadcast)</label>";
   h += "<h3>Raw CAN Stream</h3>";
   h += "<label><input type='checkbox' name='canRawStream'";
   if (cfg.canRawStream) h += " checked";
   h += "> Stream ALL received CAN frames to Host PC (~1/s)</label>";
-  h += "<div class='small'>No per-signal setup needed — the logger decodes with its rig profile. Works listen-only.</div>";
 
   h += "<h3>Host PC Logger</h3>";
   h += "<label>Send Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
   h += "<label>Host PC Address (blank = auto)</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.5.194 or tcc-rig6.local'>";
-  h += "<div class='small'>Blank = auto-discover. RS485 polls continuously; this only paces sends.</div>";
   // v1.15.34: type='text' + masked-text (dot-masked via CSS), not
   // type='password' — see that class's comment above. Chrome/Firefox
   // don't treat this as a credential field at all now, so no more
@@ -353,7 +339,7 @@ static String cfgPage(ModuleConfig& cfg) {
   // while dropping the dropdown entirely. "/api/config" save contract
   // unchanged: wifiSSID = picked name or "__manual__" + wifiSSIDManual.
   h += "<div class='row' style='margin-bottom:10px'><button type='button' onclick='doScan()' id='scanBtn'>&#128269; Scan for Networks</button></div>";
-  h += "<div id='scanResults' class='small'>Tap Scan, then tap your network.</div>";
+  h += "<div id='scanResults' class='small'></div>";
   h += "<input type='hidden' name='wifiSSID' id='wifiSSID' value='" + _esc(cfg.wifiSSID) + "'>";
   h += "<div id='selRow' class='card' style='display:none'></div>";
   h += "<div id='manualWrap' style='display:none'><label>Network name</label><input name='wifiSSIDManual' id='wifiSSIDManual' autocomplete='off' placeholder='site wifi network name'></div>";
@@ -361,11 +347,11 @@ static String cfgPage(ModuleConfig& cfg) {
   // above — this was the field actually causing the save-password
   // prompt Sarah reported, since it's the one that most looks like a
   // real login password field to the browser's heuristics.
-  h += "<label>Password</label><input name='wifiPass' id='wifiPass' autocomplete='off' type='text' class='masked-text' placeholder='tap a network above, then type its password'>";
-  h += "<div class='small'>Changing SSID/password reboots the unit. Password is never pre-filled — type it fresh after picking a network.</div>";
+  h += "<label>Password</label><input name='wifiPass' id='wifiPass' autocomplete='off' type='text' class='masked-text'>";
+  h += "<div class='small'>Saving WiFi changes reboots the unit.</div>";
   h += "<br><button type='submit'>Save &amp; Connect</button>";
   h += "</form>";
-  h += "<div class='card' style='margin-top:12px'><b>Forget WiFi</b><br><span class='small'>Clears saved network, reboots into setup-AP mode.</span><br><br>";
+  h += "<div class='card' style='margin-top:12px'><b>Forget WiFi</b><br><br>";
   h += "<button class='btn-red' onclick=\"if(confirm('Forget saved WiFi and reboot into setup mode?'))fetch('/api/wifi/forget',{method:'POST'}).then(()=>alert('Forgotten. Rebooting...'))\">Forget WiFi</button></div>";
   h += R"JS(
 <script>
@@ -411,7 +397,7 @@ function doScan(){
          + ' <span class="small" style="float:right">'+bars+' '+n.rssi+'dBm</span></div>';
     });
     s += '<div class="netrow manualrow">+ Type network name manually...</div>';
-    s += '</div><div class="small" style="margin-top:6px">Tap your network, type the password, then Save &amp; Connect.</div>';
+    s += '</div>';
     box.innerHTML = s;
     let rows=box.querySelectorAll('.netrow');
     rows.forEach(function(r){
@@ -440,8 +426,8 @@ function doScan(){
 
 // ─── /modbus 4-20mA ADAPTER BOARD (RESERVED SLAVE 1) ─────────────────────
 static String modbusPage(ModuleConfig& cfg) {
-  String h=FPSTR(NAV); h += "<div class='page'><h2>&#9881; Modbus 4-20mA</h2>";
-  h += "<p class='small'>Eletechsup/Waveshare analog input board. This board is always slave ID <b>1</b>; direct RS485 sensors use IDs 2-247.</p>";
+  String h; h.reserve(12288); h += FPSTR(NAV); h += "<div class='page'><h2>&#9881; Modbus 4-20mA</h2>";
+  h += "<p class='small'>Board is always slave ID <b>1</b>; RS485 sensors use 2-247.</p>";
   h += "<form method='POST' action='/api/modbus/save'>";
   h += "<button type='submit' style='margin-bottom:14px'>&#128190; Save Modbus Settings</button>";
   h += "<div class='card'><label><input type='checkbox' name='enabled'" + String(cfg.modbusBoard.enabled?" checked":"") + "> Enable Modbus board at slave ID 1</label>";
@@ -452,10 +438,8 @@ static String modbusPage(ModuleConfig& cfg) {
   }
   h += "</select>";
   h += "<button type='button' id='mbApplyPresetBtn' onclick='mbApplyPreset()' style='margin-top:6px'>&#9889; Apply Board Preset</button>";
-  h += "<div class='small' id='mbApplyPresetStatus' style='margin:6px 0 4px'>Sets the RS485 baud rate + channel count to that board's factory "
-       "defaults and saves immediately (reboots if the baud actually changes). <b>Baud is shared with any direct RS485 sensors on /sensors — "
-       "changing it here changes it for the whole bus.</b> Has no effect while \"Auto-detect\" is selected.</div>";
-  h += "<div class='small'>Raw scaling: Waveshare uses microamps; AMIDJ14 uses hundredths of a milliamp. The board is read using the shared RS485 baud setting on Config.</div></div>";
+  h += "<div class='small' id='mbApplyPresetStatus' style='margin:6px 0 4px'>Sets the shared RS485 baud + channel count. Reboots if baud changes.</div>";
+  h += "</div>";
   h += "<h3>Analog Inputs</h3>";
   for(int i=0;i<MAX_MODBUS_CHANNELS;i++){ auto& c=cfg.modbusBoard.channels[i]; h += "<div class='card'><b>AI"+String(i+1)+"</b><span class='small' id='mbLive"+String(i)+"'> loading...</span>";
     h += "<label><input type='checkbox' name='mb"+String(i)+"en'"+String(c.enabled?" checked":"")+"> Enabled</label><div class='row'><div><label>Name</label><input name='mb"+String(i)+"nm' value='"+_esc(c.name)+"' placeholder='e.g. Mud Pressure'></div><div><label>Kind</label><input name='mb"+String(i)+"kd' value='"+_esc(c.kind)+"' placeholder='pressure'></div><div><label>Unit</label><input name='mb"+String(i)+"ut' value='"+_esc(c.unit)+"' placeholder='psi'></div></div>";
@@ -469,8 +453,7 @@ static String modbusPage(ModuleConfig& cfg) {
   // analog-board variant's /digital page for a board with no DI/DO at all.
   h += "<h3>Digital I/O <span class='small'>(Eletechsup AMIDJ14 only)</span></h3>";
   if (cfg.modbusBoard.boardType != "amidj14" && modbusDetectedType != "amidj14") {
-    h += "<p class='small'>Detected/selected board type is not AMIDJ14 — digital channels below "
-         "won't be polled unless the board type is (or auto-detects as) AMIDJ14.</p>";
+    h += "<p class='small'>Needs an AMIDJ14 board.</p>";
   }
   h += "<div class='row'>";
   h += "<div><h4>Digital Inputs</h4>";
@@ -515,13 +498,10 @@ static String modbusPage(ModuleConfig& cfg) {
 
 // ─── /sensors  RS485 SENSOR LIST ────────────────────────────────────────────
 static String sensorsPage(ModuleConfig& cfg) {
-  String h = FPSTR(NAV);
+  String h; h.reserve(12288); h += FPSTR(NAV);
   h += "<div class='page'><h2>&#128225; RS485 Sensors</h2>";
-  h += "<p class='small'>Any Modbus RTU sensor on the RS485 bus. Don't know its slave ID/register? Use "
-       "\"Probe Now\" below to check, or \"Auto-Detect &amp; Enable\" to find new sensors.</p>";
   h += "<div class='card' style='border-color:#27ae60'><b>&#9889; Auto-Detect &amp; Enable</b><br>"
-       "<span class='small'>Scans addresses 2-16, auto-enables new sensors with starter defaults (fc=03). "
-       "Manual only — press the button below.</span><br><br>"
+       "<span class='small'>Scans addresses 2-16.</span><br><br>"
        "<button type='button' class='btn-green' onclick='autoDetectEnable()' id='adeBtn'>&#9889; Auto-Detect &amp; Enable Now</button>"
        "<div id='adeResult' class='small' style='margin-top:8px'></div></div>";
   h += "<form method='POST' action='/api/sensors/save'>";
@@ -564,10 +544,6 @@ static String sensorsPage(ModuleConfig& cfg) {
     h += "<div><label>Reply Register Offset</label><input name='s" + String(i) + "ro' type='number' min='0' max='15' value='" + String(s.respRegOffset) + "'></div>";
     h += "<div><label>Scale (value = raw * scale + offset)</label><input name='s" + String(i) + "sc' type='number' step='any' value='" + _f(s.scale) + "'></div>";
     h += "<div><label>Offset</label><input name='s" + String(i) + "of' type='number' step='any' value='" + _f(s.offset) + "'></div></div>";
-    h += "<div class='small'>Reply Register Offset: for sensors that always answer with the same fixed multi-register "
-         "block regardless of Register Addr (e.g. SM7779 radar always replies [distance, level, status] from its own "
-         "reg 0) &mdash; set this to pick which register OF THE REPLY to use (0=1st, 1=2nd...), leave Register Addr at 0. "
-         "Normal sensors: leave at 0.</div>";
 
     h += "<label style='margin-top:8px'><input type='checkbox' name='s" + String(i) + "volEn' id='volEn" + String(i) + "' onchange='toggleVol(" + String(i) + ")'";
     if (s.volumeEnabled) h += " checked";
@@ -581,8 +557,7 @@ static String sensorsPage(ModuleConfig& cfg) {
     // assumption baked into the wording below: this sensor is a
     // top-mounted radar/distance sensor, reading = air gap down to the
     // water surface. See scaling.h's computeSensorVolume() for the math.
-    h += "<div class='small'>For a top-mounted distance sensor (e.g. radar): closer reading = "
-         "more water. Volume = Length &times; Width &times; (Tank Height &minus; current reading).</div>";
+    h += "<div class='small'>Volume = Length &times; Width &times; (Height &minus; reading)</div>";
     h += "<div class='row'><div><label>Tank Length (m)</label><input name='s" + String(i) + "len' type='number' step='any' min='0' value='" + _f(s.tankLengthM) + "'></div>";
     h += "<div><label>Tank Width (m)</label><input name='s" + String(i) + "wid' type='number' step='any' min='0' value='" + _f(s.tankWidthM) + "'></div></div>";
     h += "<div class='row'><div><label>Tank Height (m)</label><input name='s" + String(i) + "th' type='number' step='any' min='0' value='" + _f(s.tankHeightM) + "'></div>";
@@ -694,27 +669,26 @@ function autoDetectEnable(){
 // compatibility — old boards with signals configured keep POSTing them —
 // but there is nothing to configure here anymore.
 static String canPage(ModuleConfig& cfg) {
-  String h = FPSTR(NAV);
+  String h; h.reserve(12288); h += FPSTR(NAV);
   h += "<div class='page'><h2>&#128225; Live CAN Feed</h2>";
   h += "<div class='card'>CAN running at " + String(cfg.canBitrate) + " bit/s, " +
        (cfg.canopenBridge ? "Carriage Position Sensor bridge (transmitting bring-up)"
                            : "listen-only") + ". "
        "Total frames seen: <span id='canTotal'>...</span>, recent rate: <span id='canRate'>...</span> fps."
-       "<br><span class='small'>Raw frames below — values are decoded on the Host PC's rig profile, not here.</span></div>";
+       "</div>";
   // v1.19.15 (Sarah, Vermeer SA400 mud pump): placeholder decode card ABOVE
   // the raw feed. Decodes only standard J1939 EEC1 (PGN 61484) — engine speed
   // + % torque — which virtually every diesel ECU broadcasts. Explicitly
   // labelled unverified until we confirm against real SA400 traffic; extend
   // the J1939 table in the script below once we have a capture.
   h += "<div class='card'><b>&#128167; J1939 data</b> "
-       "<span class='small'>field-verified decode (j1939-logger table)</span>"
-       "<div id='pumpVals' class='small' style='margin-top:6px'>No J1939 data seen yet — is the ECU running?</div></div>";
+       "<div id='pumpVals' class='small' style='margin-top:6px'>No J1939 data yet.</div></div>";
   h += "<div class='row' style='margin-bottom:8px'>"
        "<button type='button' id='capBtn' onclick='toggleCap()'>&#9210; Start capture</button>"
        "<button type='button' id='dlBtn' style='display:none' onclick='dlCsv()'>&#11015; Download CSV</button>"
        "<label style='margin:0 0 0 12px'><input type='checkbox' id='pauseFeed'> Pause</label>"
        "<span class='small' style='margin-left:auto' id='feedCount'></span></div>";
-  h += "<div class='small' id='capNote' style='margin-bottom:6px'>Capture records every frame while running (browser-side, no length limit) — stop, then download as CSV for analysis.</div>";
+  h += "<div class='small' id='capNote' style='margin-bottom:6px'></div>";
   h += "<div class='card' style='padding:0;overflow-x:auto'><table style='width:100%;margin:0'>"
        "<tr><th style='text-align:left'>Age</th><th style='text-align:left'>ID</th><th>DLC</th><th style='text-align:left'>Data (hex)</th></tr>"
        "<tbody id='feedBody'><tr><td colspan='4' class='small' style='padding:10px'>Waiting for frames...</td></tr></tbody>"
@@ -857,7 +831,7 @@ setInterval(fetchFeed, 1000); fetchFeed();
 
 // ─── /live  LIVE VALUES TABLE ────────────────────────────────────────────────
 static String livePage() {
-  String h = FPSTR(NAV);
+  String h; h.reserve(12288); h += FPSTR(NAV);
   h += "<div class='page'><h2>&#128202; Live Status</h2>"
        "<div class='small' id='liveNet' style='margin:-6px 0 8px'>—</div>"
        "<div id='liveData'>Loading...</div>";
@@ -956,7 +930,7 @@ setInterval(fetchLive,3000); fetchLive();
 
 // ─── /system  SYSTEM PAGE ────────────────────────────────────────────────────
 static String sysPage(ModuleConfig& cfg) {
-  String h = FPSTR(NAV);
+  String h; h.reserve(12288); h += FPSTR(NAV);
   h += "<div class='page'><h2>&#128295; System</h2>";
   h += "<div class='card'><b>Firmware:</b> " + String(FW_VERSION);
   h += "<br><b>Module ID:</b> " + cfg.moduleId;
@@ -1059,18 +1033,12 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<div class='row' style='margin-top:6px'><input id='otaUrl' placeholder='http://...'>&nbsp;";
   h += "<button onclick='doOTA()'>Update</button></div></details></div>";
   h += "<h3>Buffer</h3><div class='card'><div id='bufInfo'>...</div>";
-  h += "<div class='small'>File line count vs. tracked count are cross-checked live below — if they "
-       "ever disagree, the tracked number (used everywhere else, including this page) is wrong, not "
-       "the file. See countBufferEntries()/bufferCount comment in the .ino.</div><br>";
+  h += "<br>";
   h += "<button onclick='fetch(\"/api/buffer/flush\",{method:\"POST\"}).then(()=>alert(\"Flushing\"))'>Flush Now</button>&nbsp;";
   h += "<button class='btn-red' onclick='if(confirm(\"Clear all buffered data?\"))fetch(\"/api/buffer/clear\",{method:\"POST\"}).then(()=>location.reload())'>Clear Buffer</button></div>";
 
   h += "<h3>Config Export / Import</h3><div class='card'>";
-  h += "<p class='small'>Download every setting on this device as a single JSON file (RS485 sensors, Modbus board + "
-       "digital I/O, CAN signals, module/Pi/WiFi settings). Restore it later, or upload it onto a different unit to "
-       "clone this one's configuration. <b>Module ID is NOT included</b> — it's always derived from each device's own "
-       "MAC address. The exported file DOES include your WiFi password in plain text — handle it with the same care "
-       "as any written-down password.</p>";
+  h += "<p class='small'>Includes the WiFi password in plain text. Module ID is not included.</p>";
   h += "<button type='button' onclick=\"window.location.href='/api/config/export'\">&#128190; Download Config (.json)</button>";
   h += "<div style='margin-top:14px'>";
   h += "<label>Restore from file:</label>";
@@ -1085,7 +1053,7 @@ static String sysPage(ModuleConfig& cfg) {
        "<span id='factoryResetResult' class='small'></span></div>";
   h += R"(
 <script>
-fetch('/api/status').then(r=>r.json()).then(d=>{
+fetch('/api/status?buf=1').then(r=>r.json()).then(d=>{
   let sys=d.system||{};
   let tracked=sys.bufCount||0, real=sys.bufCountReal||0;
   let txt='Buffered entries (tracked): '+tracked+' | on disk right now: '+real;
@@ -1152,33 +1120,28 @@ function doFactoryReset(){
 
 // ─── API handler helpers ──────────────────────────────────────────────────────
 static void handleApiStatus() {
-  // Must be >= buildPayload()'s own doc size (16384) — buildPayload can
-  // include up to MAX_CAN_SIGNALS entries plus, in CANopen Bridge mode,
-  // up to 40 raw CAN frames. A smaller buffer here used to silently
-  // truncate deserializeJson() partway through (no error checked), which
-  // dropped whatever came after in the JSON — in practice the CAN
-  // section, since it's built after "channels". Bumped to match so /live
-  // (and anything else hitting this endpoint) actually sees CAN data.
-  DynamicJsonDocument doc(16384);
-  String payload = buildPayload(false);
-  DeserializationError err = deserializeJson(doc, payload);
-  if (err) {
-    Serial.printf("[API] /api/status: buildPayload() JSON did not parse (%s) — "
-      "check MAX_SENSORS/MAX_CAN_SIGNALS growth vs buffer sizes\n", err.c_str());
-  }
-  doc["system"]["uptime"]     = millis() / 1000;
-  doc["system"]["freeHeap"]   = ESP.getFreeHeap();
-  doc["system"]["rssi"]       = WiFi.RSSI();
-  doc["system"]["piIp"]       = resolvedPiIp;
-  doc["system"]["piMethod"]   = discoveryMethod();  // static|name|rig-ssid|mdns|subnet-sweep|none
-  doc["system"]["rigName"]    = _cfg->rigHostname;    // v1.19.24 learned <name>.local
-  doc["system"]["lastPostMs"] = lastPostMs ? (millis() - lastPostMs) : -1;
-  doc["system"]["lastPostOk"] = lastPostOk;
-  doc["system"]["bufCount"]     = bufferCount; // in-RAM tracked count
-  doc["system"]["bufCountReal"] = countBufferEntries(); // actual /buffer.jsonl line count right now — should always match bufCount; see .ino comment on the 2026-09-09 accounting bug this line exists to catch
-  doc["system"]["ntpOk"]      = ntpClient.isTimeSet();
-  String out;
-  serializeJson(doc, out);
+  // v1.19.31: splice the small "system" block onto the payload string instead
+  // of parse(16KB doc) -> edit -> re-serialize, and only count the buffer file
+  // (a flash read) when asked (?buf=1, System page only).
+  String out = buildPayload(false);
+  DynamicJsonDocument sys(512);
+  sys["uptime"]     = millis() / 1000;
+  sys["freeHeap"]   = ESP.getFreeHeap();
+  sys["rssi"]       = WiFi.RSSI();
+  sys["piIp"]       = resolvedPiIp;
+  sys["piMethod"]   = discoveryMethod();  // static|name|rig-ssid|mdns|subnet-sweep|none
+  sys["rigName"]    = _cfg->rigHostname;
+  sys["lastPostMs"] = lastPostMs ? (millis() - lastPostMs) : -1;
+  sys["lastPostOk"] = lastPostOk;
+  sys["bufCount"]   = bufferCount;
+  if (_srv->hasArg("buf")) sys["bufCountReal"] = countBufferEntries();
+  sys["ntpOk"]      = ntpClient.isTimeSet();
+  String sysJson;
+  serializeJson(sys, sysJson);
+  int e = out.lastIndexOf('}');
+  if (e < 0) { out = "{\"_\":0}"; e = out.lastIndexOf('}'); }
+  out.remove(e);
+  out += ",\"system\":" + sysJson + "}";
   _srv->send(200, "application/json", out);
 }
 
@@ -1918,6 +1881,10 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
     _srv->sendHeader("Cache-Control", "no-store");
     _srv->send(code, "text/html; charset=utf-8", body);
   };
+  srv.on("/s.css", HTTP_GET, [](){
+    _srv->sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+    _srv->send_P(200, "text/css", NAV_CSS);
+  });
   srv.on("/",         HTTP_GET, [noCacheHtml](){ noCacheHtml(200, cfgPage(*_cfg)); });
 
   // v1.19.29 CAPTIVE PORTAL. The DNS catch-all (dnsServer in the .ino) sends
