@@ -321,7 +321,7 @@ static String cfgPage(ModuleConfig& cfg) {
 
   h += "<h3>Host PC Logger</h3>";
   h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
-  h += "<label>Host PC Address (blank = auto)</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.5.194 or rig-logger.local'>";
+  h += "<label>Host PC Address (blank = auto)</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.5.194 or tcc-rig6.local'>";
   h += "<div class='small'>Blank = auto-discover.</div>";
   // v1.15.34: type='text' + masked-text (dot-masked via CSS), not
   // type='password' — see that class's comment above. Chrome/Firefox
@@ -1150,7 +1150,8 @@ static void handleApiStatus() {
   doc["system"]["freeHeap"]   = ESP.getFreeHeap();
   doc["system"]["rssi"]       = WiFi.RSSI();
   doc["system"]["piIp"]       = resolvedPiIp;
-  doc["system"]["piMethod"]   = discoveryMethod();  // static|rig-ssid|mdns|subnet-sweep|none
+  doc["system"]["piMethod"]   = discoveryMethod();  // static|name|rig-ssid|mdns|subnet-sweep|none
+  doc["system"]["rigName"]    = _cfg->rigHostname;    // v1.19.24 learned <name>.local
   doc["system"]["lastPostMs"] = lastPostMs ? (millis() - lastPostMs) : -1;
   doc["system"]["lastPostOk"] = lastPostOk;
   doc["system"]["bufCount"]     = bufferCount; // in-RAM tracked count

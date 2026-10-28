@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.19.23"
+#define FW_VERSION "rig-module-sensors-1.19.24"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -421,6 +421,7 @@ struct ModuleConfig {
   // Set a static IP here for rigs whose WiFi doesn't follow rigNNN naming
   // (e.g. Rig 6 NORQIN at 192.168.5.194). Type __auto__ to clear it again.
   String piHost         = "";
+  String rigHostname    = "";   // v1.19.24: learned/entered rig name for <name>.local re-find
   String rigToken       = "7804991970";
   String wifiSSID       = "";
   String wifiPass       = "";
@@ -494,6 +495,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   c.baudManuallySet = p.getBool("mbBaudSet", false);
   c.pollIntervalS = p.getInt("pollInt", 7);
   c.piHost        = p.getString("piHost", "");
+  c.rigHostname   = p.getString("rigHostname", "");
   if (c.piHost == "__auto__") c.piHost = ""; // legacy: explicit auto marker normalises to blank
   c.rigToken      = p.getString("rigToken", "7804991970");
   if (c.rigToken.isEmpty()) c.rigToken = "7804991970"; // self-heal, see other variants
@@ -687,6 +689,7 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
   }
   p.putInt("pollInt", c.pollIntervalS);
   p.putString("piHost", c.piHost);
+  p.putString("rigHostname", c.rigHostname);
   p.putString("rigToken", c.rigToken);
   p.putString("wifiSSID", c.wifiSSID);
   p.putString("wifiPass", c.wifiPass);

@@ -64,6 +64,7 @@
 // from its Factory Reset handler, and Arduino's auto-prototype generation
 // only scans the .ino, not headers it includes.
 static bool formatLittleFSWithWatchdog();
+void learnRigHostname(const String& ip);
 
 #include "webui.h"
 #include "cli.h"
@@ -895,7 +896,35 @@ void wifiWatchdog() {
 // Kept as resolvePi() so the existing loopTask call site is unchanged.
 void resolvePi() {
   lastPiResolve = millis();
-  resolvedPiIp = discoverLogger(cfg.piHost, cfg.wifiSSID);
+  resolvedPiIp = discoverLogger(cfg.piHost, cfg.wifiSSID, cfg.rigHostname);
+  // v1.19.24: once per boot, learn the rig's hostname from the logger we
+  // just found, so future boots (or DHCP changes) can re-find it by name.
+  static bool hostLearned = false;
+  if (!hostLearned && !resolvedPiIp.isEmpty()) {
+    hostLearned = true;
+    learnRigHostname(resolvedPiIp);
+  }
+}
+
+void learnRigHostname(const String& ip) {
+  if (WiFi.status() != WL_CONNECTED || ip.isEmpty()) return;
+  HTTPClient http;
+  http.setConnectTimeout(800);
+  http.setTimeout(1000);
+  if (!http.begin("http://" + ip + ":8080/api/rig/status")) return;
+  int code = http.GET();
+  if (code == 200) {
+    JsonDocument doc;
+    if (!deserializeJson(doc, http.getStream()) && !doc["hostname"].isNull()) {
+      String h = doc["hostname"].as<String>();
+      if (!h.isEmpty() && h != cfg.rigHostname) {
+        cfg.rigHostname = h;
+        saveConfig(prefs, cfg);
+        Serial.printf("[Disc] learned rig name: %s.local\n", h.c_str());
+      }
+    }
+  }
+  http.end();
 }
 
 // =============================================================================
