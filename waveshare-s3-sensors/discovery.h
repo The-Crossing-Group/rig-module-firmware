@@ -276,8 +276,16 @@ String discoverLogger(const String& staticHost, const String& wifiSSID,
       _discResolvedIp = ip;
       return _discResolvedIp;
     }
-    // Name unresolvable and cache stale: fall through to the other tiers —
-    // the rig may be down right now, the sweep/gateway path recovers it.
+    // v1.19.27 (Sarah: "why is it still doing the ip sweep when i set a
+    // hostname"): a pinned NAME that won't resolve used to fall through to
+    // the sweep/gateway/SSID tiers. Two problems: (1) ESP32 mDNS over WiFi
+    // multicast misses often enough that the sweep ran constantly, and (2)
+    // worse, probeLogger only proves SOME logger answers on :8080 — the
+    // sweep could hand us a DIFFERENT rig's logger and we'd post this rig's
+    // data to it. A pin is a pin: keep re-resolving the name (rate-limited,
+    // 10-min stale cache still served) and hold/buffer until it answers.
+    _sweepActive = false;   // abort any in-flight sweep from before the pin
+    return _discResolvedIp; // last good IP for this name, or "" (buffering)
   }
 
   // 1.5 (v1.19.24) Auto-learned rig name. After the first successful meet
