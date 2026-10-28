@@ -320,9 +320,9 @@ static String cfgPage(ModuleConfig& cfg) {
   h += "<div class='small'>No per-signal setup needed — the logger decodes with its rig profile. Works listen-only.</div>";
 
   h += "<h3>Host PC Logger</h3>";
-  h += "<label>Poll Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
+  h += "<label>Send Interval (1-30 s)</label><input name='pollIntervalS' type='number' min='1' max='30' value='" + String(cfg.pollIntervalS) + "'>";
   h += "<label>Host PC Address (blank = auto)</label><input name='piHost' value='" + _esc(cfg.piHost) + "' placeholder='192.168.5.194 or tcc-rig6.local'>";
-  h += "<div class='small'>Blank = auto-discover.</div>";
+  h += "<div class='small'>Blank = auto-discover. RS485 polls continuously; this only paces sends.</div>";
   // v1.15.34: type='text' + masked-text (dot-masked via CSS), not
   // type='password' — see that class's comment above. Chrome/Firefox
   // don't treat this as a credential field at all now, so no more
@@ -1904,6 +1904,28 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
     _srv->send(code, "text/html; charset=utf-8", body);
   };
   srv.on("/",         HTTP_GET, [noCacheHtml](){ noCacheHtml(200, cfgPage(*_cfg)); });
+
+  // v1.19.29 CAPTIVE PORTAL. The DNS catch-all (dnsServer in the .ino) sends
+  // every hostname a phone on the setup AP looks up to us; phones then probe a
+  // well-known URL expecting a specific "internet works" answer. We answer
+  // with a 302 to the setup page instead, which makes the OS pop its
+  // "sign in to network" browser on that page. Only honoured for requests that
+  // arrived via the AP interface — anything via the site-WiFi side gets a
+  // plain 404 so this can't redirect real LAN traffic.
+  auto captive = [](){
+    if (_srv->client().localIP() != WiFi.softAPIP()) { _srv->send(404, "text/plain", "Not found"); return; }
+    _srv->sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/", true);
+    _srv->sendHeader("Cache-Control", "no-store");
+    _srv->send(302, "text/plain", "");
+  };
+  static const char* const kProbePaths[] = {
+    "/generate_204", "/gen_204",                       // Android / Chrome
+    "/hotspot-detect.html", "/library/test/success.html", "/success.txt", // Apple
+    "/connecttest.txt", "/ncsi.txt", "/redirect", "/fwlink", // Windows
+    "/canonical.html"                                  // Firefox
+  };
+  for (size_t i = 0; i < sizeof(kProbePaths)/sizeof(kProbePaths[0]); i++) srv.on(kProbePaths[i], HTTP_ANY, captive);
+  srv.onNotFound(captive);
   srv.on("/sensors",  HTTP_GET, [noCacheHtml](){ noCacheHtml(200, sensorsPage(*_cfg)); });
   srv.on("/modbus", HTTP_GET, [noCacheHtml](){ noCacheHtml(200, modbusPage(*_cfg)); });
   srv.on("/can",      HTTP_GET, [noCacheHtml](){ noCacheHtml(200, canPage(*_cfg)); });

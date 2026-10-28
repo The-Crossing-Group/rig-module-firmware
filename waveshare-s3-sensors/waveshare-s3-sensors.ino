@@ -45,6 +45,7 @@
 #include <Preferences.h>
 #include <LittleFS.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <ArduinoJson.h>
 #include <NTPClient.h>
 #include <time.h>
@@ -123,6 +124,7 @@ ModbusDigitalReading modbusDoutReadings[4]; // adapter board DO state (AMIDJ14 o
 String modbusDetectedType = "unknown";
 
 WebServer webServer(80);
+DNSServer dnsServer;   // v1.19.29 captive portal: answers every DNS query on the AP with 192.168.4.1
 
 String resolvedPiIp = "";
 unsigned long lastPiResolve = 0;
@@ -645,9 +647,15 @@ static void configureSetupAP() {
   //
   // NOTE: no WiFi.setBandWidth() call — that's an ESP8266-core-only API, does
   // not exist on this core (3.2.0). softAP() already defaults to HT20.
+  // v1.19.29 captive portal: DHCP hands clients the module itself as their DNS
+  // server (the 5th arg), and dnsServer below answers EVERY name with the AP
+  // IP — so the phone's connectivity probe lands on our /generate_204 etc.
+  // handlers (webui.h) and gets redirected to the setup page automatically.
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
-                    IPAddress(255, 255, 255, 0));
+                    IPAddress(255, 255, 255, 0), IPAddress(192, 168, 4, 2),
+                    IPAddress(192, 168, 4, 1));
   WiFi.softAP(apSSID.c_str(), "modulesetup", 1, 0, 4, true);
+  dnsServer.start(53, "*", WiFi.softAPIP());
 
   Serial.println("[WiFi] ----------------------------------------");
   Serial.printf("[WiFi] Setup AP: \"%s\" / \"modulesetup\"\n", apSSID.c_str());
@@ -945,13 +953,22 @@ void pollTask(void* param) {
   // the "Auto-Detect & Enable" button on /sensors (modbusAutoDetectAndEnable,
   // still in modbus.h) — this just stops it running unattended in the
   // background and stealing bus time from live polls.
+  // v1.19.29: RS485 polls back-to-back, as fast as the bus + sensors allow —
+  // no more pollIntervalS gap between cycles (that setting now only paces the
+  // POST to the host PC). Healthy sensors/board are hit every cycle; a sensor
+  // whose last poll failed is retried at most every FAILED_SENSOR_RETRY_MS.
+  unsigned long lastSummaryMs = 0;
   for (;;) {
     cycleCount++;
     int okCount = 0, failCount = 0;
+    bool polledAny = false;
+    bool printNow = (millis() - lastSummaryMs >= POLL_SUMMARY_MS);
 
     if (cfg.modbusBoard.enabled && xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      polledAny = true;
       int boardRc = modbusPollBoard(cfg.modbusBoard, modbusReadings, modbusDetectedType, modbusDinReadings, modbusDoutReadings);
       xSemaphoreGive(modbusBusMutex);
+      vTaskDelay(1); // let a waiting web-diagnostics task grab the bus mutex
       if (boardRc != MB_OK) {
         for (int i=0;i<MAX_MODBUS_CHANNELS;i++) { if (cfg.modbusBoard.channels[i].enabled) modbusReadings[i].status="timeout"; modbusReadings[i].valid=false; }
         for (int i=0;i<4;i++) { if (cfg.modbusBoard.din[i].enabled) modbusDinReadings[i].status="timeout"; modbusDinReadings[i].valid=false; }
@@ -962,6 +979,11 @@ void pollTask(void* param) {
     for (int i = 0; i < MAX_SENSORS; i++) {
       SensorConfig& s = cfg.sensors[i];
       if (!s.enabled) continue;
+      {
+        SensorReading& pr = sensorReadings[i];
+        if (!pr.valid && pr.pollCount > 0 && (millis() - pr.lastPollMs) < FAILED_SENSOR_RETRY_MS) continue;
+      }
+      polledAny = true;
 
       float raw = 0, value = 0;
       int rc;
@@ -969,7 +991,7 @@ void pollTask(void* param) {
         // verbose=true: prints every RS485 TX/RX byte for this poll to
         // Serial (see modbusSend()/modbusReceive() in modbus.h) — handy
         // for bench testing over USB without needing WiFi/web UI at all.
-        rc = modbusPollSensor(s, raw, value, true);
+        rc = modbusPollSensor(s, raw, value, printNow);
         xSemaphoreGive(modbusBusMutex);
       } else {
         rc = MB_TIMEOUT;
@@ -1003,7 +1025,7 @@ void pollTask(void* param) {
             // sensor has reported a real value before. The raw `status`
             // field always reflects every real timeout regardless of this.
             bool hasReportedBefore = r.hasValue;
-            if (!hasReportedBefore || r.consecutiveTimeouts >= TIMEOUT_DISPLAY_THRESHOLD) {
+            if (!hasReportedBefore || (r.consecutiveTimeouts >= TIMEOUT_DISPLAY_THRESHOLD && (millis() - r.lastOkMs) > TIMEOUT_DISPLAY_HOLD_MS)) {
               r.displayStatus = "timeout";
             }
             // else: leave displayStatus as whatever it last was (likely "ok")
@@ -1017,14 +1039,15 @@ void pollTask(void* param) {
         xSemaphoreGive(stateMutex);
       }
 
-      // Small gap between sensors on the shared bus — lets the line settle
-      // and avoids one slow/failing sensor's timeout stacking directly
-      // into the next request with zero breathing room.
-      vTaskDelay(pdMS_TO_TICKS(20));
+      // 1ms yield between sensors (was 20ms). modbusReadRegs() already waits
+      // for 8ms of bus silence before every request (modbusFlushRx), which is
+      // the real inter-frame gap — this is just a scheduler yield.
+      vTaskDelay(1);
     }
 
-    {
-      // Summary table printed every cycle (bench-testing over serial —
+    if (printNow) {
+      lastSummaryMs = millis();
+      // Summary table (now once per POLL_SUMMARY_MS)  (bench-testing over serial —
       // no downside to printing every time; this used to only print for
       // the first 5 cycles then every 20th, which was too sparse for
       // active USB-serial testing without WiFi/web UI).
@@ -1071,7 +1094,9 @@ void pollTask(void* param) {
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(cfg.pollIntervalS * 1000));
+    // Nothing was due this cycle (everything failing + backed off): idle a bit
+    // instead of spinning. Otherwise straight back around.
+    vTaskDelay(polledAny ? 1 : pdMS_TO_TICKS(25));
   }
 }
 

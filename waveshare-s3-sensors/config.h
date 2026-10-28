@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.19.28"
+#define FW_VERSION "rig-module-sensors-1.19.29"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -150,6 +150,18 @@ struct SensorConfig {
 // (see handleSensorsLive in webui.h) always shows every raw timeout
 // regardless of this debounce.
 #define TIMEOUT_DISPLAY_THRESHOLD 6
+// v1.19.29: RS485 now polls back-to-back (no pollIntervalS gap), so a count of
+// consecutive timeouts alone no longer measures "how long has it been dead".
+// A sensor that has reported before only flips to "timeout" on the web UI once
+// BOTH the count is hit AND it has had no good reply for this long.
+#define TIMEOUT_DISPLAY_HOLD_MS 40000UL
+// A sensor whose last poll failed is retried at most this often, so one
+// dead/slow-by-design sensor (radar: ~6s measurement cycle) can't eat a
+// 600ms timeout every cycle and slow everyone else down.
+#define FAILED_SENSOR_RETRY_MS 1500UL
+// Serial [Poll] summary + verbose RS485 byte dump: once per this many ms
+// (used to print every cycle, which is far too much at full-speed polling).
+#define POLL_SUMMARY_MS 5000UL
 
 struct SensorReading {
   bool   valid    = false;   // false = comms failure (timeout/CRC/no response)

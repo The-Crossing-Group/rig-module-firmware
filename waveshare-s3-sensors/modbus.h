@@ -59,13 +59,24 @@ static void modbusSend(const uint8_t* buf, int len, bool verbose) {
 }
 
 // Read response with timeout (ms)
-static int modbusReceive(uint8_t* buf, int maxLen, int timeoutMs, bool verbose) {
+// frameAware (v1.19.29): for FC03/FC04 register-read replies, stop as soon as
+// the frame the reply's OWN header describes is complete (normal = 3 + byteCount
+// + 2 CRC, exception = 5) instead of idling out the 20ms inter-byte timeout
+// after every single response — that idle was ~half of every transaction's
+// time. Trailing junk (if any) is cleaned up by modbusFlushRx() next request.
+static int modbusReceive(uint8_t* buf, int maxLen, int timeoutMs, bool verbose, bool frameAware = false) {
   unsigned long deadline = millis() + timeoutMs;
   int n = 0;
   while (millis() < deadline && n < maxLen) {
     if (_mbSerial->available()) {
       buf[n++] = _mbSerial->read();
       deadline = millis() + 20; // inter-byte timeout 20ms
+      if (frameAware && n >= 3) {
+        int want = (buf[1] & 0x80) ? 5 : (3 + (int)buf[2] + 2);
+        if (n >= want) break;
+      }
+    } else {
+      vTaskDelay(1); // yield 1ms so loop()/CAN/web get CPU while poll task runs flat out
     }
   }
   if (verbose) {
@@ -195,7 +206,7 @@ int modbusReadRegs(uint8_t slaveId, uint8_t funcCode, uint16_t startAddr,
   // (byte index 2 of any FC03/FC04 reply) to figure out the real frame
   // length after the fact.
   uint8_t resp[40];
-  int n = modbusReceive(resp, sizeof(resp), timeoutMs, verbose);
+  int n = modbusReceive(resp, sizeof(resp), timeoutMs, verbose, true);
 
   if (n < 3) {
     if (verbose) Serial.printf("[Modbus] Timeout: got %d bytes (need >=3 for a header)\n", n);
