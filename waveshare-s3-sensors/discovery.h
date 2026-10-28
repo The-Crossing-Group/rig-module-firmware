@@ -149,6 +149,65 @@ static String resolveLocalName(const String& name) {
   return "";
 }
 
+// v1.19.28 (Sarah: module on the rig's own hotspot said "server unresolved"
+// with rig-129.local pinned — ESP32 mDNS multicast misses often enough in
+// AP+STA mode that a pinned name can stay unresolved forever, even while the
+// rig is literally the DHCP gateway of the network the module just joined).
+// Identity-checked gateway probe: ask the gateway /api/rig/status and accept
+// it ONLY when it self-reports the pinned hostname. A site router or a
+// different rig's box can't hijack the pin — the name still decides.
+static unsigned long _gwProbeAt = 0;
+
+static String fetchLoggerHostname(const String& ip) {
+  HTTPClient http;
+  http.setConnectTimeout(400);
+  http.setTimeout(800);
+  if (!http.begin("http://" + ip + ":" + String(LOGGER_PORT) + "/api/rig/status")) return "";
+  http.addHeader("Accept", "application/json");
+  String hn = "";
+  int code = http.GET();
+  if (code == 200) {
+    String b = http.getString();
+    int i = b.indexOf("\"hostname\"");
+    if (i >= 0) {
+      int c  = b.indexOf(':', i);
+      int q1 = b.indexOf('"', c + 1);
+      int q2 = (q1 > 0) ? b.indexOf('"', q1 + 1) : -1;
+      if (q1 > 0 && q2 > q1) hn = b.substring(q1 + 1, q2);
+    }
+  }
+  http.end();
+  return hn;
+}
+
+static bool hostnameMatches(const String& hn, const String& pinned) {
+  if (hn.isEmpty() || pinned.isEmpty()) return false;
+  String want = pinned; want.trim(); want.toLowerCase();
+  if (want.endsWith(".local")) want = want.substring(0, want.length() - 6);
+  String have = hn; have.toLowerCase();
+  return want == have;
+}
+
+// Shared by both pinned-name tiers: gateway self-identified as the rig?
+// Rate-limited to one probe per 30s. On success the gateway IP is cached as
+// the name's answer (resolveLocalName serves it for 10 min like a real mDNS
+// hit) and returned; otherwise "".
+static String gatewayIdentityFallback(const String& pinnedName) {
+  unsigned long now = millis();
+  if (now - _gwProbeAt < 30000UL) return "";
+  _gwProbeAt = now;
+  IPAddress gw = WiFi.gatewayIP();
+  if (gw[0] == 0) return "";
+  String gws = gw.toString();
+  String hn = fetchLoggerHostname(gws);
+  if (!hostnameMatches(hn, pinnedName)) return "";
+  _hostCacheIp = gws;
+  _hostCacheAt = now;   // resolveLocalName now answers this name from cache
+  Serial.printf("[Disc] gateway %s self-identified as \"%s\" — pinned name %s satisfied\n",
+                gws.c_str(), hn.c_str(), pinnedName.c_str());
+  return gws;
+}
+
 // "192.168.5.194" style literal? (digits + dots only)
 static bool looksLikeIp(const String& h) {
   if (h.isEmpty()) return false;
@@ -268,13 +327,24 @@ String discoverLogger(const String& staticHost, const String& wifiSSID,
       return _discResolvedIp;
     }
     String ip = resolveLocalName(staticHost);
-    if (!ip.isEmpty()) {
+    // v1.19.28: a resolved name is only trusted when the logger actually
+    // answers there — avahi publishes every address the rig has, so an mDNS
+    // reply can carry the site-LAN IP while we sit on the hotspot.
+    if (!ip.isEmpty() && (ip == _discResolvedIp || probeLogger(ip))) {
       if (_discMethod != "name") {
         _discMethod = "name";
         Serial.printf("[Disc] Static name %s -> %s\n", staticHost.c_str(), ip.c_str());
       }
       _discResolvedIp = ip;
       return _discResolvedIp;
+    }
+    {
+      String gwIp = gatewayIdentityFallback(staticHost);
+      if (!gwIp.isEmpty()) {
+        _discMethod = "name+gw";
+        _discResolvedIp = gwIp;
+        return _discResolvedIp;
+      }
     }
     // v1.19.27 (Sarah: "why is it still doing the ip sweep when i set a
     // hostname"): a pinned NAME that won't resolve used to fall through to
@@ -297,6 +367,7 @@ String discoverLogger(const String& staticHost, const String& wifiSSID,
   if (!rigHostname.isEmpty() &&
       (_hostCacheIp.isEmpty() || millis() - _hostCacheAt >= HOST_RESOLVE_MS)) {
     String ip = resolveLocalName(rigHostname);
+    if (ip.isEmpty()) ip = gatewayIdentityFallback(rigHostname);
     if (!ip.isEmpty() && ip != _discResolvedIp) {
       if (probeLogger(ip)) {
         Serial.printf("[Disc] name %s -> %s (logger confirmed)\n",
