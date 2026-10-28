@@ -926,6 +926,11 @@ function fetchLive(){
     s += '<tr><td>NTP</td><td class="'+(sys.ntpOk?'ok':'warn')+'">'+(sys.ntpOk?d.ts:'no sync')+'</td></tr>';
     s += '</table>';
     document.getElementById('liveData').innerHTML = s;
+  }).catch(function(e){
+    // v1.19.26: was silently swallowing every failure — page sat on
+    // "Loading..." forever during discovery with no explanation.
+    var el=document.getElementById('liveData');
+    if(el && el.textContent==='Loading...') el.textContent='Waiting for module... (retrying every 3s)';
   });
 }
 setInterval(fetchLive,3000); fetchLive();

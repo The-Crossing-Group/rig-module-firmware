@@ -79,7 +79,7 @@ static const unsigned long DISCOVER_VERIFY_MS = 300000UL;  // resolved: re-verif
 // i.e. ~33% duty at worst, only while genuinely unresolved — once found,
 // discoverLogger() never re-enters this branch again until invalidated).
 static const unsigned long SWEEP_RETRY_MS     = 90000UL;   // don't re-sweep the /24 more than every 90s
-static const int           SWEEP_PORT_TIMEOUT = 120;       // ms per host waiting for a SYN/ACK
+static const int           SWEEP_PORT_TIMEOUT = 80;        // ms per host waiting for a SYN/ACK (v1.19.26: 120->80, LAN SYN-ACK is <10ms even on busy WiFi)
 static const uint16_t      LOGGER_PORT        = 8080;
 
 static String        _discResolvedIp  = "";
@@ -185,45 +185,64 @@ static bool tcpPortOpen(const IPAddress& ip, uint16_t port, int timeoutMs) {
 // Cost: dead slots cost SWEEP_PORT_TIMEOUT each, so a quiet /24 is roughly 25s
 // worst case — which is why this only runs after mDNS has already failed, and
 // is rate-limited.
-static bool sweepSubnet() {
-  IPAddress local = WiFi.localIP();
-  IPAddress mask  = WiFi.subnetMask();
-  if (!local || local == IPAddress(0, 0, 0, 0)) return false;
+// v1.19.26 (Sarah: "live screen stuck on loading for minutes"): the sweep used
+// to walk all 254 hosts in ONE call — ~25-30s of dead web server, because
+// discoverLogger() runs from loop(), the same task as webServer.handleClient().
+// Now chunked: SWEEP_HOSTS_PER_TICK hosts per call, state persists between
+// calls, loop() breathes between chunks. Same total sweep duration, but the
+// web UI (and everything else in loop) stays responsive throughout.
+static bool          _sweepActive = false;
+static int           _sweepHost   = 1;
+static uint8_t       _sweepBase0 = 0, _sweepBase1 = 0, _sweepBase2 = 0, _sweepSelf = 0;
+static int           _sweepOpen   = 0;
+static unsigned long _sweepT0     = 0;
+static const int     SWEEP_HOSTS_PER_TICK = 4;   // worst-case block ~4x80ms=320ms per cycle
 
-  // Only /24 sweeps. Anything larger (/16) is far too big to walk from a
-  // microcontroller — that case needs a static piHost.
-  if (mask != IPAddress(255, 255, 255, 0)) {
-    Serial.printf("[Disc] Subnet %s is not /24 — sweep skipped, set piHost manually\n",
-                  mask.toString().c_str());
-    return false;
+// Returns true ONLY when the logger was found. false means "not found yet"
+// — check _sweepActive to tell "still in progress" from "finished, nothing".
+static bool sweepSubnetTick() {
+  if (!_sweepActive) {
+    IPAddress local = WiFi.localIP();
+    IPAddress mask  = WiFi.subnetMask();
+    if (!local || local == IPAddress(0, 0, 0, 0)) return false;
+    // Only /24 sweeps. Anything larger (/16) is far too big to walk from a
+    // microcontroller — that case needs a static piHost.
+    if (mask != IPAddress(255, 255, 255, 0)) {
+      Serial.printf("[Disc] Subnet %s is not /24 — sweep skipped, set piHost manually\n",
+                    mask.toString().c_str());
+      return false;
+    }
+    _sweepBase0 = local[0]; _sweepBase1 = local[1]; _sweepBase2 = local[2];
+    _sweepSelf  = local[3];
+    _sweepHost = 1; _sweepOpen = 0; _sweepT0 = millis(); _sweepActive = true;
+    Serial.printf("[Disc] Sweeping %d.%d.%d.1-254 for TCP:%d (chunked)...\n",
+                  _sweepBase0, _sweepBase1, _sweepBase2, LOGGER_PORT);
   }
 
-  uint8_t base0 = local[0], base1 = local[1], base2 = local[2];
-  uint8_t selfLast = local[3];
-  Serial.printf("[Disc] Sweeping %d.%d.%d.1-254 for TCP:%d...\n",
-                base0, base1, base2, LOGGER_PORT);
-  unsigned long t0 = millis();
-  int open = 0;
-
-  for (int host = 1; host <= 254; host++) {
-    if (host == selfLast) continue;  // that's us
-    IPAddress cand(base0, base1, base2, (uint8_t)host);
+  int budget = SWEEP_HOSTS_PER_TICK;
+  while (budget-- > 0 && _sweepHost <= 254) {
+    int host = _sweepHost++;
+    if (host == _sweepSelf) continue;  // that's us
+    IPAddress cand(_sweepBase0, _sweepBase1, _sweepBase2, (uint8_t)host);
     if (!tcpPortOpen(cand, LOGGER_PORT, SWEEP_PORT_TIMEOUT)) continue;
-    open++;
+    _sweepOpen++;
     // Port is open. Confirm it's actually our logger before committing —
     // anything could listen on 8080 (Grafana, another dev box, a printer).
     if (probeLogger(cand.toString())) {
       _discResolvedIp = cand.toString();
-      _discMethod = "subnet-sweep";
+      _sweepActive = false;
       Serial.printf("[Disc] Logger found by sweep: %s (%d ports open, %lums)\n",
-                    _discResolvedIp.c_str(), open, millis() - t0);
+                    _discResolvedIp.c_str(), _sweepOpen, millis() - _sweepT0);
       return true;
     }
     Serial.printf("[Disc]   %s has :%d open but isn't our logger, continuing\n",
                   cand.toString().c_str(), LOGGER_PORT);
   }
-  Serial.printf("[Disc] Sweep found nothing (%d ports open, %lums)\n",
-                open, millis() - t0);
+  if (_sweepHost > 254) {
+    _sweepActive = false;
+    Serial.printf("[Disc] Sweep found nothing (%d ports open, %lums)\n",
+                  _sweepOpen, millis() - _sweepT0);
+  }
   return false;
 }
 
@@ -356,16 +375,16 @@ String discoverLogger(const String& staticHost, const String& wifiSSID,
   //      sweep just retries every SWEEP_RETRY_MS forever while unresolved,
   //      same pacing as before, no permanent give-up.
   if (_discResolvedIp.isEmpty() &&
-      (!_discSweepEverRun || (now - _discLastSweep >= SWEEP_RETRY_MS))) {
-    _discSweepEverRun = true;
-    _discLastSweep = now;
-    if (sweepSubnet()) {
+      (_sweepActive || !_discSweepEverRun || (now - _discLastSweep >= SWEEP_RETRY_MS))) {
+    if (!_sweepActive) { _discSweepEverRun = true; _discLastSweep = now; }
+    if (sweepSubnetTick()) {
       _discMethod = "subnet-sweep";
       return _discResolvedIp;
     }
-    Serial.println("[Disc] Sweep found nothing this pass — will retry in "
-                   "~90s (or sooner if mDNS succeeds). Set piHost manually "
-                   "if the logger is on a different subnet.");
+    if (!_sweepActive)
+      Serial.println("[Disc] Sweep found nothing this pass — will retry in "
+                     "~90s (or sooner if mDNS succeeds). Set piHost manually "
+                     "if the logger is on a different subnet.");
   }
 
   return _discResolvedIp;
@@ -383,6 +402,7 @@ static void discoveryInvalidate(const String& badIp) {
     _discMethod = "none";
     _discLastAttempt = 0;  // retry immediately on the next pass
   }
+  _sweepActive = false;     // v1.19.26: any in-flight chunked sweep used the old network — drop it
   _hostCacheIp = "";        // v1.19.24: the name may have moved — force a re-query
   _hostLastQueryAt = 0;     // v1.19.25: and let it happen this cycle, not in 60s
 
