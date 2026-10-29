@@ -577,6 +577,16 @@ static bool modbusWriteBoardDO(int doIndex, bool value) {
   return modbusWriteCoil(MODBUS_BOARD_SLAVE_ID, MODBUS_BOARD_DO_START + doIndex, value);
 }
 
+// Single-bit FC02 read of one DI (diIndex 0-3) -- fastest round trip, used by
+// the stroke counter task (pulse.h). Caller holds modbusBusMutex.
+static bool modbusReadOneDI(int diIndex, bool* state, int timeoutMs = 40) {
+  if (diIndex < 0 || diIndex > 3 || !state) return false;
+  bool bit = false;
+  if (!modbusReadDiscreteInputs(MODBUS_BOARD_SLAVE_ID, MODBUS_BOARD_DI_START + diIndex, 1, &bit, timeoutMs)) return false;
+  *state = bit;
+  return true;
+}
+
 static int modbusPollBoard(ModbusBoardConfig& b, ModbusChannelReading* out, String& detectedType,
                             ModbusDigitalReading* dinOut = nullptr, ModbusDigitalReading* doutOut = nullptr) {
   if (!b.enabled) return MB_TIMEOUT; uint16_t product[1]={0};

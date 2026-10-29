@@ -59,6 +59,7 @@
 #include "modbus.h"
 #include "can.h"
 #include "scaling.h"
+#include "pulse.h"
 
 // Forward declaration — full implementation is below (near the other boot-
 // time static helpers), but webui.h (included next) also needs to call this
@@ -458,6 +459,8 @@ void setup() {
 
   Serial.println("[BOOT] Starting Modbus poll task...");
   xTaskCreatePinnedToCore(pollTask, "poll", 8192, NULL, 1, NULL, 1);
+  // DI stroke counter (pulse.h) -- sleeps on its own when no DI has it enabled.
+  xTaskCreatePinnedToCore(strokeTask, "stroke", 4096, &cfg, 1, NULL, 1);
 
   cliInit();
 
@@ -1242,6 +1245,10 @@ String buildPayload(bool bufferedFlag) {
           if (modbusDinReadings[i].valid) d["state"] = modbusDinReadings[i].state;
           else                            d["state"] = nullptr;
           d["status"] = modbusDinReadings[i].status;
+          if (cfg.modbusBoard.din[i].strokeEnabled) {
+            const char* ss; float spm = strokeSpm(i, &ss);
+            d["strokes"] = strokeCount(i, cfg); d["spm"] = spm; d["spmStatus"] = ss;
+          }
         }
         JsonArray doArr = doc.createNestedArray("modbusDigitalOutputs");
         for (int i=0;i<4;i++) {
