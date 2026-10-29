@@ -14,7 +14,7 @@
 #include <Arduino.h>
 #include <string.h>  // strncpy — used by pack*/unpack* below
 
-#define FW_VERSION "rig-module-sensors-1.19.33"
+#define FW_VERSION "rig-module-sensors-1.19.34"
 
 // =============================================================================
 //  ⚙️  BUILD SWITCHES — edit these, nothing else above the code
@@ -200,7 +200,7 @@ struct ModbusChannelConfig { bool enabled=false; String name=""; String kind="";
 // strokeEnabled/pulsesPerStroke (v1.19.33) live in their own NVS keys, NOT in
 // ModbusDigitalPacked -- changing the packed blob size would make every
 // existing unit fail the size check and lose its saved Modbus config.
-struct ModbusDigitalConfig { bool enabled=false; String name=""; bool strokeEnabled=false; int pulsesPerStroke=1; };
+struct ModbusDigitalConfig { bool enabled=false; String name=""; bool strokeEnabled=false; int pulsesPerStroke=1; int pulsesPerRev=1; };
 struct ModbusBoardConfig {
   bool enabled=true;
   String boardType="auto";
@@ -607,6 +607,7 @@ void loadConfig(Preferences& p, ModuleConfig& c) {
   for (int i = 0; i < 4; i++) {
     c.modbusBoard.din[i].strokeEnabled   = p.getBool(("stkEn" + String(i)).c_str(), false);
     c.modbusBoard.din[i].pulsesPerStroke = max(1, (int)p.getInt(("stkPp" + String(i)).c_str(), 1));
+    c.modbusBoard.din[i].pulsesPerRev    = max(1, (int)p.getInt(("stkPr" + String(i)).c_str(), 1));
   }
   {
     static CanSignalConfigPacked packed[MAX_CAN_SIGNALS];
@@ -789,6 +790,7 @@ void saveConfig(Preferences& p, ModuleConfig& c) {
     for (int i = 0; i < 4; i++) {
       p.putBool(("stkEn" + String(i)).c_str(), c.modbusBoard.din[i].strokeEnabled);
       p.putInt(("stkPp" + String(i)).c_str(), c.modbusBoard.din[i].pulsesPerStroke);
+      p.putInt(("stkPr" + String(i)).c_str(), c.modbusBoard.din[i].pulsesPerRev);
     }
   }
   {
@@ -903,6 +905,7 @@ void configToJson(ModuleConfig& c, JsonDocument& doc) {
     o["name"]    = c.modbusBoard.din[i].name;
     o["strokeEnabled"]    = c.modbusBoard.din[i].strokeEnabled;
     o["pulsesPerStroke"]  = c.modbusBoard.din[i].pulsesPerStroke;
+    o["pulsesPerRev"]     = c.modbusBoard.din[i].pulsesPerRev;
   }
   JsonArray mbDout = mb.createNestedArray("dout");
   for (int i = 0; i < 4; i++) {
@@ -1021,6 +1024,7 @@ bool configFromJson(JsonDocument& doc, ModuleConfig& c) {
         if (!o["name"].isNull())    c.modbusBoard.din[i].name    = o["name"].as<String>();
         if (!o["strokeEnabled"].isNull())   c.modbusBoard.din[i].strokeEnabled   = o["strokeEnabled"].as<bool>();
         if (!o["pulsesPerStroke"].isNull()) c.modbusBoard.din[i].pulsesPerStroke = max(1, o["pulsesPerStroke"].as<int>());
+        if (!o["pulsesPerRev"].isNull())    c.modbusBoard.din[i].pulsesPerRev    = max(1, o["pulsesPerRev"].as<int>());
         i++;
       }
     }

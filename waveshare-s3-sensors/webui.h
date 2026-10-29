@@ -462,8 +462,9 @@ static String modbusPage(ModuleConfig& cfg) {
     h += "<div class='card'><b>DI"+String(i+1)+"</b>&nbsp;<span class='small' id='mbDiState"+String(i)+"'></span>";
     h += "<label><input type='checkbox' name='mbdi"+String(i)+"en'"+String(d.enabled?" checked":"")+"> Enabled</label>";
     h += "<label>Name</label><input name='mbdi"+String(i)+"nm' value='"+_esc(d.name)+"' placeholder='e.g. Low Level Switch'>";
-    h += "<label><input type='checkbox' name='mbdi"+String(i)+"sk'"+String(d.strokeEnabled?" checked":"")+"> Count strokes</label>";
+    h += "<label><input type='checkbox' name='mbdi"+String(i)+"sk'"+String(d.strokeEnabled?" checked":"")+"> Count strokes / RPM</label>";
     h += "<label>Pulses per stroke</label><input name='mbdi"+String(i)+"pp' type='number' min='1' max='100' value='"+String(d.pulsesPerStroke)+"'>";
+    h += "<label>Pulses per revolution</label><input name='mbdi"+String(i)+"pr' type='number' min='1' max='1000' value='"+String(d.pulsesPerRev)+"'>";
     h += "<button type='button' onclick='mbResetStrokes("+String(i)+")'>Reset count</button></div>";
   }
   h += "</div><div><h4>Digital Outputs</h4>";
@@ -480,7 +481,7 @@ static String modbusPage(ModuleConfig& cfg) {
   h += "<button type='submit'>&#128190; Save Modbus Settings</button></form><script>"
        "function mbLive(){fetch('/api/modbus/live').then(r=>r.json()).then(d=>{"
        "(d.channels||[]).forEach(c=>{let e=document.getElementById('mbLive'+c.ch);if(e)e.textContent=c.value==null?' -- ('+c.status+')':' '+c.value+' '+(c.unit||'')+' / '+c.ma+'mA ('+c.status+')';});"
-       "(d.din||[]).forEach(c=>{let e=document.getElementById('mbDiState'+c.ch);if(e)e.textContent=(c.status!=='ok'?'(stale)':(c.state?'ON':'OFF'))+(c.strokes!=null?' | '+c.strokes+' strokes, '+(c.spm||0).toFixed(1)+' SPM'+(c.spmStatus==='ok'?'':' ('+c.spmStatus+')')+' @'+Math.round(d.strokeHz||0)+'Hz':'');});"
+       "(d.din||[]).forEach(c=>{let e=document.getElementById('mbDiState'+c.ch);if(e)e.textContent=(c.status!=='ok'?'(stale)':(c.state?'ON':'OFF'))+(c.strokes!=null?' | '+c.strokes+' strokes, '+(c.spm||0).toFixed(1)+' SPM'+(c.spmStatus==='ok'?'':' ('+c.spmStatus+')')+', '+(c.rpm||0).toFixed(1)+' RPM'+(c.rpmStatus==='ok'?'':' ('+c.rpmStatus+')')+' @'+Math.round(d.strokeHz||0)+'Hz':'');});"
        "(d.dout||[]).forEach(c=>{let e=document.getElementById('mbDoState'+c.ch);if(e)e.textContent=c.status!=='ok'?'(stale)':(c.state?'ON':'OFF');});"
        "});}"
        "setInterval(mbLive,2000);mbLive();"
@@ -913,7 +914,7 @@ function fetchLive(){
         let st = ok ? (c.state ? 'ON' : 'OFF') : '--';
         let cls = c.status==='ok' ? 'ok' : (c.status==='stale' ? 'stale' : 'timeout');
         t += '<tr><td>'+(c.name||'')+'</td><td>'+(title.indexOf('Input')>=0?'DI':'DO')+(c.ch+1)+'</td>';
-        t += '<td class="'+(ok&&c.state?'ok':'')+'"><b>'+st+'</b>'+(c.strokes!=null?' &mdash; <b>'+c.strokes+'</b> strokes, '+(c.spm||0).toFixed(1)+' SPM'+(c.spmStatus==='ok'?'':' ('+c.spmStatus+')'):'')+'</td><td class="'+cls+'">'+c.status+'</td></tr>';
+        t += '<td class="'+(ok&&c.state?'ok':'')+'"><b>'+st+'</b>'+(c.strokes!=null?' &mdash; <b>'+c.strokes+'</b> strokes, '+(c.spm||0).toFixed(1)+' SPM'+(c.spmStatus==='ok'?'':' ('+c.spmStatus+')')+', <b>'+(c.rpm||0).toFixed(1)+'</b> RPM'+(c.rpmStatus==='ok'?'':' ('+c.rpmStatus+')'):'')+'</td><td class="'+cls+'">'+c.status+'</td></tr>';
       });
       return t + '</table>';
     };
@@ -1555,11 +1556,11 @@ static void handleModbusListen() {
   _srv->send(200, "application/json", out);
 }
 static void handleModbusLive() {
-  DynamicJsonDocument doc(3072); JsonArray a=doc.createNestedArray("channels");
+  DynamicJsonDocument doc(3584); JsonArray a=doc.createNestedArray("channels");
   for(int i=0;i<MAX_MODBUS_CHANNELS;i++){if(!_cfg->modbusBoard.channels[i].enabled)continue;JsonObject o=a.createNestedObject();o["ch"]=i;o["name"]=_cfg->modbusBoard.channels[i].name;o["kind"]=_cfg->modbusBoard.channels[i].kind;o["unit"]=_cfg->modbusBoard.channels[i].unit;o["ma"]=modbusReadings[i].hasValue?modbusReadings[i].mA:(float)0;o["value"]=modbusReadings[i].hasValue?modbusReadings[i].value:(float)0;if(!modbusReadings[i].hasValue){o["ma"]=nullptr;o["value"]=nullptr;}o["status"]=modbusReadings[i].status;}
   JsonArray din=doc.createNestedArray("din");
   for(int i=0;i<4;i++){if(!_cfg->modbusBoard.din[i].enabled)continue;JsonObject o=din.createNestedObject();o["ch"]=i;if(modbusDinReadings[i].valid)o["state"]=modbusDinReadings[i].state;else o["state"]=nullptr;o["status"]=modbusDinReadings[i].status;
-    if(_cfg->modbusBoard.din[i].strokeEnabled){const char* ss;float spm=strokeSpm(i,&ss);o["strokes"]=strokeCount(i,*_cfg);o["spm"]=spm;o["spmStatus"]=ss;}}
+    if(_cfg->modbusBoard.din[i].strokeEnabled){const char* ss;float spm=strokeSpm(i,&ss);o["strokes"]=strokeCount(i,*_cfg);o["spm"]=spm;o["spmStatus"]=ss;const char* rs;float rpm=strokeRpm(i,*_cfg,&rs);o["rpm"]=rpm;o["rpmStatus"]=rs;}}
   doc["strokeHz"]=strokePollRateHz();
   JsonArray dout=doc.createNestedArray("dout");
   for(int i=0;i<4;i++){if(!_cfg->modbusBoard.dout[i].enabled)continue;JsonObject o=dout.createNestedObject();o["ch"]=i;if(modbusDoutReadings[i].valid)o["state"]=modbusDoutReadings[i].state;else o["state"]=nullptr;o["status"]=modbusDoutReadings[i].status;}
@@ -1569,7 +1570,8 @@ static void handleModbusSave() {
   _cfg->modbusBoard.enabled=_srv->hasArg("enabled"); if(_srv->hasArg("boardType"))_cfg->modbusBoard.boardType=_srv->arg("boardType");
   for(int i=0;i<MAX_MODBUS_CHANNELS;i++){String p="mb"+String(i);auto& c=_cfg->modbusBoard.channels[i];c.enabled=_srv->hasArg((p+"en").c_str());if(_srv->hasArg((p+"nm").c_str()))c.name=_srv->arg((p+"nm").c_str());if(_srv->hasArg((p+"kd").c_str()))c.kind=_srv->arg((p+"kd").c_str());if(_srv->hasArg((p+"ut").c_str()))c.unit=_srv->arg((p+"ut").c_str());if(_srv->hasArg((p+"lo").c_str()))c.engMin=_srv->arg((p+"lo").c_str()).toFloat();if(_srv->hasArg((p+"hi").c_str()))c.engMax=_srv->arg((p+"hi").c_str()).toFloat();}
   for(int i=0;i<4;i++){String p="mbdi"+String(i);auto& d=_cfg->modbusBoard.din[i];d.enabled=_srv->hasArg((p+"en").c_str());if(_srv->hasArg((p+"nm").c_str()))d.name=_srv->arg((p+"nm").c_str());
-    d.strokeEnabled=_srv->hasArg((p+"sk").c_str());if(_srv->hasArg((p+"pp").c_str()))d.pulsesPerStroke=constrain(_srv->arg((p+"pp").c_str()).toInt(),1,100);}
+    d.strokeEnabled=_srv->hasArg((p+"sk").c_str());if(_srv->hasArg((p+"pp").c_str()))d.pulsesPerStroke=constrain(_srv->arg((p+"pp").c_str()).toInt(),1,100);
+    if(_srv->hasArg((p+"pr").c_str()))d.pulsesPerRev=constrain(_srv->arg((p+"pr").c_str()).toInt(),1,1000);}
   strokeConfigChanged(*_cfg);
   for(int i=0;i<4;i++){String p="mbdo"+String(i);auto& d=_cfg->modbusBoard.dout[i];d.enabled=_srv->hasArg((p+"en").c_str());if(_srv->hasArg((p+"nm").c_str()))d.name=_srv->arg((p+"nm").c_str());}
   saveConfig(*_prefs,*_cfg);_srv->sendHeader("Location","/modbus");_srv->send(302,"text/plain","");

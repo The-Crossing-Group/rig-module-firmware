@@ -1248,6 +1248,8 @@ String buildPayload(bool bufferedFlag) {
           if (cfg.modbusBoard.din[i].strokeEnabled) {
             const char* ss; float spm = strokeSpm(i, &ss);
             d["strokes"] = strokeCount(i, cfg); d["spm"] = spm; d["spmStatus"] = ss;
+            const char* rs; float rpm = strokeRpm(i, cfg, &rs);
+            d["rpm"] = rpm; d["rpmStatus"] = rs;
           }
         }
         JsonArray doArr = doc.createNestedArray("modbusDigitalOutputs");

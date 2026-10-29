@@ -10,6 +10,7 @@
 // the input is ON during a read. Reads happen roughly every 20-40ms, so a
 // pulse shorter than that can be missed. The measured read rate is exposed
 // (strokePollHz) so this can be checked on the real pump, not guessed.
+// Also derives shaft RPM from the pulse interval (pulsesPerRev, per DI).
 // Counts live in RAM: they reset on reboot or via the Reset button.
 // =============================================================================
 #pragma once
@@ -31,6 +32,8 @@ struct StrokeState {
   volatile uint32_t lastStrokeUs = 0;
   volatile uint32_t periodUs     = 0;   // time between the two most recent strokes
   volatile bool     haveStroke   = false;
+  volatile uint32_t edgePeriodUs = 0;   // time between the two most recent pulses (any pulse, for RPM)
+  volatile bool     haveEdgePeriod = false;
 };
 static StrokeState _stroke[4];
 static volatile float _strokePollHz = 0.0f;
@@ -38,7 +41,7 @@ static volatile float _strokePollHz = 0.0f;
 static void strokeReset(int i) {
   if (i < 0 || i > 3) return;
   StrokeState& s = _stroke[i];
-  s.edges = 0; s.periodUs = 0; s.haveStroke = false; s.haveLast = false;
+  s.edges = 0; s.periodUs = 0; s.haveStroke = false; s.haveLast = false; s.edgePeriodUs = 0; s.haveEdgePeriod = false;
 }
 
 // Call after saving config -- clears state for channels no longer counting.
@@ -63,6 +66,21 @@ static float strokeSpm(int i, const char** status) {
   if (since > lim) { *status = "stopped"; return 0.0f; }
   *status = "ok";
   return 60000000.0f / (float)s.periodUs;
+}
+
+// Shaft RPM = 60 / (seconds between pulses x pulses per revolution).
+// "stale" until two pulses were seen; "stopped" (0) if no pulse for
+// max(3s, 2.5x the last pulse interval).
+static float strokeRpm(int i, ModuleConfig& cfg, const char** status) {
+  StrokeState& s = _stroke[i];
+  if (!s.haveEdgePeriod || s.edgePeriodUs == 0) { *status = "stale"; return 0.0f; }
+  uint32_t since = micros() - s.lastEdgeUs;
+  uint32_t lim = (uint32_t)(s.edgePeriodUs * 2.5f);
+  if (lim < STROKE_MIN_TIMEOUT_US) lim = STROKE_MIN_TIMEOUT_US;
+  if (since > lim) { *status = "stopped"; return 0.0f; }
+  *status = "ok";
+  int ppr = max(1, cfg.modbusBoard.din[i].pulsesPerRev);
+  return 60000000.0f / ((float)s.edgePeriodUs * (float)ppr);
 }
 
 static float strokePollRateHz() { return _strokePollHz; }
@@ -95,6 +113,7 @@ void strokeTask(void* param) {
       if (!ok) continue;   // keep previous state; don't invent edges from a failed read
       StrokeState& s = _stroke[i];
       if (s.haveLast && !s.last && state && (now - s.lastEdgeUs) >= STROKE_DEBOUNCE_US) {
+        if (s.edges > 0 && s.lastEdgeUs != 0) { s.edgePeriodUs = now - s.lastEdgeUs; s.haveEdgePeriod = true; }
         s.lastEdgeUs = now;
         s.edges = s.edges + 1;
         int pps = max(1, cfg->modbusBoard.din[i].pulsesPerStroke);
