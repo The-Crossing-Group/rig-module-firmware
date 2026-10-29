@@ -19,6 +19,7 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <Update.h>
+#include <esp_ota_ops.h>
 #include <HTTPClient.h>
 #include "config.h"
 
@@ -1062,7 +1063,8 @@ static String sysPage(ModuleConfig& cfg) {
   h += "<label>Upload firmware file (.bin):</label><div class='row'>";
   h += "<input type='file' id='fwFile' accept='.bin,application/octet-stream'>";
   h += "<button type='button' onclick='doFwUpload()'>Upload &amp; Update</button></div>";
-  h += "<div id='fwStatus' class='small' style='margin-top:6px'></div>";
+  h += "<div id='fwStatus' class='small' style='margin-top:6px;white-space:pre-wrap'></div>";
+  h += "<div id='fwLast' class='small' style='margin-top:6px;white-space:pre-wrap'></div>";
   h += "<details style='margin-top:8px'><summary class='small'>Update from URL</summary>";
   h += "<div class='row' style='margin-top:6px'><input id='otaUrl' placeholder='http://...'>&nbsp;";
   h += "<button onclick='doOTA()'>Update</button></div></details></div>";
@@ -1094,22 +1096,42 @@ fetch('/api/status?buf=1').then(r=>r.json()).then(d=>{
   if(tracked!==real) txt='<span style="color:#e74c3c">&#9888; MISMATCH — '+txt+' (tracked count is wrong, disk is the truth)</span>';
   document.getElementById('bufInfo').innerHTML = txt;
 });
+function showFwLast(){
+  fetch('/api/ota/last').then(r=>r.json()).then(d=>{
+    let e=document.getElementById('fwLast'); if(!e)return;
+    e.textContent=d.msg?('Last update attempt ('+d.ageS+'s ago): '+d.msg):'';
+    e.style.color=d.msg?(d.ok?'#2ecc71':'#e74c3c'):'';
+  }).catch(()=>{});
+}
 function doOTA(){
   let url=document.getElementById('otaUrl').value;
   if(!url)return alert('Enter URL');
-  fetch('/api/ota?url='+encodeURIComponent(url)).then(r=>r.text()).then(t=>alert(t));
+  fetch('/api/ota?url='+encodeURIComponent(url)).then(r=>r.text()).then(t=>{
+    document.getElementById('fwStatus').textContent=t;
+    let n=0,iv=setInterval(()=>{showFwLast();if(++n>30)clearInterval(iv);},2000);
+  });
 }
+showFwLast();
 function doFwUpload(){
   let f=document.getElementById('fwFile').files[0];
   let box=document.getElementById('fwStatus');
   if(!f){box.textContent='Choose a .bin file first.';return;}
   if(!confirm('Flash '+f.name+'? Board reboots when done.'))return;
+  box.style.color='';
   box.textContent='Uploading...';
-  let x=new XMLHttpRequest();
+  let x=new XMLHttpRequest(), t0=Date.now(), sent=0, tot=0;
   x.open('POST','/update');
-  x.upload.onprogress=function(e){if(e.lengthComputable)box.textContent='Uploading '+Math.round(e.loaded*100/e.total)+'%';};
-  x.onload=function(){box.textContent=x.responseText;};
-  x.onerror=function(){box.textContent='Upload failed — check the file is a .bin firmware image.';};
+  x.timeout=300000;
+  x.upload.onprogress=function(e){if(e.lengthComputable){sent=e.loaded;tot=e.total;box.textContent='Uploading '+Math.round(e.loaded*100/e.total)+'%';}};
+  function lost(why){
+    box.style.color='#e74c3c';
+    box.textContent='Upload failed: '+why+' after '+sent+' of '+tot+' bytes ('+Math.round((Date.now()-t0)/1000)+'s). The module could not reply, so this is most likely weak WiFi or the module restarting. The module\'s own reason appears below once it is reachable.';
+    setTimeout(showFwLast,3000);setTimeout(showFwLast,10000);
+  }
+  x.onload=function(){box.style.color=(x.status===200)?'#2ecc71':'#e74c3c';box.textContent=(x.status===200?'':'HTTP '+x.status+': ')+x.responseText;if(x.status!==200)showFwLast();};
+  x.onerror=function(){lost('connection to the module was lost');};
+  x.ontimeout=function(){lost('no reply from the module for 5 minutes');};
+  x.onabort=function(){lost('upload was cancelled');};
   // MUST be multipart/form-data — ESP32 WebServer only fires the upload
   // handler for multipart bodies; a raw x.send(f) never reaches it and the
   // route answers "Update FAILED" without the handler ever running.
@@ -1826,67 +1848,164 @@ static void handleModbusAutoDetect() {
   }
 }
 
+// ---- Firmware update result reporting (v1.19.36) ---------------------------
+// Modules in the field have no serial access, so every update attempt (file
+// upload OR from-URL) records a plain-language result here. The upload reply
+// carries it, and GET /api/ota/last returns it so the page can still show WHY
+// after a dropped connection. RAM only -- a successful update reboots anyway.
+static String   _fwLastResult = "";
+static bool     _fwLastOk = false;
+static uint32_t _fwLastMs = 0;
+static bool     _fwRan = false;       // upload handler actually started this request
+static bool     _fwUploadOk = false;
+static size_t   _fwBytes = 0;
+static String   _fwName = "";
+static int      _fwLen = 0;           // Content-Length of the upload request
+
+static void fwRecord(bool ok, const String& msg) {
+  _fwLastOk = ok; _fwLastResult = msg; _fwLastMs = millis();
+  Serial.println("[FwUpdate] " + msg);
+}
+static const char* fwErrHint(uint8_t e) {
+  switch (e) {
+    case UPDATE_ERROR_SPACE:        return "Image is bigger than the update slot. Wrong file for this module, or the module needs a USB reflash with the current partition layout.";
+    case UPDATE_ERROR_MAGIC_BYTE:   return "Not an ESP32 app image. Upload the -ota.bin file, not the bootloader, partitions or merged bin.";
+    case UPDATE_ERROR_NO_PARTITION: return "No spare update slot on this module (partition layout has only one app slot). It needs a USB flash once.";
+    case UPDATE_ERROR_STREAM:       return "Data stopped arriving mid-upload. Weak WiFi: move closer or retry.";
+    case UPDATE_ERROR_WRITE:
+    case UPDATE_ERROR_ERASE:
+    case UPDATE_ERROR_READ:         return "Flash fault while writing. Retry once; if it repeats the module may need a USB reflash.";
+    case UPDATE_ERROR_ACTIVATE:     return "Image written but could not be activated (bad image). Old firmware is still running.";
+    case UPDATE_ERROR_MD5:
+    case UPDATE_ERROR_SHA256:       return "Checksum failed: the file arrived corrupted. Retry.";
+    case UPDATE_ERROR_ABORT:        return "Update was aborted.";
+    default:                        return "";
+  }
+}
+static String fwSlotInfo() {
+  const esp_partition_t* p = esp_ota_get_next_update_partition(NULL);
+  if (!p) return "no update slot found";
+  return String(p->label) + " slot " + String((unsigned)p->size) + " B";
+}
+static String fwCtx() {
+  return " [file " + (_fwName.length() ? _fwName : String("?")) + ", " + String(_fwLen) + " B sent, " +
+         String((unsigned)_fwBytes) + " B written, " + fwSlotInfo() + ", free heap " + String(ESP.getFreeHeap()) +
+         " B, WiFi RSSI " + String(WiFi.RSSI()) + " dBm, running v" + String(FW_VERSION) + "]";
+}
+
+static void handleOtaLast() {
+  JsonDocument doc;
+  doc["msg"] = _fwLastResult;
+  doc["ok"] = _fwLastOk;
+  doc["ageS"] = _fwLastResult.length() ? (int)((millis() - _fwLastMs) / 1000) : -1;
+  String out; serializeJson(doc, out);
+  _srv->send(200, "application/json", out);
+}
+
 static void handleOTA() {
   String url = _srv->hasArg("url") ? _srv->arg("url") : "";
   if (url.isEmpty()) { _srv->send(400,"text/plain","No URL"); return; }
-  _srv->send(200,"text/plain","OTA starting from: "+url+"\nCheck serial for progress.");
+  fwRecord(false, "Update from URL started: " + url + " (still running...)");
+  _srv->send(200,"text/plain","Update from URL started. Result will show under Firmware Update.");
   delay(500);
   HTTPClient http;
+  http.setConnectTimeout(8000);
   http.begin(url);
   int code = http.GET();
   if (code == 200) {
     int len = http.getSize();
     WiFiClient* stream = http.getStreamPtr();
-    if (!Update.begin(len)) { Serial.println("[OTA] Not enough space"); http.end(); return; }
-    size_t written = Update.writeStream(*stream);
-    if (written == (size_t)len && Update.end()) {
-      Serial.println("[OTA] Success, rebooting");
-      ESP.restart();
+    if (len <= 0) {
+      fwRecord(false, "URL update FAILED: server did not send a file size (chunked reply). Use a plain static file URL.");
     } else {
-      Serial.printf("[OTA] Failed: wrote %d of %d\n", written, len);
-      Update.printError(Serial);
+      if (Update.isRunning()) Update.abort();
+      if (!Update.begin(len)) {
+        uint8_t e = Update.getError();
+        fwRecord(false, "URL update FAILED at start: " + String(Update.errorString()) + " (" + String(len) + " B file, " + fwSlotInfo() + "). " + fwErrHint(e));
+      } else {
+        size_t written = Update.writeStream(*stream);
+        if (written == (size_t)len && Update.end()) {
+          fwRecord(true, "URL update OK: " + String((unsigned)written) + " B written, rebooting.");
+          delay(500);
+          ESP.restart();
+        } else {
+          uint8_t e = Update.getError();
+          String es = Update.errorString();
+          Update.abort();
+          fwRecord(false, "URL update FAILED: wrote " + String((unsigned)written) + " of " + String(len) + " B. " + es + ". " + fwErrHint(e));
+        }
+      }
     }
+  } else if (code < 0) {
+    fwRecord(false, "URL update FAILED: could not connect (" + http.errorToString(code) + "). Check the URL, that the module can reach that host, and use http:// (https is not supported).");
   } else {
-    Serial.printf("[OTA] HTTP %d from %s\n", code, url.c_str());
+    fwRecord(false, "URL update FAILED: server answered HTTP " + String(code) + " for " + url);
   }
   http.end();
 }
 
-// POST /update — multipart file upload of a compiled .bin firmware image.
-// Flash-write progress goes to serial; the browser gets one final
-// pass/fail line (XHR progress covers the upload half). Update.begin()
-// automatically targets the inactive OTA slot when the partition scheme
-// has one; on single-app schemes it rewrites the running app in place —
-// a power cut mid-flash then needs a USB reflash, same as any update.
-static bool _fwUploadOk = false;
+// POST /update -- multipart file upload of a compiled .bin firmware image.
+// Update.begin() targets the inactive OTA slot when the partition scheme has
+// one. Every failure path records a plain-language reason (fwRecord) that goes
+// back to the browser and is kept for GET /api/ota/last.
 static void handleUpdateUpload() {
   // Core 3.3.x: WebServer::upload is a method, not a public member (2.x).
   HTTPUpload& upload = _srv->upload();
   if (upload.status == UPLOAD_FILE_START) {
-    Serial.printf("[FwUpdate] Start: %s\n", upload.filename.c_str());
+    _fwRan = true; _fwUploadOk = false; _fwBytes = 0;
+    _fwName = upload.filename; _fwLen = _srv->clientContentLength();
+    // A previous upload that was interrupted leaves the Update session open and
+    // every later begin() then fails ("already running") until reboot. Clear it.
+    if (Update.isRunning()) Update.abort();
     _fwUploadOk = Update.begin(UPDATE_SIZE_UNKNOWN);
-    if (!_fwUploadOk) Update.printError(Serial);
+    if (_fwUploadOk) fwRecord(false, "Upload in progress..." + fwCtx());
+    else {
+      uint8_t e = Update.getError();
+      fwRecord(false, "FAILED at start: " + String(e ? Update.errorString() : "could not open the update slot") + ". " + fwErrHint(e) + fwCtx());
+    }
   } else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (_fwUploadOk && Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-      _fwUploadOk = false;
-      Update.printError(Serial);
+    if (_fwUploadOk) {
+      size_t w = Update.write(upload.buf, upload.currentSize);
+      if (w != upload.currentSize) {
+        uint8_t e = Update.getError();
+        String es = Update.errorString();
+        _fwUploadOk = false;
+        Update.abort();
+        fwRecord(false, "FAILED while writing at byte " + String((unsigned)_fwBytes) + ": " + es + ". " + fwErrHint(e) + fwCtx());
+      } else {
+        _fwBytes += w;
+      }
     }
   } else if (upload.status == UPLOAD_FILE_END) {
-    if (_fwUploadOk && Update.end(true)) {
-      Serial.printf("[FwUpdate] OK: %u bytes written\n", upload.totalSize);
-    } else {
-      _fwUploadOk = false;
-      Update.printError(Serial);
+    if (_fwUploadOk) {
+      if (Update.end(true)) {
+        fwRecord(true, "Update OK: " + String((unsigned)upload.totalSize) + " B written." + fwCtx());
+      } else {
+        uint8_t e = Update.getError();
+        String es = Update.errorString();
+        _fwUploadOk = false;
+        fwRecord(false, "FAILED finishing the update (image rejected): " + es + ". " + fwErrHint(e) + fwCtx());
+      }
     }
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (Update.isRunning()) Update.abort();
+    _fwUploadOk = false;
+    fwRecord(false, "FAILED: upload was cut off after " + String((unsigned)_fwBytes) + " of ~" + String(_fwLen) + " B. The connection dropped (weak WiFi or browser closed). Old firmware still running; retry." + fwCtx());
   }
 }
 static void handleUpdateDone() {
   if (_fwUploadOk) {
-    _srv->send(200, "text/plain", "Update OK — rebooting, reload this page in ~20s.");
+    _srv->send(200, "text/plain", "Update OK — rebooting, reload this page in ~20s.\n" + _fwLastResult);
     delay(1000);
     ESP.restart();
   } else {
-    _srv->send(500, "text/plain", "Update FAILED — old firmware still running. Check serial log.");
+    String m = _fwLastResult;
+    if (!_fwRan || m.length() == 0) {
+      m = "FAILED: no file data reached the module (empty or non-multipart upload). Choose the .bin file again." + fwCtx();
+      fwRecord(false, m);
+    }
+    _fwRan = false;
+    _srv->send(500, "text/plain", "Update FAILED — old firmware still running.\n" + m);
   }
 }
 
@@ -1995,6 +2114,7 @@ void setupWebRoutes(WebServer& srv, ModuleConfig& cfg, Preferences& prefs,
   srv.on("/api/modbus/probe", HTTP_GET, handleModbusProbe);
   srv.on("/api/wifi/scan",    HTTP_GET, handleWifiScan);
   srv.on("/api/ota",          HTTP_GET, handleOTA);
+  srv.on("/api/ota/last",     HTTP_GET, handleOtaLast);
   srv.on("/update",           HTTP_POST, handleUpdateDone, handleUpdateUpload);
 
   // POST APIs
