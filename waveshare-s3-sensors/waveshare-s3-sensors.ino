@@ -460,7 +460,7 @@ void setup() {
   Serial.println("[BOOT] Starting Modbus poll task...");
   xTaskCreatePinnedToCore(pollTask, "poll", 8192, NULL, 1, NULL, 1);
   // DI stroke counter (pulse.h) -- sleeps on its own when no DI has it enabled.
-  xTaskCreatePinnedToCore(strokeTask, "stroke", 4096, &cfg, 1, NULL, 1);
+  xTaskCreatePinnedToCore(strokeTask, "stroke", 4096, &cfg, 2, NULL, 1);   // prio 2: wins the bus at the next transaction boundary
 
   cliInit();
 
@@ -976,6 +976,7 @@ void pollTask(void* param) {
     bool polledAny = false;
     bool printNow = (millis() - lastSummaryMs >= POLL_SUMMARY_MS);
 
+    if (cfg.modbusBoard.enabled) strokeGate();   // v1.19.35: yield bus priority to the DI stroke counter
     if (cfg.modbusBoard.enabled && xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       polledAny = true;
       int boardRc = modbusPollBoard(cfg.modbusBoard, modbusReadings, modbusDetectedType, modbusDinReadings, modbusDoutReadings);
@@ -1003,6 +1004,7 @@ void pollTask(void* param) {
 
       float raw = 0, value = 0;
       int rc;
+      strokeGate();
       if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         // verbose=true: prints every RS485 TX/RX byte for this poll to
         // Serial (see modbusSend()/modbusReceive() in modbus.h) — handy

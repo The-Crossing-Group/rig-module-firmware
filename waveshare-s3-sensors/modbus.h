@@ -144,13 +144,13 @@ static void modbusLogTransaction(uint8_t slaveId, uint8_t funcCode,
 // misread as the response to the new query, corrupting it and failing
 // CRC even though the wiring/baud are actually fine. Capped so a noisy/
 // continuously-chattering bus can't hang this forever.
-static void modbusFlushRx() {
-  unsigned long quietUntil = millis() + 8;
+static void modbusFlushRx(unsigned long quietMs = 8) {
+  unsigned long quietUntil = millis() + quietMs;
   unsigned long hardDeadline = millis() + 80;
   while (millis() < quietUntil && millis() < hardDeadline) {
     if (_mbSerial->available()) {
       _mbSerial->read();
-      quietUntil = millis() + 8; // saw a byte, reset the quiet timer
+      quietUntil = millis() + quietMs; // saw a byte, reset the quiet timer
     }
   }
 }
@@ -492,9 +492,9 @@ static const ModbusBoardPreset* modbusFindPreset(const String& type) {
 // (waveshare-s3/) variant's modbusReadDiscreteInputs() — reimplemented
 // here rather than shared since this file's modbusSend/modbusReceive are
 // file-local statics, not exported across variants.
-static bool modbusReadDiscreteInputs(uint8_t slaveId, uint16_t startAddr, uint8_t count, bool* bits, int timeoutMs = 300) {
+static bool modbusReadDiscreteInputs(uint8_t slaveId, uint16_t startAddr, uint8_t count, bool* bits, int timeoutMs = 300, unsigned long flushQuietMs = 8) {
   if (!_mbSerial) return false;
-  modbusFlushRx();
+  modbusFlushRx(flushQuietMs);
   uint8_t req[8];
   req[0] = slaveId; req[1] = 0x02;
   req[2] = startAddr >> 8; req[3] = startAddr & 0xFF;
@@ -579,10 +579,13 @@ static bool modbusWriteBoardDO(int doIndex, bool value) {
 
 // Single-bit FC02 read of one DI (diIndex 0-3) -- fastest round trip, used by
 // the stroke counter task (pulse.h). Caller holds modbusBusMutex.
-static bool modbusReadOneDI(int diIndex, bool* state, int timeoutMs = 40) {
+// flushQuietMs=4 (vs 8 for normal polls): ~3.5 char times at 9600, the Modbus RTU
+// inter-frame gap. The stroke task owns the bus for the read, so it doesn't need
+// the longer settle -- saves ~4ms per read.
+static bool modbusReadOneDI(int diIndex, bool* state, int timeoutMs = 40, unsigned long flushQuietMs = 4) {
   if (diIndex < 0 || diIndex > 3 || !state) return false;
   bool bit = false;
-  if (!modbusReadDiscreteInputs(MODBUS_BOARD_SLAVE_ID, MODBUS_BOARD_DI_START + diIndex, 1, &bit, timeoutMs)) return false;
+  if (!modbusReadDiscreteInputs(MODBUS_BOARD_SLAVE_ID, MODBUS_BOARD_DI_START + diIndex, 1, &bit, timeoutMs, flushQuietMs)) return false;
   *state = bit;
   return true;
 }

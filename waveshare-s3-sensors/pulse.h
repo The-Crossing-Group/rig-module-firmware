@@ -22,6 +22,22 @@ extern SemaphoreHandle_t modbusBusMutex;
 extern String modbusDetectedType;
 
 #define STROKE_DEBOUNCE_US 30000UL   // ignore a 2nd rising edge within 30ms
+#define STROKE_TARGET_HZ   40        // DI reads per second (total, shared by enabled DIs)
+#define STROKE_POLL_EVERY  16        // regular sensor polling gets ONE bus turn per this many stroke reads
+#define STROKE_GATE_WAIT_MS 600      // poll task never waits longer than this for a turn
+
+// Bus priority: while the stroke task is active it keeps a fixed 1000/TARGET ms
+// cadence and the regular sensor poll (pollTask) only gets a turn every
+// STROKE_POLL_EVERY reads (~0.4s). Without this the flat-out poll loop alternates
+// with the stroke reads and the read rate falls far below target.
+static volatile bool _strokeActive = false;
+static volatile int  _strokePollToken = 0;
+static void strokeGate() {       // called by pollTask before each bus transaction group
+  if (!_strokeActive) return;
+  uint32_t t0 = millis();
+  while (_strokeActive && !_strokePollToken && (millis() - t0) < STROKE_GATE_WAIT_MS) vTaskDelay(1);
+  _strokePollToken = 0;
+}
 #define STROKE_MIN_TIMEOUT_US 3000000UL
 
 struct StrokeState {
@@ -88,19 +104,25 @@ static float strokePollRateHz() { return _strokePollHz; }
 void strokeTask(void* param) {
   ModuleConfig* cfg = (ModuleConfig*)param;
   uint32_t lastLoopUs = 0;
+  TickType_t slotTick = xTaskGetTickCount();
+  int readsSinceToken = 0;
+  const TickType_t period = pdMS_TO_TICKS(1000 / STROKE_TARGET_HZ);
   for (;;) {
     bool any = false;
     for (int i = 0; i < 4; i++)
       if (cfg->modbusBoard.din[i].enabled && cfg->modbusBoard.din[i].strokeEnabled) any = true;
     // No TX while bus-listen is on; DI only exists on the AMIDJ14.
     if (!any || modbusListenOn || !cfg->modbusBoard.enabled || !modbusDetectedType.equals("amidj14")) {
+      _strokeActive = false;
       vTaskDelay(pdMS_TO_TICKS(250));
+      slotTick = xTaskGetTickCount();
       continue;
     }
+    _strokeActive = true;
     for (int i = 0; i < 4; i++) {
       if (!(cfg->modbusBoard.din[i].enabled && cfg->modbusBoard.din[i].strokeEnabled)) continue;
       bool state = false, ok = false;
-      if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(150)) == pdTRUE) {
+      if (xSemaphoreTake(modbusBusMutex, pdMS_TO_TICKS(800)) == pdTRUE) {
         ok = modbusReadOneDI(i, &state, 40);
         xSemaphoreGive(modbusBusMutex);
       }
@@ -124,7 +146,16 @@ void strokeTask(void* param) {
         }
       }
       s.last = state; s.haveLast = true;
+
+      // Hand the poll task one bus turn every STROKE_POLL_EVERY reads.
+      if (++readsSinceToken >= STROKE_POLL_EVERY) { readsSinceToken = 0; _strokePollToken = 1; }
+      // Fixed cadence: next read exactly one period after the last slot. If we
+      // ran late (e.g. a slow radar poll held the bus) resync instead of
+      // bursting to catch up, so we never hog the bus.
+      TickType_t nowT = xTaskGetTickCount();
+      TickType_t nextT = slotTick + period;
+      if ((int32_t)(nowT - nextT) >= 0) slotTick = nowT;
+      else { vTaskDelay(nextT - nowT); slotTick = nextT; }
     }
-    vTaskDelay(1);
   }
 }
